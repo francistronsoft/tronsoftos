@@ -75,33 +75,26 @@ if [ "$DEPLOYMENT_MODE" = "ha" ]; then
 fi
 
 SERVER_IP="$(ask "IP deste servidor na rede do cliente" "127.0.0.1")"
-FIREBIRD_MODE="container"
-if yes_no "Instalar/usar Firebird 2.5.9 no host Debian? (s/n)" "s"; then
-  FIREBIRD_MODE="host"
-fi
+FIREBIRD_MODE="host"
+echo "Firebird 2.5.9 sera instalado/usado no host Debian."
 
 TRONFIRE_PANEL_PORT="$(ask "Porta do painel TronFire" "8081")"
 TRONSOFTOS_PORT="$(ask "Porta do painel TronSoftOS" "8080")"
-FIREBIRD_PORT="$(ask "Porta Firebird" "3050")"
+FIREBIRD_PORT="3050"
+echo "Porta Firebird padrao: $FIREBIRD_PORT"
 
-FIREBIRD_PASSWORD="$(ask_secret "Senha SYSDBA/Firebird")"
-POSTGRES_PASSWORD="$(ask_secret "Senha PostgreSQL do TronFire")"
+FIREBIRD_PASSWORD="masterkey"
+POSTGRES_PASSWORD="su61613225Ts"
 SESSION_SECRET="$(ask_secret "Chave de sessao do TronFire")"
 INTERNAL_TOKEN="$(ask_secret "Token interno TronSoftOS -> TronFire")"
 
 RCLONE_REMOTE=""
 RCLONE_PATH="tronsoftos/backups"
-if yes_no "Configurar upload de backups por rclone agora? (s/n)" "n"; then
-  RCLONE_REMOTE="$(ask "Nome do remote rclone" "google-drive")"
-  RCLONE_PATH="$(ask "Pasta remota dos backups" "tronsoftos/backups")"
-fi
+echo "Rclone sera configurado depois no painel do TronSoftOS."
 
 CLOUDFLARE_RECORD_NAME=""
 CLOUDFLARE_TARGET_IP=""
-if yes_no "Configurar dados basicos de Cloudflare agora? (s/n)" "n"; then
-  CLOUDFLARE_RECORD_NAME="$(ask "DNS publico do cliente" "cliente.exemplo.com.br")"
-  CLOUDFLARE_TARGET_IP="$(ask "IP/VIP apontado no Cloudflare" "$SERVER_IP")"
-fi
+echo "Cloudflare sera configurado depois no painel do TronSoftOS."
 
 HA_INTERFACE=""
 HA_VIP=""

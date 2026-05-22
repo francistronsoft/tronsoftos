@@ -17,6 +17,13 @@ if [ ! -f "$PACKAGE" ]; then
   exit 66
 fi
 
+if ! gzip -t "$PACKAGE" >/dev/null 2>&1; then
+  echo "Pacote Firebird invalido: $PACKAGE" >&2
+  echo "O arquivo nao esta em formato gzip. O link pode ter baixado HTML/erro em vez do instalador." >&2
+  echo "Apague o arquivo e rode novamente: cd $APP_DIR/apps/tronfire && bash scripts/install-assets.sh" >&2
+  exit 68
+fi
+
 apt-get update
 apt-get install -y ca-certificates libstdc++6 libncurses5 libtommath1 procps net-tools bash xz-utils findutils
 touch /etc/services /etc/inetd.conf

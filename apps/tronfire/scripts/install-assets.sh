@@ -41,6 +41,19 @@ download() {
   mv "$dest.tmp" "$dest"
 }
 
+check_gzip() {
+  local dest="$1"
+  local label="$2"
+  if ! gzip -t "$dest" >/dev/null 2>&1; then
+    echo "[assets] Arquivo invalido para $label: $dest" >&2
+    echo "[assets] O download nao parece ser um .tar.gz valido. Verifique se o link e publico/direto." >&2
+    echo "[assets] Primeiros bytes do arquivo:" >&2
+    head -c 120 "$dest" >&2 || true
+    echo >&2
+    return 1
+  fi
+}
+
 check_sha256() {
   local dest="$1"
   local expected="$2"
@@ -64,6 +77,7 @@ check_sha256() {
 download "${FIREBIRD_PACKAGE_URL:-}" "$DEST_DIR/$FIREBIRD_PACKAGE_NAME" "pacote Firebird"
 download "${FIREBIRD_TEMPLATE_URL:-}" "$DEST_DIR/$TEMPLATE_NAME" "template do banco"
 
+check_gzip "$DEST_DIR/$FIREBIRD_PACKAGE_NAME" "pacote Firebird"
 check_sha256 "$DEST_DIR/$FIREBIRD_PACKAGE_NAME" "${FIREBIRD_PACKAGE_SHA256:-}" "pacote Firebird"
 check_sha256 "$DEST_DIR/$TEMPLATE_NAME" "${FIREBIRD_TEMPLATE_SHA256:-}" "template do banco"
 
