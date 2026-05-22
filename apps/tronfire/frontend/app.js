@@ -342,6 +342,7 @@ function zabbixGraphCard(title, subtitle, chart, columns = 'col-lg-6') {
 function latestPerContainer(metrics) {
   return (metrics?.latest || [])
     .filter(m => ['FIREBIRD', 'CONTAINER'].includes(m.scope))
+    .filter(m => m.target !== 'tronfire_firebird25')
     .sort((a, b) => num(b.cpuPercent) - num(a.cpuPercent));
 }
 
@@ -535,7 +536,12 @@ function databaseDetailsPanel(db, diagnostic) {
 }
 
 function firebirdServiceCard(info) {
-  const statusClass = info.status === 'running' ? 'success' : info.status === 'exited' || info.status === 'dead' ? 'danger' : 'warning';
+  const statusClass = ['running', 'active'].includes(info.status) ? 'success' : info.status === 'exited' || info.status === 'dead' || info.status === 'inactive' ? 'danger' : 'warning';
+  const label = info.label || (info.mode === 'host' ? 'Servico Firebird no host' : 'Container Firebird geral');
+  const name = info.mode === 'host' ? (info.service || 'firebird') : info.container;
+  const warning = info.mode === 'host'
+    ? 'Estas acoes sao gerais e afetam o servico Firebird 2.5.9 instalado no host Debian.'
+    : 'Estas acoes sao gerais e afetam todos os bancos atendidos por este container Firebird.';
   const actions = currentUser?.role === 'ADMIN'
     ? `<div class="btn-list">
         <button class="btn btn-outline-success" data-firebird-action="start">Iniciar</button>
@@ -546,13 +552,13 @@ function firebirdServiceCard(info) {
   return `<div class="card mb-3"><div class="card-body">
     <div class="d-flex flex-wrap align-items-start justify-content-between gap-3">
       <div>
-        <div class="subheader">Container Firebird geral</div>
-        <div class="h2 mb-1"><span class="service-dot bg-${statusClass}"></span>${escapeHtml(info.container)}</div>
+        <div class="subheader">${escapeHtml(label)}</div>
+        <div class="h2 mb-1"><span class="service-dot bg-${statusClass}"></span>${escapeHtml(name)}</div>
         <div class="text-muted">Status: ${escapeHtml(info.status)}${info.details ? ` - ${escapeHtml(info.details)}` : ''}</div>
       </div>
       ${actions}
     </div>
-    <div class="alert alert-warning mt-3 mb-0">Estas acoes sao gerais e afetam todos os bancos atendidos por este container Firebird.</div>
+    <div class="alert alert-warning mt-3 mb-0">${escapeHtml(warning)}</div>
   </div></div>`;
 }
 
@@ -562,7 +568,7 @@ function bindFirebirdActions(refresh) {
     const labels = { start: 'iniciar', stop: 'parar', restart: 'reiniciar' };
     const ok = await appDialog({
       title: 'Confirmar acao no Firebird',
-      message: `Deseja ${labels[action]} o container Firebird geral?\n\nIsso afeta todos os bancos.`,
+      message: `Deseja ${labels[action]} o Firebird geral?\n\nIsso afeta todos os bancos.`,
       confirmText: labels[action][0].toUpperCase() + labels[action].slice(1),
       cancelText: 'Cancelar',
       variant: action === 'stop' ? 'danger' : 'warning'
@@ -1000,7 +1006,13 @@ async function logs() {
 
 async function services() {
   const info = await api('/api/services/firebird');
-  const statusClass = info.status === 'running' ? 'success' : info.status === 'exited' || info.status === 'dead' ? 'danger' : 'warning';
+  const statusClass = ['running', 'active'].includes(info.status) ? 'success' : info.status === 'exited' || info.status === 'dead' || info.status === 'inactive' ? 'danger' : 'warning';
+  const label = info.label || (info.mode === 'host' ? 'Servico Firebird no host' : 'Container Firebird geral');
+  const name = info.mode === 'host' ? (info.service || 'firebird') : info.container;
+  const warning = info.mode === 'host'
+    ? 'Estas acoes sao gerais e afetam o servico Firebird 2.5.9 instalado no host Debian.'
+    : 'Estas acoes sao gerais e afetam todos os bancos atendidos por este container Firebird.';
+  const logsTitle = info.mode === 'host' ? 'Logs/status recentes do servico' : 'Logs recentes do container';
   const actions = currentUser?.role === 'ADMIN'
     ? `<div class="btn-list">
         <button class="btn btn-outline-success" data-firebird-action="start">Iniciar</button>
@@ -1012,21 +1024,21 @@ async function services() {
     <div class="card mb-3"><div class="card-body">
       <div class="d-flex flex-wrap align-items-start justify-content-between gap-3">
         <div>
-          <div class="subheader">Container Firebird geral</div>
-          <div class="h2 mb-1"><span class="service-dot bg-${statusClass}"></span>${escapeHtml(info.container)}</div>
+          <div class="subheader">${escapeHtml(label)}</div>
+          <div class="h2 mb-1"><span class="service-dot bg-${statusClass}"></span>${escapeHtml(name)}</div>
           <div class="text-muted">Status: ${escapeHtml(info.status)}${info.details ? ` - ${escapeHtml(info.details)}` : ''}</div>
         </div>
         ${actions}
       </div>
-      <div class="alert alert-warning mt-3 mb-0">Estas acoes sao gerais e afetam todos os bancos atendidos por este container Firebird.</div>
+      <div class="alert alert-warning mt-3 mb-0">${escapeHtml(warning)}</div>
     </div></div>
-    <div class="card"><div class="card-header"><h3 class="card-title">Logs recentes do container</h3></div><div class="card-body"><pre class="log-preview mb-0">${escapeHtml(info.logs || 'Sem logs recentes.')}</pre></div></div>`;
+    <div class="card"><div class="card-header"><h3 class="card-title">${escapeHtml(logsTitle)}</h3></div><div class="card-body"><pre class="log-preview mb-0">${escapeHtml(info.logs || 'Sem logs recentes.')}</pre></div></div>`;
   document.querySelectorAll('[data-firebird-action]').forEach(btn => btn.onclick = async () => {
     const action = btn.dataset.firebirdAction;
     const labels = { start: 'iniciar', stop: 'parar', restart: 'reiniciar' };
     const ok = await appDialog({
       title: 'Confirmar acao no Firebird',
-      message: `Deseja ${labels[action]} o container Firebird geral?\n\nIsso afeta todos os bancos.`,
+      message: `Deseja ${labels[action]} o Firebird geral?\n\nIsso afeta todos os bancos.`,
       confirmText: labels[action][0].toUpperCase() + labels[action].slice(1),
       cancelText: 'Cancelar',
       variant: action === 'stop' ? 'danger' : 'warning'

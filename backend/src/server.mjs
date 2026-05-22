@@ -205,6 +205,40 @@ function cloudflareStatus() {
   };
 }
 
+async function hostFirebirdStatus() {
+  const service = process.env.FIREBIRD_SERVICE || 'firebird';
+  let status = 'unknown';
+  let details = '';
+  try {
+    const { stdout } = await run('systemctl', ['is-active', service], { timeout: 10_000 });
+    status = stdout.trim() || status;
+  } catch (err) {
+    status = 'inactive';
+    details = err.message;
+  }
+  let logs = '';
+  try {
+    const out = await run('journalctl', ['-u', service, '-n', '120', '--no-pager'], { timeout: 15_000, maxBuffer: 1024 * 1024 * 2 });
+    logs = `${out.stdout || ''}${out.stderr || ''}`.trim();
+  } catch {
+    try {
+      const out = await run('systemctl', ['status', service, '--no-pager'], { timeout: 15_000, maxBuffer: 1024 * 1024 * 2 });
+      logs = `${out.stdout || ''}${out.stderr || ''}`.trim();
+    } catch (err) {
+      logs = `Nao foi possivel ler logs/status do Firebird host: ${err.message}`;
+    }
+  }
+  return { mode: 'host', service, status, details, logs };
+}
+
+async function hostFirebirdAction(action) {
+  if (!['start', 'stop', 'restart'].includes(action)) throw new Error('invalid action');
+  const service = process.env.FIREBIRD_SERVICE || 'firebird';
+  const out = await run('systemctl', [action, service], { timeout: action === 'restart' ? 120_000 : 60_000, maxBuffer: 1024 * 1024 * 2 });
+  appendEvent(`FIREBIRD_HOST_${action.toUpperCase()}`, { service, stdout: out.stdout, stderr: out.stderr });
+  return { ok: true, mode: 'host', service, action };
+}
+
 function exportPairingFile(reply) {
   if (!fs.existsSync(clusterSecretsPath)) {
     return json(reply, 404, { error: 'cluster-secrets.env not found' });
@@ -298,6 +332,9 @@ async function handleApi(req, reply, url) {
   if (req.method === 'GET' && url.pathname === '/api/cloudflare') return json(reply, 200, cloudflareStatus());
   if (req.method === 'GET' && url.pathname === '/api/events') return json(reply, 200, { events: readEvents(Number(url.searchParams.get('limit') || 100)) });
   if (req.method === 'GET' && url.pathname === '/api/cluster/pairing-file') return exportPairingFile(reply);
+  if (req.method === 'GET' && url.pathname === '/api/host/firebird') return json(reply, 200, await hostFirebirdStatus());
+  const hostFirebirdMatch = url.pathname.match(/^\/api\/host\/firebird\/(start|stop|restart)$/);
+  if (req.method === 'POST' && hostFirebirdMatch) return json(reply, 200, await hostFirebirdAction(hostFirebirdMatch[1]));
   const actionMatch = url.pathname.match(/^\/api\/apps\/([^/]+)\/(up|stop|restart|pull)$/);
   if (req.method === 'POST' && actionMatch) {
     await readBody(req).catch(() => ({}));

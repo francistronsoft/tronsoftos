@@ -38,6 +38,8 @@ const deploymentMode = String(process.env.TRONFIRE_DEPLOYMENT_MODE || 'simple').
 const nodeRole = String(process.env.TRONFIRE_NODE_ROLE || 'primary').toLowerCase();
 const clusterLockPath = process.env.TRONSOFTOS_CLUSTER_LOCK || '/opt/tronsoftos/state/cluster-lock.json';
 const internalToken = process.env.TRONSOFTOS_INTERNAL_TOKEN || '';
+const firebirdExecMode = String(process.env.FIREBIRD_EXEC_MODE || 'container').toLowerCase();
+const tronsoftosApiUrl = String(process.env.TRONSOFTOS_API_URL || 'http://host.docker.internal:8080').replace(/\/+$/, '');
 
 await app.register(cors, { origin: true, credentials: true });
 await app.register(cookie, { secret: process.env.SESSION_SECRET || 'dev-secret-change-me' });
@@ -131,6 +133,16 @@ function readClusterLock() {
     throw error;
   }
   return JSON.parse(fs.readFileSync(clusterLockPath, 'utf8'));
+}
+
+async function tronsoftosRequest(pathname, options = {}) {
+  const headers = { ...(options.headers || {}) };
+  if (internalToken) headers['x-tronsoftos-token'] = internalToken;
+  const response = await fetch(`${tronsoftosApiUrl}${pathname}`, { ...options, headers });
+  const text = await response.text();
+  const body = text ? JSON.parse(text) : {};
+  if (!response.ok) throw new Error(body.error || `TronSoftOS HTTP ${response.status}`);
+  return body;
 }
 
 function timestamp14() {
@@ -633,13 +645,21 @@ app.patch('/api/alerts/:id/resolve', { preHandler: requireOperator }, async (req
 });
 
 app.get('/api/services/firebird', { preHandler: requireOperator }, async () => {
-  if (String(process.env.FIREBIRD_EXEC_MODE || 'container').toLowerCase() !== 'container') {
-    return {
-      container: null,
-      status: 'external',
-      details: 'Firebird gerenciado pelo host/TronSoftOS',
-      logs: ''
-    };
+  if (firebirdExecMode !== 'container') {
+    try {
+      const info = await tronsoftosRequest('/api/host/firebird');
+      return { ...info, container: null, label: 'Servico Firebird no host' };
+    } catch (err) {
+      return {
+        mode: 'host',
+        container: null,
+        service: process.env.FIREBIRD_SERVICE || 'firebird',
+        status: 'unknown',
+        details: `Falha consultando TronSoftOS: ${err.message}`,
+        logs: '',
+        label: 'Servico Firebird no host'
+      };
+    }
   }
   let status = 'unknown';
   let details = '';
@@ -656,15 +676,17 @@ app.get('/api/services/firebird', { preHandler: requireOperator }, async () => {
   } catch (err) {
     logs = `Nao foi possivel ler logs do container: ${err.message}`;
   }
-  return { container: firebirdContainer, status, details, logs };
+  return { mode: 'container', container: firebirdContainer, status, details, logs, label: 'Container Firebird geral' };
 });
 
 app.post('/api/services/firebird/:action', { preHandler: requireAdmin }, async (req, reply) => {
-  if (String(process.env.FIREBIRD_EXEC_MODE || 'container').toLowerCase() !== 'container') {
-    return reply.code(409).send({ error: 'Firebird externo ao container deve ser gerenciado pelo TronSoftOS' });
-  }
   const action = String(req.params.action || '').toLowerCase();
   if (!['start', 'stop', 'restart'].includes(action)) return reply.code(400).send({ error: 'Acao invalida' });
+  if (firebirdExecMode !== 'container') {
+    const result = await tronsoftosRequest(`/api/host/firebird/${action}`, { method: 'POST' });
+    await audit(req, `FIREBIRD_HOST_${action.toUpperCase()}`, { entityType: 'service', entityId: result.service || 'firebird' });
+    return result;
+  }
   await docker([action, firebirdContainer], { timeout: action === 'restart' ? 180000 : 120000, maxBuffer: 1024 * 1024 * 2 });
   await audit(req, `FIREBIRD_CONTAINER_${action.toUpperCase()}`, { entityType: 'container', entityId: firebirdContainer });
   return { ok: true, action, container: firebirdContainer };

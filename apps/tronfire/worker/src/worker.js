@@ -19,7 +19,7 @@ const METRIC_CONTAINERS = [
   'tronfire_redis',
   'tronfire_backend',
   'tronfire_worker'
-];
+].filter(name => FIREBIRD_EXEC_MODE === 'container' || name !== FIREBIRD_CONTAINER);
 let backupRunning = false;
 
 async function docker(args, timeout = 60_000) {
@@ -96,7 +96,7 @@ async function createAlertOnce(type, severity, message) {
 }
 
 async function collectContainerMetrics() {
-  if (FIREBIRD_EXEC_MODE !== 'container') return;
+  if (!METRIC_CONTAINERS.length) return;
   try {
     const { stdout } = await docker(['stats', '--no-stream', '--format', '{{json .}}', ...METRIC_CONTAINERS], 120_000);
     const rows = stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
