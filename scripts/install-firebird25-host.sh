@@ -82,4 +82,24 @@ ln -sf /usr/local/firebird/bin/gfix /usr/bin/gfix
 ln -sf /usr/local/firebird/bin/gstat /usr/bin/gstat
 ln -sf /usr/local/firebird/bin/isql /usr/bin/isql
 
+cat > /etc/systemd/system/firebird.service <<'EOF'
+[Unit]
+Description=Firebird 2.5.9 SuperClassic
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/firebird/bin/fbguard -forever
+ExecStop=/bin/kill -TERM $MAINPID
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now firebird.service
+
 echo "Firebird 2.5.9 instalado no host em /usr/local/firebird"
