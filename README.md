@@ -4,7 +4,7 @@ Base de arquitetura para hospedar o TronSoftOS diretamente no host, com alta dis
 
 ## Direção Da Infra
 
-- O TronSoftOS roda como serviço do sistema operacional, preferencialmente via `systemd`.
+- O TronSoftOS roda como servixe do sistema operacional, preferencialmente via `systemd`.
 - O Firebird roda no host ou em serviço dedicado local, com dados em volume persistente.
 - `tronfire` e `troncomanda` podem continuar em containeres, mas são gerenciados como dependências externas do TronSoftOS.
 - O HA deve usar VIP com `keepalived`, com health check do TronSoftOS e promoção automática do nó secundário.
