@@ -63,7 +63,7 @@ configure_sysdba_password() {
 
   if [ -f "$pass_file" ]; then
     parsed_password="$(awk '
-      /ISC_PASSWORD|PASSWORD|Password|password/ {
+      /ISC_PASSWD|ISC_PASSWORD|PASSWD|PASSWORD|Passwd|Password|passwd|password/ {
         value=$0
         sub(/^[^:=]*[:=][[:space:]]*/, "", value)
         gsub(/["'\'' \r]/, "", value)
@@ -87,7 +87,7 @@ configure_sysdba_password() {
       if [ "$current_password" != "$desired_password" ]; then
         printf 'modify sysdba -pw %s\nquit\n' "$desired_password" | env "$gsec_env" /usr/local/firebird/bin/gsec -user sysdba -password "$current_password" >/tmp/tronsoftos-gsec.log 2>&1
       fi
-      printf 'ISC_USER=sysdba\nISC_PASSWORD=%s\n' "$desired_password" > "$pass_file"
+      printf 'ISC_USER=sysdba\nISC_PASSWD=%s\nISC_PASSWORD=%s\n' "$desired_password" "$desired_password" > "$pass_file"
       chmod 600 "$pass_file"
       echo "Senha SYSDBA do Firebird host sincronizada."
       return 0
@@ -100,10 +100,27 @@ configure_sysdba_password() {
   return 0
 }
 
+force_firebird_installer_masterkey() {
+  local installer_main="$tmp_dir/scripts/tarMainInstall.sh"
+
+  if [ ! -f "$installer_main" ]; then
+    echo "Aviso: script principal do instalador Firebird nao encontrado para fixar senha SYSDBA." >&2
+    return 0
+  fi
+
+  if ! command -v perl >/dev/null 2>&1; then
+    echo "Aviso: perl nao encontrado; senha SYSDBA sera sincronizada apos a instalacao." >&2
+    return 0
+  fi
+
+  perl -0pi -e 's/(generateNewDBAPassword\(\)\s*\{\s*)/$1\n    NewPasswd="masterkey"\n    writeNewPassword "$NewPasswd"\n    return\n/s' "$installer_main"
+}
+
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
 tar -xzf "$PACKAGE" -C "$tmp_dir" --strip-components=1
+force_firebird_installer_masterkey
 cd "$tmp_dir"
 ./install.sh -silent
 
