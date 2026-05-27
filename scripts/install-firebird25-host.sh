@@ -146,19 +146,24 @@ configure_sysdba_password() {
 }
 
 force_firebird_installer_masterkey() {
-  local installer_main="$tmp_dir/scripts/tarMainInstall.sh"
-
-  if [ ! -f "$installer_main" ]; then
-    echo "Aviso: script principal do instalador Firebird nao encontrado para fixar senha SYSDBA." >&2
-    return 0
-  fi
+  local installer_file=""
+  local patched=0
 
   if ! command -v perl >/dev/null 2>&1; then
     echo "Aviso: perl nao encontrado; senha SYSDBA sera sincronizada apos a instalacao." >&2
     return 0
   fi
 
-  perl -0pi -e 's/(generateNewDBAPassword\(\)\s*\{\s*)/$1\n    NewPasswd="masterkey"\n    writeNewPassword "$NewPasswd"\n    return\n/s; s/if \[ \$NewPasswd != "masterkey" \]/if true/s' "$installer_main"
+  for installer_file in "$tmp_dir/install.sh" "$tmp_dir/scripts/postinstall.sh" "$tmp_dir/scripts/tarMainInstall.sh"; do
+    if [ -f "$installer_file" ]; then
+      perl -0pi -e 's/(generateNewDBAPassword\(\)\s*\{\s*)/$1\n    NewPasswd="masterkey"\n    writeNewPassword "$NewPasswd"\n    return\n/s; s/if \[ \$NewPasswd != "masterkey" \]/if true/s' "$installer_file"
+      patched=1
+    fi
+  done
+
+  if [ "$patched" -ne 1 ]; then
+    echo "Aviso: scripts do instalador Firebird nao encontrados para fixar senha SYSDBA." >&2
+  fi
 }
 
 tmp_dir="$(mktemp -d)"
