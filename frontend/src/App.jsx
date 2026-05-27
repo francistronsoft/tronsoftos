@@ -7,6 +7,7 @@ import {
   Cloud,
   Database,
   FileClock,
+  CheckCircle2,
   Gauge,
   GitBranch,
   HardDrive,
@@ -21,6 +22,7 @@ import {
   Square,
   Terminal,
   UploadCloud,
+  XCircle,
   Zap
 } from 'lucide-react';
 import {
@@ -39,6 +41,7 @@ import 'reactflow/dist/style.css';
 
 const navItems = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { id: 'diagnostics', label: 'Diagnostico', icon: CheckCircle2 },
   { id: 'apps', label: 'Apps', icon: Boxes },
   { id: 'cluster', label: 'Cluster HA', icon: GitBranch },
   { id: 'backups', label: 'Backups', icon: UploadCloud },
@@ -99,7 +102,16 @@ const metricSeries = [
 
 async function api(path) {
   const response = await fetch(path);
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  if (!response.ok) {
+    let message = `HTTP ${response.status}`;
+    try {
+      const payload = await response.json();
+      message = payload.error || message;
+    } catch {
+      // Keep default HTTP message.
+    }
+    throw new Error(message);
+  }
   return response.json();
 }
 
@@ -131,6 +143,12 @@ function statusClass(status) {
 
 function StatusPill({ value }) {
   return <span className={`inline-flex items-center rounded border px-2 py-1 text-xs font-medium ${statusClass(value)}`}>{value || 'unknown'}</span>;
+}
+
+function diagnosticIcon(status) {
+  if (status === 'ok') return <CheckCircle2 className="h-4 w-4 text-green-600" />;
+  if (status === 'warning') return <AlertTriangle className="h-4 w-4 text-amber-600" />;
+  return <XCircle className="h-4 w-4 text-red-600" />;
 }
 
 function Card({ title, icon: Icon, children, action }) {
@@ -294,6 +312,103 @@ function AppsView({ dashboard, onAction, actionPending }) {
           </div>
         </Card>
       ))}
+    </div>
+  );
+}
+
+function DiagnosticsView() {
+  const queryClient = useQueryClient();
+  const diagnosticsQuery = useQuery({
+    queryKey: ['diagnostics'],
+    queryFn: () => api('/api/diagnostics'),
+    refetchInterval: 10000
+  });
+  const firebirdMutation = useMutation({
+    mutationFn: action => postApi(`/api/host/firebird/${action}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['diagnostics'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    }
+  });
+  const tronfireMutation = useMutation({
+    mutationFn: action => postApi(`/api/apps/tronfire/${action}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['diagnostics'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    }
+  });
+  const diagnostics = diagnosticsQuery.data;
+  const checks = diagnostics?.checks || [];
+  const busy = firebirdMutation.isPending || tronfireMutation.isPending;
+
+  return (
+    <div className="space-y-5">
+      <div className="grid gap-4 lg:grid-cols-4">
+        <Stat label="Estado geral" value={diagnostics?.summary?.ok ? 'OK' : 'Atencao'} detail={diagnosticsQuery.isFetching ? 'atualizando' : diagnostics?.generatedAt ? new Date(diagnostics.generatedAt).toLocaleTimeString() : 'aguardando'} icon={ShieldCheck} tone={diagnostics?.summary?.ok ? 'green' : 'amber'} />
+        <Stat label="Erros" value={String(diagnostics?.summary?.errors ?? '-')} detail="checagens criticas" icon={XCircle} tone={(diagnostics?.summary?.errors || 0) > 0 ? 'red' : 'green'} />
+        <Stat label="Avisos" value={String(diagnostics?.summary?.warnings ?? '-')} detail="itens pendentes" icon={AlertTriangle} tone={(diagnostics?.summary?.warnings || 0) > 0 ? 'amber' : 'green'} />
+        <Stat label="Firebird" value={diagnostics?.firebird?.status || '-'} detail={diagnostics?.tronfire?.firebirdExecMode || 'modo desconhecido'} icon={Database} tone={diagnostics?.firebird?.status === 'active' ? 'green' : 'red'} />
+      </div>
+
+      <div className="grid gap-5 xl:grid-cols-[1.15fr_0.85fr]">
+        <Card title="Checklist da instalacao" icon={CheckCircle2} action={<button onClick={() => diagnosticsQuery.refetch()} className="inline-flex items-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50"><RefreshCw className="h-4 w-4" />Atualizar</button>}>
+          <div className="space-y-2">
+            {diagnosticsQuery.isError ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{diagnosticsQuery.error.message}</div> : null}
+            {checks.map(check => (
+              <div key={check.id || check.label} className="grid gap-3 rounded-md border border-slate-100 bg-slate-50 px-3 py-3 text-sm md:grid-cols-[220px_90px_1fr]">
+                <div className="flex items-center gap-2 font-medium text-slate-900">
+                  {diagnosticIcon(check.status)}
+                  {check.label}
+                </div>
+                <StatusPill value={check.status} />
+                <div className="min-w-0 text-slate-600">
+                  <div className="truncate">{check.detail || '-'}</div>
+                  {check.path || check.dbPath ? <div className="mt-1 truncate font-mono text-xs text-slate-400">{check.path || check.dbPath}</div> : null}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        <div className="space-y-5">
+          <Card title="Acoes rapidas" icon={Zap}>
+            <div className="grid gap-3">
+              <button disabled={busy} onClick={() => firebirdMutation.mutate('restart')} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
+                <RefreshCw className="h-4 w-4" />
+                Reiniciar Firebird host
+              </button>
+              <button disabled={busy} onClick={() => tronfireMutation.mutate('restart')} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
+                <RefreshCw className="h-4 w-4" />
+                Reiniciar TronFire
+              </button>
+              <button disabled={busy} onClick={() => tronfireMutation.mutate('up')} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
+                <Play className="h-4 w-4" />
+                Subir/Recriar TronFire
+              </button>
+              {firebirdMutation.isError || tronfireMutation.isError ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{firebirdMutation.error?.message || tronfireMutation.error?.message}</div> : null}
+              {firebirdMutation.isSuccess || tronfireMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Acao executada.</div> : null}
+            </div>
+          </Card>
+
+          <Card title="TronFire" icon={Boxes}>
+            <dl className="space-y-2 text-sm">
+              <div className="flex justify-between gap-3 border-b border-slate-100 pb-2"><dt className="text-slate-500">Env</dt><dd className="truncate font-mono text-xs">{diagnostics?.tronfire?.envPath || '-'}</dd></div>
+              <div className="flex justify-between gap-3 border-b border-slate-100 pb-2"><dt className="text-slate-500">Modo</dt><dd className="font-medium">{diagnostics?.tronfire?.firebirdExecMode || '-'}</dd></div>
+              <div className="flex justify-between gap-3 border-b border-slate-100 pb-2"><dt className="text-slate-500">Health</dt><dd className="truncate font-mono text-xs">{diagnostics?.tronfire?.healthUrl || '-'}</dd></div>
+            </dl>
+            <div className="mt-4 space-y-2">
+              {(diagnostics?.tronfire?.containers || []).map(container => (
+                <div key={container.name} className="flex items-center justify-between rounded-md border border-slate-100 bg-slate-50 px-3 py-2 text-sm">
+                  <span className="font-medium">{container.name}</span>
+                  <StatusPill value={container.status} />
+                </div>
+              ))}
+            </div>
+          </Card>
+        </div>
+      </div>
     </div>
   );
 }
@@ -518,6 +633,7 @@ export default function App() {
 
   const View = {
     dashboard: <DashboardView dashboard={dashboard} />,
+    diagnostics: <DiagnosticsView />,
     apps: <AppsView dashboard={dashboard} actionPending={actionMutation.isPending} onAction={(app, action) => actionMutation.mutate({ app, action })} />,
     cluster: <ClusterView dashboard={dashboard} />,
     backups: <BackupsView dashboard={dashboard} />,

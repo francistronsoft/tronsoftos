@@ -111,6 +111,42 @@ function parseJsonLines(text) {
   return text.split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
 }
 
+function parseEnvFile(filePath) {
+  try {
+    return fs.readFileSync(filePath, 'utf8')
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(line => line && !line.startsWith('#') && line.includes('='))
+      .reduce((acc, line) => {
+        const index = line.indexOf('=');
+        const key = line.slice(0, index).trim();
+        const value = line.slice(index + 1).trim().replace(/^["']|["']$/g, '');
+        acc[key] = value;
+        return acc;
+      }, {});
+  } catch {
+    return {};
+  }
+}
+
+function fileCheck(label, filePath, kind = 'file') {
+  try {
+    const stat = fs.statSync(filePath);
+    const ok = kind === 'dir' ? stat.isDirectory() : kind === 'symlink' ? fs.lstatSync(filePath).isSymbolicLink() : stat.isFile();
+    return {
+      label,
+      path: filePath,
+      ok,
+      status: ok ? 'ok' : 'error',
+      detail: ok ? `${kind} encontrado` : `nao e ${kind}`,
+      size: stat.size,
+      modifiedAt: stat.mtime.toISOString()
+    };
+  } catch (err) {
+    return { label, path: filePath, ok: false, status: 'error', detail: err.message };
+  }
+}
+
 async function containerStatus(names = []) {
   if (!names.length) return [];
   if (!(await commandExists('docker'))) {
@@ -140,6 +176,54 @@ async function fetchHealth(url) {
     return { ok: response.ok, status: response.status, url };
   } catch (err) {
     return { ok: false, status: 'offline', url, error: err.message };
+  }
+}
+
+function checkSeverity(ok, warn = false) {
+  if (ok) return 'ok';
+  return warn ? 'warning' : 'error';
+}
+
+async function tcpListenCheck(portToCheck) {
+  try {
+    const { stdout } = await run('ss', ['-ltnp'], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+    const lines = stdout.split(/\r?\n/).filter(line => line.includes(`:${portToCheck}`));
+    return {
+      ok: lines.length > 0,
+      status: lines.length > 0 ? 'ok' : 'error',
+      detail: lines[0] || `porta ${portToCheck} nao esta ouvindo`,
+      port: portToCheck
+    };
+  } catch (err) {
+    return { ok: false, status: 'warning', detail: err.message, port: portToCheck };
+  }
+}
+
+function firebirdAuthFailed(text) {
+  return /Your user name and password are not defined|SQLSTATE\s*=\s*28000|unable to open database/i.test(text || '');
+}
+
+async function validateFirebirdPassword() {
+  const bin = process.env.FIREBIRD_BIN || '/usr/local/firebird/bin';
+  const password = process.env.FIREBIRD_PASSWORD || 'masterkey';
+  const storageRoot = process.env.STORAGE_ROOT || '/opt/tronfire-storage';
+  const candidates = [
+    `${storageRoot}/firebird/templates/template.fdb`,
+    '/firebird/templates/template.fdb'
+  ];
+  const dbPath = candidates.find(item => fs.existsSync(item));
+  if (!dbPath) {
+    return { ok: false, status: 'warning', detail: 'template.fdb nao encontrado para teste de login', dbPath: null };
+  }
+  try {
+    const script = `printf 'select 1 from rdb$database;\\nquit;\\n' | FIREBIRD=/usr/local/firebird LD_LIBRARY_PATH=/usr/local/firebird/lib:$LD_LIBRARY_PATH ${bin}/isql -user SYSDBA -password '${password.replace(/'/g, "'\\''")}' 127.0.0.1:${dbPath}`;
+    const out = await run('/bin/sh', ['-lc', script], { timeout: 20_000, maxBuffer: 1024 * 1024 });
+    const text = `${out.stdout || ''}${out.stderr || ''}`;
+    const ok = !firebirdAuthFailed(text) && /CONSTANT|1|SQL>/i.test(text);
+    return { ok, status: ok ? 'ok' : 'error', detail: ok ? 'SYSDBA/masterkey validado via isql' : text.trim(), dbPath };
+  } catch (err) {
+    const text = `${err.stdout || ''}${err.stderr || ''}${err.message || ''}`;
+    return { ok: false, status: 'error', detail: text.trim(), dbPath };
   }
 }
 
@@ -395,6 +479,89 @@ async function dashboard() {
   };
 }
 
+async function diagnostics() {
+  const tronfireEnvPath = path.join(appRoot, 'apps/tronfire/.env');
+  const tronfireEnv = parseEnvFile(tronfireEnvPath);
+  const [apps, firebird, network, firebirdPort, firebirdLogin] = await Promise.all([
+    appsStatus(),
+    hostFirebirdStatus(),
+    hostNetworkStatus(),
+    tcpListenCheck(Number(process.env.FIREBIRD_PORT || tronfireEnv.FIREBIRD_PORT || 3050)),
+    validateFirebirdPassword()
+  ]);
+  const tronfire = apps.find(app => app.name === 'tronfire') || null;
+  const expectedMode = tronfireEnv.FIREBIRD_EXEC_MODE || process.env.FIREBIRD_EXEC_MODE || 'host';
+  const storageRoot = tronfireEnv.STORAGE_ROOT || process.env.STORAGE_ROOT || '/opt/tronfire-storage';
+  const checks = [
+    {
+      id: 'tronsoftos-health',
+      label: 'TronSoftOS',
+      status: 'ok',
+      ok: true,
+      detail: `porta ${port}`
+    },
+    {
+      id: 'tronfire-health',
+      label: 'TronFire',
+      status: checkSeverity(tronfire?.health?.ok),
+      ok: !!tronfire?.health?.ok,
+      detail: tronfire?.health?.ok ? tronfire.health.url : tronfire?.health?.error || tronfire?.status || 'nao encontrado'
+    },
+    {
+      id: 'firebird-service',
+      label: 'Firebird host',
+      status: checkSeverity(firebird.status === 'active'),
+      ok: firebird.status === 'active',
+      detail: `${firebird.service}: ${firebird.status}`
+    },
+    {
+      id: 'firebird-port',
+      label: 'Porta Firebird',
+      ...firebirdPort
+    },
+    {
+      id: 'firebird-login',
+      label: 'SYSDBA/masterkey',
+      ...firebirdLogin
+    },
+    {
+      id: 'tronfire-mode',
+      label: 'Modo TronFire',
+      status: checkSeverity(expectedMode === 'host'),
+      ok: expectedMode === 'host',
+      detail: `FIREBIRD_EXEC_MODE=${expectedMode}`
+    },
+    fileCheck('Binario isql', '/usr/local/firebird/bin/isql'),
+    fileCheck('security2.fdb', '/opt/firebird/security2.fdb'),
+    fileCheck('Storage /firebird', '/firebird', 'dir'),
+    fileCheck('Template Firebird', `${storageRoot}/firebird/templates/template.fdb`),
+    fileCheck('Diretorio bancos', `${storageRoot}/firebird/data`, 'dir'),
+    fileCheck('Diretorio backups', `${storageRoot}/firebird/backups`, 'dir')
+  ];
+  const containers = tronfire?.containers || [];
+  const summary = {
+    ok: checks.every(check => check.status === 'ok') && containers.every(container => container.status === 'running'),
+    errors: checks.filter(check => check.status === 'error').length + containers.filter(container => ['error', 'missing', 'exited'].includes(container.status)).length,
+    warnings: checks.filter(check => check.status === 'warning').length
+  };
+  return {
+    generatedAt: new Date().toISOString(),
+    summary,
+    checks,
+    apps,
+    tronfire: {
+      envPath: tronfireEnvPath,
+      firebirdExecMode: expectedMode,
+      panelPort: tronfireEnv.TRONFIRE_PANEL_PORT || tronfireEnv.PORT || null,
+      healthUrl: tronfire?.healthUrl || null,
+      containers
+    },
+    firebird,
+    network,
+    backups: backupStatus()
+  };
+}
+
 async function readBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -452,6 +619,7 @@ async function handleApi(req, reply, url) {
     return json(reply, 200, { ok: true, app: 'TronSoftOS', version: '0.1.0' });
   }
   if (req.method === 'GET' && url.pathname === '/api/dashboard') return json(reply, 200, await dashboard());
+  if (req.method === 'GET' && url.pathname === '/api/diagnostics') return json(reply, 200, await diagnostics());
   if (req.method === 'GET' && url.pathname === '/api/apps') return json(reply, 200, { apps: await appsStatus() });
   if (req.method === 'GET' && url.pathname === '/api/cluster') return json(reply, 200, clusterStatus());
   if (req.method === 'GET' && url.pathname === '/api/backups') return json(reply, 200, backupStatus());
