@@ -38,6 +38,11 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - ${STORAGE_ROOT}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tronfire -d tronfire"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
 
   redis:
     image: redis:7-alpine
@@ -46,6 +51,11 @@ services:
     command: redis-server --appendonly yes
     volumes:
       - ${STORAGE_ROOT}/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
 
   backend:
     build:
@@ -54,8 +64,10 @@ services:
     container_name: tronfire_backend
     restart: unless-stopped
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     ports:
       - "0.0.0.0:${TRONFIRE_PANEL_PORT:-8081}:8080"
     environment:
@@ -95,8 +107,10 @@ services:
     container_name: tronfire_worker
     restart: unless-stopped
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       NODE_ENV: production
       STORAGE_ROOT: ${STORAGE_ROOT}

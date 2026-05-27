@@ -17,4 +17,5 @@ RUN npm install
 COPY backend/prisma ./prisma
 RUN npx prisma generate
 COPY worker/src ./src
-CMD ["node", "src/worker.js"]
+COPY backend/src/wait-for-postgres.js ./src/wait-for-postgres.js
+CMD ["sh", "-c", "node src/wait-for-postgres.js && node src/worker.js"]

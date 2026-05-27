@@ -19,4 +19,4 @@ RUN npx prisma generate
 COPY backend/src ./src
 COPY frontend ./frontend
 EXPOSE 8080
-CMD ["sh", "-c", "npx prisma migrate deploy && node prisma/seed.js && node src/server.js"]
+CMD ["sh", "-c", "node src/wait-for-postgres.js && npx prisma migrate deploy && node prisma/seed.js && node src/server.js"]

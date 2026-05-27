@@ -6,9 +6,9 @@ services:
   backend:
     depends_on:
       postgres:
-        condition: service_started
+        condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
     environment:
       FIREBIRD_EXEC_MODE: host
       FIREBIRD_BIN: /usr/local/firebird/bin
@@ -23,9 +23,9 @@ services:
   worker:
     depends_on:
       postgres:
-        condition: service_started
+        condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
     environment:
       FIREBIRD_EXEC_MODE: host
       FIREBIRD_BIN: /usr/local/firebird/bin
