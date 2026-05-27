@@ -27,7 +27,7 @@ if ! gzip -t "$PACKAGE" >/dev/null 2>&1; then
 fi
 
 apt-get update
-apt-get install -y ca-certificates libstdc++6 libtommath1 procps net-tools bash xz-utils findutils
+apt-get install -y ca-certificates libstdc++6 libtommath1 procps net-tools bash xz-utils findutils perl
 apt-get install -y libncurses5 || apt-get install -y libncurses6 libtinfo6
 touch /etc/services /etc/inetd.conf
 
@@ -56,12 +56,37 @@ ensure_legacy_ncurses
 
 configure_sysdba_password() {
   local desired_password="${FIREBIRD_PASSWORD:-masterkey}"
-  local pass_file="/usr/local/firebird/SYSDBA.password"
+  local pass_file=""
   local parsed_password=""
   local candidates=()
-  local gsec_env="LD_LIBRARY_PATH=/usr/local/firebird/lib:${LD_LIBRARY_PATH:-}"
+  local current_password=""
+  local security_db="/usr/local/firebird/security2.fdb"
+  local template_db="$STORAGE_ROOT/firebird/templates/template.fdb"
+  local fb_env=(FIREBIRD=/usr/local/firebird "LD_LIBRARY_PATH=/usr/local/firebird/lib:${LD_LIBRARY_PATH:-}")
 
-  if [ -f "$pass_file" ]; then
+  write_sysdba_password_file() {
+    local file
+    for file in /usr/local/firebird/SYSDBA.password /opt/firebird/SYSDBA.password; do
+      if [ -d "$(dirname "$file")" ]; then
+        printf 'ISC_USER=sysdba\nISC_PASSWD=%s\nISC_PASSWORD=%s\n' "$desired_password" "$desired_password" > "$file"
+        chmod 600 "$file"
+      fi
+    done
+  }
+
+  password_works() {
+    local password="$1"
+    if [ -f "$template_db" ]; then
+      printf 'select 1 from rdb$database;\nquit;\n' | env "${fb_env[@]}" /usr/local/firebird/bin/isql -user SYSDBA -password "$password" "localhost:$template_db" >/tmp/tronsoftos-isql.log 2>&1
+      return $?
+    fi
+    printf 'display sysdba\nquit\n' | env "${fb_env[@]}" /usr/local/firebird/bin/gsec -user sysdba -password "$password" >/tmp/tronsoftos-gsec.log 2>&1
+  }
+
+  for pass_file in /usr/local/firebird/SYSDBA.password /opt/firebird/SYSDBA.password; do
+    if [ ! -f "$pass_file" ]; then
+      continue
+    fi
     parsed_password="$(awk '
       /ISC_PASSWD|ISC_PASSWORD|PASSWD|PASSWORD|Passwd|Password|passwd|password/ {
         value=$0
@@ -71,32 +96,38 @@ configure_sysdba_password() {
         exit
       }
     ' "$pass_file" 2>/dev/null || true)"
-  fi
-
-  [ -n "$parsed_password" ] && candidates+=("$parsed_password")
-  candidates+=("$desired_password" "masterkey")
-  if [ -f "$pass_file" ]; then
+    [ -n "$parsed_password" ] && candidates+=("$parsed_password")
     while IFS= read -r word; do
       [ -n "$word" ] && candidates+=("$word")
     done < <(tr -cs '[:alnum:]_#@%+=.,:;!?()-' '\n' < "$pass_file" | awk 'length($0) >= 4')
-  fi
+  done
+
+  candidates+=("$desired_password" "masterkey")
 
   for current_password in "${candidates[@]}"; do
     [ -n "$current_password" ] || continue
-    if printf 'display sysdba\nquit\n' | env "$gsec_env" /usr/local/firebird/bin/gsec -user sysdba -password "$current_password" >/tmp/tronsoftos-gsec.log 2>&1; then
+    if printf 'display sysdba\nquit\n' | env "${fb_env[@]}" /usr/local/firebird/bin/gsec -user sysdba -password "$current_password" >/tmp/tronsoftos-gsec.log 2>&1 || \
+       { [ -f "$security_db" ] && printf 'display sysdba\nquit\n' | env "${fb_env[@]}" /usr/local/firebird/bin/gsec -database "$security_db" -user sysdba -password "$current_password" >/tmp/tronsoftos-gsec.log 2>&1; }; then
       if [ "$current_password" != "$desired_password" ]; then
-        printf 'modify sysdba -pw %s\nquit\n' "$desired_password" | env "$gsec_env" /usr/local/firebird/bin/gsec -user sysdba -password "$current_password" >/tmp/tronsoftos-gsec.log 2>&1
+        printf 'modify sysdba -pw %s\nquit\n' "$desired_password" | env "${fb_env[@]}" /usr/local/firebird/bin/gsec -user sysdba -password "$current_password" >/tmp/tronsoftos-gsec.log 2>&1 || \
+          { [ -f "$security_db" ] && printf 'modify sysdba -pw %s\nquit\n' "$desired_password" | env "${fb_env[@]}" /usr/local/firebird/bin/gsec -database "$security_db" -user sysdba -password "$current_password" >/tmp/tronsoftos-gsec.log 2>&1; }
       fi
-      printf 'ISC_USER=sysdba\nISC_PASSWD=%s\nISC_PASSWORD=%s\n' "$desired_password" "$desired_password" > "$pass_file"
-      chmod 600 "$pass_file"
+      write_sysdba_password_file
       echo "Senha SYSDBA do Firebird host sincronizada."
       return 0
     fi
   done
 
+  if password_works "$desired_password"; then
+    write_sysdba_password_file
+    echo "Senha SYSDBA do Firebird host validada."
+    return 0
+  fi
+
   echo "Aviso: nao foi possivel sincronizar a senha SYSDBA automaticamente." >&2
   echo "Verifique /usr/local/firebird/SYSDBA.password e ajuste FIREBIRD_PASSWORD no TronFire." >&2
   cat /tmp/tronsoftos-gsec.log >&2 || true
+  cat /tmp/tronsoftos-isql.log >&2 || true
   return 0
 }
 
