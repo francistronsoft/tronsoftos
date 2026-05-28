@@ -4,10 +4,10 @@ Este stack adapta o TronComanda para o padrao do TronSoftOS em Debian.
 
 Servicos:
 
-- `troncomanda_web`: httpd, porta padrao `8091`.
+- `troncomanda_web`: httpd, porta padrao `8000`.
 - `troncomanda_api`: API, porta padrao `9000`.
-- `troncomanda_qr`: frontend QR, porta padrao `8092`.
-- `troncomanda_cardapio_lite`: cardapio lite, porta padrao `8093`.
+- `troncomanda_qr`: frontend QR interno.
+- `troncomanda_cardapio_lite`: cardapio lite interno.
 
 Dados persistentes:
 

@@ -79,7 +79,7 @@ sync_ip_envs() {
 
   if [ -f "$troncomanda_env" ]; then
     set_env_value "$troncomanda_env" "TRONCOMANDA_LAN_HOST" "$server_ip"
-    local troncomanda_port="8091"
+    local troncomanda_port="8000"
     if grep -q '^TRONCOMANDA_WEB_PORT=' "$troncomanda_env"; then
       troncomanda_port="$(grep '^TRONCOMANDA_WEB_PORT=' "$troncomanda_env" | tail -n1 | cut -d= -f2-)"
     fi
