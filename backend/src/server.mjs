@@ -18,6 +18,7 @@ const clusterSecretsPath = process.env.TRONSOFTOS_CLUSTER_SECRETS || path.join(s
 const eventLogPath = process.env.TRONSOFTOS_EVENT_LOG || path.join(stateDir, 'events.jsonl');
 const smtpSettingsPath = process.env.TRONSOFTOS_SMTP_SETTINGS || path.join(stateDir, 'smtp-settings.json');
 const rcloneSettingsPath = process.env.TRONSOFTOS_RCLONE_SETTINGS || path.join(stateDir, 'rclone-settings.json');
+const googleCredentialsPath = process.env.TRONSOFTOS_GOOGLE_CREDENTIALS || path.join(stateDir, 'google-drive-credentials.json');
 const googleOauthDir = process.env.TRONSOFTOS_GOOGLE_OAUTH_DIR || path.join(stateDir, 'google-oauth');
 const frontendDist = process.env.TRONSOFTOS_FRONTEND_DIST || path.join(appRoot, 'frontend/dist');
 
@@ -189,9 +190,61 @@ function normalizeRemoteName(value) {
   return remote;
 }
 
+function rawGoogleCredentials() {
+  return {
+    clientId: process.env.GOOGLE_DRIVE_CLIENT_ID || '',
+    clientSecret: process.env.GOOGLE_DRIVE_CLIENT_SECRET || '',
+    authUri: 'https://accounts.google.com/o/oauth2/v2/auth',
+    tokenUri: 'https://oauth2.googleapis.com/token',
+    redirectUris: [],
+    ...readJson(googleCredentialsPath, {})
+  };
+}
+
+function publicGoogleCredentials(settings = rawGoogleCredentials()) {
+  return {
+    configured: !!(settings.clientId && settings.clientSecret),
+    clientId: settings.clientId || '',
+    authUri: settings.authUri || 'https://accounts.google.com/o/oauth2/v2/auth',
+    tokenUri: settings.tokenUri || 'https://oauth2.googleapis.com/token',
+    redirectUris: Array.isArray(settings.redirectUris) ? settings.redirectUris : []
+  };
+}
+
+function normalizeGoogleCredentials(body) {
+  let payload = body;
+  if (typeof body.content === 'string' && body.content.trim()) {
+    try {
+      payload = JSON.parse(body.content);
+    } catch {
+      throw new Error('JSON de credenciais Google invalido');
+    }
+  }
+  const source = payload.web || payload.installed || payload;
+  const clientId = String(source.client_id || source.clientId || '').trim();
+  const clientSecret = String(source.client_secret || source.clientSecret || '').trim();
+  if (!clientId || !clientSecret) throw new Error('JSON sem client_id/client_secret');
+  return {
+    clientId,
+    clientSecret,
+    authUri: String(source.auth_uri || source.authUri || 'https://accounts.google.com/o/oauth2/v2/auth').trim(),
+    tokenUri: String(source.token_uri || source.tokenUri || 'https://oauth2.googleapis.com/token').trim(),
+    redirectUris: Array.isArray(source.redirect_uris) ? source.redirect_uris : Array.isArray(source.redirectUris) ? source.redirectUris : []
+  };
+}
+
+function saveGoogleCredentials(body) {
+  ensureStateDir();
+  const credentials = normalizeGoogleCredentials(body);
+  fs.writeFileSync(googleCredentialsPath, `${JSON.stringify(credentials, null, 2)}\n`, { mode: 0o600 });
+  appendEvent('GOOGLE_DRIVE_CREDENTIALS_IMPORTED', { clientId: credentials.clientId, redirectUris: credentials.redirectUris.length });
+  return publicGoogleCredentials(credentials);
+}
+
 function normalizeGoogleOauthInput(body, req) {
-  const clientId = String(body.clientId || process.env.GOOGLE_DRIVE_CLIENT_ID || '').trim();
-  const clientSecret = String(body.clientSecret || process.env.GOOGLE_DRIVE_CLIENT_SECRET || '').trim();
+  const credentials = rawGoogleCredentials();
+  const clientId = String(body.clientId || credentials.clientId || '').trim();
+  const clientSecret = String(body.clientSecret || credentials.clientSecret || '').trim();
   if (!clientId || !clientSecret) throw new Error('informe client_id e client_secret do OAuth Google para usar o assistente');
   const settings = rawRcloneSettings();
   const remote = normalizeRemoteName(body.remote || settings.remote || 'gdrive');
@@ -200,6 +253,8 @@ function normalizeGoogleOauthInput(body, req) {
   return {
     clientId,
     clientSecret,
+    authUri: credentials.authUri || 'https://accounts.google.com/o/oauth2/v2/auth',
+    tokenUri: credentials.tokenUri || 'https://oauth2.googleapis.com/token',
     remote,
     redirectUri,
     config: String(body.config || settings.config || defaultRcloneConfigPath()).trim(),
@@ -236,7 +291,7 @@ function startGoogleDriveOauth(req, body) {
   fs.mkdirSync(googleOauthDir, { recursive: true });
   const state = crypto.randomUUID();
   fs.writeFileSync(googleOauthStatePath(state), `${JSON.stringify(input, null, 2)}\n`, { mode: 0o600 });
-  const authUrl = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+  const authUrl = new URL(input.authUri || 'https://accounts.google.com/o/oauth2/v2/auth');
   authUrl.searchParams.set('client_id', input.clientId);
   authUrl.searchParams.set('redirect_uri', input.redirectUri);
   authUrl.searchParams.set('response_type', 'code');
@@ -289,7 +344,7 @@ async function completeGoogleDriveOauth(reply, url) {
   const input = readJson(statePath, null);
   if (!input) return html(reply, 400, '<h1>Falha no Google Drive</h1><p>Sessao OAuth expirada ou invalida.</p>');
 
-  const response = await fetch('https://oauth2.googleapis.com/token', {
+  const response = await fetch(input.tokenUri || 'https://oauth2.googleapis.com/token', {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({
@@ -926,6 +981,8 @@ async function handleApi(req, reply, url) {
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/test') return json(reply, 200, await rcloneTest());
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/upload-test') return json(reply, 200, await rcloneUploadTest());
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/token') return json(reply, 200, saveGoogleDriveToken(await readBody(req)));
+  if (req.method === 'GET' && url.pathname === '/api/backups/google/credentials') return json(reply, 200, publicGoogleCredentials());
+  if (req.method === 'POST' && url.pathname === '/api/backups/google/credentials') return json(reply, 200, saveGoogleCredentials(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/backups/google/start') return json(reply, 200, startGoogleDriveOauth(req, await readBody(req)));
   if (req.method === 'GET' && url.pathname === '/api/backups/google/callback') return await completeGoogleDriveOauth(reply, url);
   if (req.method === 'GET' && url.pathname === '/api/cloudflare') return json(reply, 200, cloudflareStatus());

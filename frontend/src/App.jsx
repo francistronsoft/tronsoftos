@@ -458,8 +458,10 @@ function ClusterView({ dashboard }) {
 function BackupsView({ dashboard }) {
   const queryClient = useQueryClient();
   const rcloneQuery = useQuery({ queryKey: ['rclone-settings'], queryFn: () => api('/api/backups/rclone') });
+  const googleCredentialsQuery = useQuery({ queryKey: ['google-drive-credentials'], queryFn: () => api('/api/backups/google/credentials') });
   const files = dashboard.backups.recentFiles || [];
   const rclone = rcloneQuery.data || dashboard.backups.rclone || {};
+  const googleCredentials = googleCredentialsQuery.data || {};
   const [form, setForm] = useState(null);
   const [oauth, setOauth] = useState({ clientId: '', clientSecret: '', redirectUri: '' });
   const [token, setToken] = useState('');
@@ -497,6 +499,13 @@ function BackupsView({ dashboard }) {
       queryClient.invalidateQueries({ queryKey: ['events'] });
     }
   });
+  const credentialsMutation = useMutation({
+    mutationFn: content => postApi('/api/backups/google/credentials', { content }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['google-drive-credentials'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    }
+  });
   const tokenMutation = useMutation({
     mutationFn: payload => postApi('/api/backups/rclone/token', payload),
     onSuccess: data => {
@@ -509,14 +518,33 @@ function BackupsView({ dashboard }) {
   });
   const setValue = (key, value) => setForm(previous => ({ ...(previous || values), [key]: value }));
   const setOauthValue = (key, value) => setOauth(previous => ({ ...previous, [key]: value }));
+  const importCredentialsFile = event => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => credentialsMutation.mutate(String(reader.result || ''));
+    reader.readAsText(file);
+    event.target.value = '';
+  };
 
   return (
     <div className="grid gap-5 xl:grid-cols-[1fr_1fr]">
       <Card title="Google Drive / Rclone" icon={UploadCloud} action={<StatusPill value={rclone.configConfigured ? 'online' : 'warning'} />}>
         <div className="mb-4 rounded-md border border-slate-200 bg-slate-50 p-3">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3">
+            <div>
+              <div className="text-sm font-semibold text-slate-900">Credenciais Google OAuth</div>
+              <div className="text-xs text-slate-500">{googleCredentials.configured ? `JSON importado: ${googleCredentials.clientId}` : 'Importe o client_secret.json do Google Cloud'}</div>
+            </div>
+            <label className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50">
+              <UploadCloud className="h-4 w-4" />
+              Importar JSON
+              <input type="file" accept="application/json,.json" className="hidden" onChange={importCredentialsFile} />
+            </label>
+          </div>
           <div className="grid gap-3 md:grid-cols-2">
-            <Field label="Google Client ID" value={oauth.clientId} onChange={value => setOauthValue('clientId', value)} placeholder="client_id do OAuth" />
-            <Field label="Google Client Secret" type="password" value={oauth.clientSecret} onChange={value => setOauthValue('clientSecret', value)} placeholder="client_secret do OAuth" />
+            <Field label="Google Client ID" value={oauth.clientId} onChange={value => setOauthValue('clientId', value)} placeholder={googleCredentials.configured ? 'usando JSON importado' : 'client_id do OAuth'} />
+            <Field label="Google Client Secret" type="password" value={oauth.clientSecret} onChange={value => setOauthValue('clientSecret', value)} placeholder={googleCredentials.configured ? 'usando JSON importado' : 'client_secret do OAuth'} />
             <Field label="URL de retorno" value={oauth.redirectUri} onChange={value => setOauthValue('redirectUri', value)} placeholder={`${window.location.origin}/api/backups/google/callback`} />
             <div className="flex items-end">
               <button
@@ -530,6 +558,8 @@ function BackupsView({ dashboard }) {
               </button>
             </div>
           </div>
+          {credentialsMutation.isSuccess ? <div className="mt-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Credenciais Google importadas.</div> : null}
+          {credentialsMutation.isError ? <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{credentialsMutation.error?.message}</div> : null}
           {googleMutation.isSuccess ? <div className="mt-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Autorizacao aberta em nova aba.</div> : null}
           {googleMutation.isError ? <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{googleMutation.error?.message}</div> : null}
         </div>
@@ -543,6 +573,10 @@ function BackupsView({ dashboard }) {
               className="mt-1 h-24 w-full rounded-md border border-amber-200 px-3 py-2 font-mono text-xs outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-100"
             />
           </label>
+          <div className="mt-3 rounded-md border border-amber-200 bg-white px-3 py-2">
+            <span className="text-xs font-medium uppercase text-amber-700">Comando para gerar token</span>
+            <code className="mt-1 block select-all rounded bg-slate-950 px-3 py-2 text-xs text-white">rclone authorize "drive"</code>
+          </div>
           <div className="mt-3 flex flex-wrap items-center gap-3">
             <button
               type="button"
@@ -553,7 +587,7 @@ function BackupsView({ dashboard }) {
               <Save className="h-4 w-4" />
               Adicionar token
             </button>
-            <a className="text-sm font-medium text-amber-800 hover:underline" href="https://rclone.org/commands/rclone_authorize/" target="_blank" rel="noreferrer">Abrir guia de geracao do token</a>
+            <a className="text-sm font-medium text-amber-800 hover:underline" href="https://rclone.org/commands/rclone_authorize/" target="_blank" rel="noreferrer">Abrir documentacao do comando</a>
           </div>
           {tokenMutation.isSuccess ? <div className="mt-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Token salvo e rclone.conf gerado.</div> : null}
           {tokenMutation.isError ? <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{tokenMutation.error?.message}</div> : null}
