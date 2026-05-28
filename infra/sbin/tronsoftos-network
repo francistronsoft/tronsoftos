@@ -54,11 +54,15 @@ sync_ip_envs() {
   local gateway="$4"
   local dns="$5"
   local server_ip="${address_cidr%%/*}"
+  local service_ip="$server_ip"
   local tronsoftos_env="/etc/tronsoftos/tronsoftos.env"
   local tronfire_env="$app_dir/apps/tronfire/.env"
   local troncomanda_env="$app_dir/apps/troncomanda/.env"
 
   valid_app_dir "$app_dir" || fail "Diretorio da aplicacao invalido"
+  if [ -f "$tronsoftos_env" ] && grep -q '^HA_VIP=.\+' "$tronsoftos_env"; then
+    service_ip="$(grep '^HA_VIP=' "$tronsoftos_env" | tail -n1 | cut -d= -f2-)"
+  fi
 
   set_env_value "$tronsoftos_env" "HOST_STATIC_IP_ENABLED" "true"
   set_env_value "$tronsoftos_env" "HOST_STATIC_IP_INTERFACE" "$iface"
@@ -70,7 +74,7 @@ sync_ip_envs() {
     set_env_value "$tronsoftos_env" "CLOUDFLARE_TARGET_IP" "$server_ip"
   fi
 
-  set_env_value "$tronfire_env" "TRONFIRE_LAN_HOST" "$server_ip"
+  set_env_value "$tronfire_env" "TRONFIRE_LAN_HOST" "$service_ip"
   local tronfire_port="8081"
   if [ -f "$tronfire_env" ] && grep -q '^TRONFIRE_PANEL_PORT=' "$tronfire_env"; then
     tronfire_port="$(grep '^TRONFIRE_PANEL_PORT=' "$tronfire_env" | tail -n1 | cut -d= -f2-)"

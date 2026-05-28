@@ -586,6 +586,7 @@ function bindFirebirdActions(refresh) {
 
 async function databases() {
   const [dbs, diagnosticData, firebirdInfo] = await Promise.all([api('/api/databases'), api('/api/preflight'), api('/api/services/firebird')]);
+  const firstDatabase = dbs.length === 0;
   const diagnosticById = new Map((diagnosticData.databases || []).map(db => [db.id, db]));
   content.innerHTML = `
     <div class="page-header"><h2 class="page-title">Bancos</h2></div>
@@ -596,7 +597,7 @@ async function databases() {
       <h3>Criar banco</h3>
       <div class="row g-2">
         <div class="col-md"><input id="dbName" class="form-control" placeholder="Nome do cliente"></div>
-        <div class="col-md"><input id="dbAlias" class="form-control" placeholder="ERP_TRONSOFT"></div>
+        <div class="col-md"><input id="dbAlias" class="form-control" placeholder="ERP_TRONSOFT" value="${firstDatabase ? 'ERP_TRONSOFT' : ''}" ${firstDatabase ? 'readonly' : ''}></div>
         <div class="col-md"><select id="dbType" class="form-select"><option value="PRODUCAO">Producao</option><option value="LEGADO_CONSULTA">Legado/Consulta</option><option value="HOMOLOGACAO">Homologacao</option></select></div>
         <div class="col-auto"><button id="btnAddDb" class="btn btn-primary">Criar</button></div>
         <div class="col-12"><div id="dbError" class="text-danger small mt-2"></div></div>
@@ -619,7 +620,7 @@ async function databases() {
   btnAddDb.onclick = async () => {
     try {
       dbError.textContent = '';
-      await api('/api/databases', { method:'POST', body: JSON.stringify({ name: dbName.value, alias: dbAlias.value, type: dbType.value, isPrimary: dbType.value === 'PRODUCAO', accessMode: dbType.value === 'LEGADO_CONSULTA' ? 'READ_ONLY':'READ_WRITE', backupEnabled: dbType.value === 'PRODUCAO' }) });
+      await api('/api/databases', { method:'POST', body: JSON.stringify({ name: dbName.value, alias: firstDatabase ? 'ERP_TRONSOFT' : dbAlias.value, type: dbType.value, isPrimary: dbType.value === 'PRODUCAO', accessMode: dbType.value === 'LEGADO_CONSULTA' ? 'READ_ONLY':'READ_WRITE', backupEnabled: dbType.value === 'PRODUCAO' }) });
       databases();
     } catch (err) {
       dbError.textContent = err.message;

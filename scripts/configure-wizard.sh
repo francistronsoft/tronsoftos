@@ -283,6 +283,7 @@ TRONSOFTOS_CLUSTER_LOCK=$APP_DIR/state/cluster-lock.json
 TRONSOFTOS_CLUSTER_SECRETS=$APP_DIR/state/cluster-secrets.env
 TRONSOFTOS_FRONTEND_DIST=$APP_DIR/frontend/dist
 TRONSOFTOS_NODE_IDENTITY=$APP_DIR/state/node-identity.json
+TRONSOFTOS_DOCKER_CONFIG=$APP_DIR/state/docker-config
 
 HOST_STATIC_IP_ENABLED=$STATIC_IP_ENABLED
 HOST_STATIC_IP_INTERFACE=$STATIC_IP_INTERFACE
@@ -331,6 +332,28 @@ CLOUDFLARE_RECORD_TYPE=A
 CLOUDFLARE_TARGET_IP=$CLOUDFLARE_TARGET_IP
 EOF
 
+line
+if ask_bool "Configurar login do GHCR para baixar imagens privadas agora?" "n"; then
+  GHCR_USER="$(ask "Usuario GitHub/GHCR" "")"
+  printf "Token GHCR com read:packages: "
+  IFS= read -rs GHCR_TOKEN
+  printf "\n"
+  if [ -n "$GHCR_USER" ] && [ -n "$GHCR_TOKEN" ]; then
+    mkdir -p "$APP_DIR/state/docker-config"
+    chmod 700 "$APP_DIR/state/docker-config"
+    if printf '%s\n' "$GHCR_TOKEN" | DOCKER_CONFIG="$APP_DIR/state/docker-config" docker login ghcr.io -u "$GHCR_USER" --password-stdin; then
+      echo "Login GHCR salvo para uso do TronSoftOS."
+    else
+      echo "Aviso: login GHCR falhou. Voce podera repetir depois no servidor com DOCKER_CONFIG=$APP_DIR/state/docker-config docker login ghcr.io" >&2
+    fi
+  else
+    echo "Login GHCR pulado: usuario ou token nao informado."
+  fi
+  unset GHCR_TOKEN
+else
+  echo "Login GHCR pulado. Se usar imagens privadas, configure antes de subir o app."
+fi
+
 cat > "$TRONFIRE_ENV" <<EOF
 APP_NAME=TronFire
 SERVER_PLATFORM=linux-docker
@@ -350,7 +373,7 @@ FIREBIRD_EXEC_MODE=$FIREBIRD_MODE
 
 TRONFIRE_PANEL_PORT=$TRONFIRE_PANEL_PORT
 TRONFIRE_FIREBIRD_PORT=$FIREBIRD_PORT
-TRONFIRE_LAN_HOST=$SERVER_IP
+TRONFIRE_LAN_HOST=${HA_VIP:-$SERVER_IP}
 PUBLIC_URL=http://$SERVER_IP:$TRONFIRE_PANEL_PORT
 
 FIREBIRD_PACKAGE_URL=https://tronsoft.bitrix24.com.br/~qQVae

@@ -751,7 +751,8 @@ app.post('/api/databases', { preHandler: requireOperator }, async (req, reply) =
   assertPrimaryWritable();
   const body = req.body || {};
   const name = normalizeName(body.name);
-  const alias = normalizeAlias(body.alias);
+  const databaseCount = await prisma.managedDatabase.count();
+  const alias = normalizeAlias(databaseCount === 0 ? 'ERP_TRONSOFT' : body.alias);
   const filePath = databasePathForAlias(alias);
   const existing = await prisma.managedDatabase.findFirst({
     where: { OR: [{ alias }, { filePath }] }

@@ -208,7 +208,7 @@ function Stat({ label, value, detail, icon: Icon, tone = 'slate' }) {
   );
 }
 
-function Field({ label, value, onChange, placeholder, type = 'text' }) {
+function Field({ label, value, onChange, placeholder, type = 'text', readOnly = false }) {
   return (
     <label className="block">
       <span className="text-xs font-medium uppercase text-slate-500">{label}</span>
@@ -216,8 +216,9 @@ function Field({ label, value, onChange, placeholder, type = 'text' }) {
         type={type}
         value={value}
         placeholder={placeholder}
-        onChange={event => onChange(event.target.value)}
-        className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+        readOnly={readOnly}
+        onChange={event => onChange?.(event.target.value)}
+        className={`mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100 ${readOnly ? 'bg-slate-50 text-slate-500' : ''}`}
       />
     </label>
   );
@@ -313,35 +314,9 @@ function DashboardView({ dashboard }) {
 }
 
 function AppsView({ dashboard, onAction, actionPending, actionJob }) {
-  const [registry, setRegistry] = useState({ registry: 'ghcr.io', username: '', token: '' });
-  const registryMutation = useMutation({
-    mutationFn: payload => postApi('/api/apps/registry-login', payload),
-    onSuccess: () => setRegistry(previous => ({ ...previous, token: '' }))
-  });
   return (
     <div className="space-y-4">
       {actionJob ? <ActionTerminal job={actionJob} /> : null}
-      <Card title="Registro de imagens" icon={Cloud} action={<StatusPill value={registryMutation.isSuccess ? 'online' : 'warning'} />}>
-        <form
-          className="grid gap-3 md:grid-cols-[1fr_1fr_1fr_auto]"
-          onSubmit={event => {
-            event.preventDefault();
-            registryMutation.mutate(registry);
-          }}
-        >
-          <Field label="Registry" value={registry.registry} onChange={value => setRegistry(previous => ({ ...previous, registry: value }))} placeholder="ghcr.io" />
-          <Field label="Usuario" value={registry.username} onChange={value => setRegistry(previous => ({ ...previous, username: value }))} placeholder="usuario GitHub" />
-          <Field label="Token" type="password" value={registry.token} onChange={value => setRegistry(previous => ({ ...previous, token: value }))} placeholder="token com read:packages" />
-          <div className="flex items-end">
-            <button disabled={registryMutation.isPending} className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
-              <Save className="h-4 w-4" />
-              Login
-            </button>
-          </div>
-        </form>
-        {registryMutation.isSuccess ? <div className="mt-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Login no registry realizado.</div> : null}
-        {registryMutation.isError ? <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{registryMutation.error?.message}</div> : null}
-      </Card>
       <div className="grid gap-4 xl:grid-cols-2">
         {dashboard.apps.map(app => (
           <Card key={app.name} title={app.name} icon={Boxes} action={<StatusPill value={app.status} />}>
@@ -780,9 +755,9 @@ function ClusterView({ dashboard }) {
             lockMutation.mutate(lockValues);
           }}
         >
-          <Field label="Cluster" value={lockValues.cluster} onChange={value => setLockValue('cluster', value)} placeholder="cliente-x" />
-          <Field label="No atual" value={lockValues.this_node} onChange={value => setLockValue('this_node', value)} placeholder="servidor-02" />
-          <Field label="No ativo" value={lockValues.active_node} onChange={value => setLockValue('active_node', value)} placeholder="servidor-01" />
+          <Field label="Cluster" value={lockValues.cluster} readOnly placeholder="cliente-x" />
+          <Field label="No atual" value={lockValues.this_node} readOnly placeholder="servidor-02" />
+          <Field label="No ativo" value={lockValues.active_node} readOnly placeholder="servidor-01" />
           <Field label="Ultimo standby valido" value={lockValues.last_valid_standby} onChange={value => setLockValue('last_valid_standby', value)} placeholder="2026-05-28 10:30" />
           <label className="block md:col-span-2">
             <span className="text-xs font-medium uppercase text-slate-500">Motivo/confirmacao</span>

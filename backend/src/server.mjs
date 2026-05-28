@@ -26,6 +26,7 @@ const googleOauthDir = process.env.TRONSOFTOS_GOOGLE_OAUTH_DIR || path.join(stat
 const frontendDist = process.env.TRONSOFTOS_FRONTEND_DIST || path.join(appRoot, 'frontend/dist');
 const actionJobs = new Map();
 const maxActionLogLength = 1024 * 128;
+const dockerConfigDir = process.env.TRONSOFTOS_DOCKER_CONFIG || path.join(stateDir, 'docker-config');
 let rcloneQuotaCache = { key: null, checkedAt: 0, value: null };
 
 function json(reply, status, body) {
@@ -765,6 +766,7 @@ function appAccessUrl(app) {
 async function run(command, args, options = {}) {
   const { stdout, stderr } = await execFileAsync(command, args, {
     cwd: options.cwd || appRoot,
+    env: options.env || process.env,
     timeout: options.timeout || 30_000,
     maxBuffer: options.maxBuffer || 1024 * 1024 * 3
   });
@@ -1457,7 +1459,7 @@ async function appAction(app, action) {
   if (action === 'up') args.push('up', '-d');
   else if (action === 'restart') args.push('restart');
   else args.push(action);
-  const out = await run('docker', args, { timeout: 1000 * 60 * 10, maxBuffer: 1024 * 1024 * 10 });
+  const out = await run('docker', args, { timeout: 1000 * 60 * 10, maxBuffer: 1024 * 1024 * 10, env: dockerEnv() });
   appendEvent(`APP_${action.toUpperCase()}`, { app: app.name, stdout: out.stdout, stderr: out.stderr });
   return out;
 }
@@ -1475,6 +1477,12 @@ function appActionCommand(app, action) {
   else if (action === 'restart') args.push('restart');
   else args.push(action);
   return { command: 'docker', args };
+}
+
+function dockerEnv() {
+  ensureStateDir();
+  fs.mkdirSync(dockerConfigDir, { recursive: true, mode: 0o700 });
+  return { ...process.env, DOCKER_CONFIG: dockerConfigDir };
 }
 
 function publicActionJob(job) {
@@ -1519,7 +1527,7 @@ function startAppAction(app, action) {
     stderr: ''
   };
   actionJobs.set(id, job);
-  const child = spawn(command, args, { cwd: appRoot, windowsHide: true });
+  const child = spawn(command, args, { cwd: appRoot, env: dockerEnv(), windowsHide: true });
   child.stdout.on('data', chunk => appendActionLog(job, 'stdout', chunk));
   child.stderr.on('data', chunk => appendActionLog(job, 'stderr', chunk));
   child.on('error', err => {
@@ -1597,7 +1605,7 @@ function dockerRegistryLogin(body) {
   if (!username) throw new Error('usuario obrigatorio');
   if (!token) throw new Error('token obrigatorio');
   return new Promise((resolve, reject) => {
-    const child = spawn('docker', ['login', registry, '-u', username, '--password-stdin'], { cwd: appRoot, windowsHide: true });
+    const child = spawn('docker', ['login', registry, '-u', username, '--password-stdin'], { cwd: appRoot, env: dockerEnv(), windowsHide: true });
     let stdout = '';
     let stderr = '';
     const timer = setTimeout(() => {
