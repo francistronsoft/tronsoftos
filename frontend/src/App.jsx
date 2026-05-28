@@ -387,6 +387,23 @@ function ActionTerminal({ job }) {
   );
 }
 
+function InlineTerminal({ job }) {
+  const output = [job.stdout, job.stderr].filter(Boolean).join('\n').trim();
+  const statusText = job.status === 'running' ? 'Executando' : job.status === 'success' ? 'Concluido' : 'Falhou';
+  return (
+    <div className="mt-4">
+      <div className="mb-2 flex flex-wrap items-center gap-3 text-xs text-slate-500">
+        <StatusPill value={job.status} />
+        <span>{statusText}</span>
+        <span className="font-mono">{job.command} {(job.args || []).join(' ')}</span>
+        {job.exitCode !== null && job.exitCode !== undefined ? <span>exit {job.exitCode}</span> : null}
+      </div>
+      <pre className="max-h-72 overflow-auto rounded-md bg-slate-950 p-4 text-xs leading-relaxed text-slate-100">{output || 'Aguardando saida do comando...'}</pre>
+      {job.error ? <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{job.error}</div> : null}
+    </div>
+  );
+}
+
 function DiagnosticsView() {
   const queryClient = useQueryClient();
   const diagnosticsQuery = useQuery({
@@ -499,10 +516,14 @@ function ClusterView({ dashboard }) {
   const cluster = dashboard.cluster;
   const identityQuery = useQuery({ queryKey: ['node-identity'], queryFn: () => api('/api/node-identity') });
   const lockQuery = useQuery({ queryKey: ['cluster-lock'], queryFn: () => api('/api/cluster/lock') });
+  const syncQuery = useQuery({ queryKey: ['ha-sync-settings'], queryFn: () => api('/api/cluster/sync') });
   const identity = identityQuery.data || cluster.identity || {};
   const lock = lockQuery.data || cluster.lock || {};
+  const sync = syncQuery.data || {};
   const [form, setForm] = useState(null);
   const [lockForm, setLockForm] = useState(null);
+  const [syncForm, setSyncForm] = useState(null);
+  const [syncJobId, setSyncJobId] = useState(null);
   const values = form || {
     clusterId: identity.clusterId || 'local',
     nodeName: identity.nodeName || cluster.nodeName || 'servidor-01',
@@ -516,6 +537,16 @@ function ClusterView({ dashboard }) {
     allow_promotion: lock.allow_promotion === true,
     last_valid_standby: lock.last_valid_standby || '',
     reason: lock.reason || ''
+  };
+  const syncValues = syncForm || {
+    enabled: sync.enabled || false,
+    standbyHost: sync.standbyHost || '',
+    sshUser: sync.sshUser || 'root',
+    sshPort: sync.sshPort || 22,
+    remoteBackupDir: sync.remoteBackupDir || '/opt/tronfire-storage/firebird/backups',
+    remoteCatalogDir: sync.remoteCatalogDir || '/opt/tronos/state/tronfire-catalog',
+    backupDir: sync.backupDir || '/opt/tronfire-storage/firebird/backups',
+    catalogDir: sync.catalogDir || '/opt/tronos/state/tronfire-catalog'
   };
   const saveMutation = useMutation({
     mutationFn: payload => fetch('/api/node-identity', {
@@ -571,8 +602,37 @@ function ClusterView({ dashboard }) {
       queryClient.invalidateQueries({ queryKey: ['events'] });
     }
   });
+  const syncMutation = useMutation({
+    mutationFn: payload => fetch('/api/cluster/sync', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).then(async response => {
+      if (!response.ok) throw new Error((await response.json()).error || `HTTP ${response.status}`);
+      return response.json();
+    }),
+    onSuccess: data => {
+      setSyncForm(data);
+      queryClient.invalidateQueries({ queryKey: ['ha-sync-settings'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    }
+  });
+  const runSyncMutation = useMutation({
+    mutationFn: () => postApi('/api/cluster/sync/run'),
+    onSuccess: data => {
+      setSyncJobId(data.job?.id || null);
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    }
+  });
+  const syncJobQuery = useQuery({
+    queryKey: ['ha-sync-job', syncJobId],
+    queryFn: () => api(`/api/actions/${syncJobId}`),
+    enabled: !!syncJobId,
+    refetchInterval: query => query.state.data?.status === 'running' ? 1200 : false
+  });
   const setValue = (key, value) => setForm(previous => ({ ...(previous || values), [key]: value }));
   const setLockValue = (key, value) => setLockForm(previous => ({ ...(previous || lockValues), [key]: value }));
+  const setSyncValue = (key, value) => setSyncForm(previous => ({ ...(previous || syncValues), [key]: value }));
   return (
     <div className="grid gap-5 xl:grid-cols-[0.9fr_1.1fr]">
       <Card title="Estado do cluster" icon={GitBranch}>
@@ -663,6 +723,40 @@ function ClusterView({ dashboard }) {
           {lockMutation.isSuccess || blockMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">Cluster-lock atualizado.</div> : null}
           {lockMutation.isError || blockMutation.isError ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 md:col-span-2">{lockMutation.error?.message || blockMutation.error?.message}</div> : null}
         </form>
+      </Card>
+      <Card title="Sync HA" icon={RefreshCw} action={<StatusPill value={syncValues.enabled ? 'online' : 'disabled'} />}>
+        <form
+          className="grid gap-3 md:grid-cols-2"
+          onSubmit={event => {
+            event.preventDefault();
+            syncMutation.mutate(syncValues);
+          }}
+        >
+          <div className="md:col-span-2">
+            <Checkbox label="Habilitar sincronizacao para standby" checked={syncValues.enabled} onChange={value => setSyncValue('enabled', value)} />
+          </div>
+          <Field label="Host/IP standby" value={syncValues.standbyHost} onChange={value => setSyncValue('standbyHost', value)} placeholder="192.168.1.153" />
+          <Field label="Usuario SSH" value={syncValues.sshUser} onChange={value => setSyncValue('sshUser', value)} placeholder="root" />
+          <Field label="Porta SSH" type="number" value={syncValues.sshPort} onChange={value => setSyncValue('sshPort', Number(value || 22))} placeholder="22" />
+          <Field label="Backups locais" value={syncValues.backupDir} onChange={value => setSyncValue('backupDir', value)} placeholder="/opt/tronfire-storage/firebird/backups" />
+          <Field label="Destino backups standby" value={syncValues.remoteBackupDir} onChange={value => setSyncValue('remoteBackupDir', value)} placeholder="/opt/tronfire-storage/firebird/backups" />
+          <Field label="Catalogo local" value={syncValues.catalogDir} onChange={value => setSyncValue('catalogDir', value)} placeholder="/opt/tronos/state/tronfire-catalog" />
+          <Field label="Destino catalogo standby" value={syncValues.remoteCatalogDir} onChange={value => setSyncValue('remoteCatalogDir', value)} placeholder="/opt/tronos/state/tronfire-catalog" />
+          <div className="md:col-span-2 flex flex-wrap items-center gap-3">
+            <button disabled={syncMutation.isPending} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
+              <Save className="h-4 w-4" />
+              Salvar sync
+            </button>
+            <button type="button" disabled={runSyncMutation.isPending || syncJobQuery.data?.status === 'running'} onClick={() => runSyncMutation.mutate()} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
+              <RefreshCw className="h-4 w-4" />
+              Sincronizar agora
+            </button>
+          </div>
+          {syncMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">Configuracao de sync salva.</div> : null}
+          {runSyncMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">Sync iniciado.</div> : null}
+          {syncMutation.isError || runSyncMutation.isError ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 md:col-span-2">{syncMutation.error?.message || runSyncMutation.error?.message}</div> : null}
+        </form>
+        {syncJobQuery.data ? <InlineTerminal job={syncJobQuery.data} /> : null}
       </Card>
       <Card title="Topologia HA" icon={Activity}><Topology dashboard={dashboard} /></Card>
     </div>

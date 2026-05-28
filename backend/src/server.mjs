@@ -20,6 +20,7 @@ const eventLogPath = process.env.TRONSOFTOS_EVENT_LOG || path.join(stateDir, 'ev
 const smtpSettingsPath = process.env.TRONSOFTOS_SMTP_SETTINGS || path.join(stateDir, 'smtp-settings.json');
 const cloudflareSettingsPath = process.env.TRONSOFTOS_CLOUDFLARE_SETTINGS || path.join(stateDir, 'cloudflare-settings.json');
 const rcloneSettingsPath = process.env.TRONSOFTOS_RCLONE_SETTINGS || path.join(stateDir, 'rclone-settings.json');
+const haSyncSettingsPath = process.env.TRONSOFTOS_HA_SYNC_SETTINGS || path.join(stateDir, 'ha-sync-settings.json');
 const googleCredentialsPath = process.env.TRONSOFTOS_GOOGLE_CREDENTIALS || path.join(stateDir, 'google-drive-credentials.json');
 const googleOauthDir = process.env.TRONSOFTOS_GOOGLE_OAUTH_DIR || path.join(stateDir, 'google-oauth');
 const frontendDist = process.env.TRONSOFTOS_FRONTEND_DIST || path.join(appRoot, 'frontend/dist');
@@ -180,6 +181,62 @@ function writeClusterLock(body) {
 
 function blockClusterPromotion(reason = '') {
   return writeClusterLock({ ...clusterLock(), allow_promotion: false, reason: String(reason || 'promocao bloqueada').trim() });
+}
+
+function rawHaSyncSettings() {
+  return {
+    enabled: false,
+    standbyHost: process.env.HA_SYNC_STANDBY_HOST || '',
+    sshUser: process.env.HA_SYNC_SSH_USER || 'root',
+    sshPort: Number(process.env.HA_SYNC_SSH_PORT || 22),
+    remoteBackupDir: process.env.HA_SYNC_REMOTE_BACKUP_DIR || '/opt/tronfire-storage/firebird/backups',
+    remoteCatalogDir: process.env.HA_SYNC_REMOTE_CATALOG_DIR || '/opt/tronos/state/tronfire-catalog',
+    backupDir: process.env.FIREBIRD_BACKUP_DIR || '/opt/tronfire-storage/firebird/backups',
+    catalogDir: process.env.TRONFIRE_CATALOG_EXPORT_DIR || path.join(stateDir, 'tronfire-catalog'),
+    ...readJson(haSyncSettingsPath, {})
+  };
+}
+
+function publicHaSyncSettings(settings = rawHaSyncSettings()) {
+  return {
+    enabled: settings.enabled === true,
+    standbyHost: settings.standbyHost || '',
+    sshUser: settings.sshUser || 'root',
+    sshPort: Number(settings.sshPort || 22),
+    remoteBackupDir: settings.remoteBackupDir || '/opt/tronfire-storage/firebird/backups',
+    remoteCatalogDir: settings.remoteCatalogDir || '/opt/tronos/state/tronfire-catalog',
+    backupDir: settings.backupDir || '/opt/tronfire-storage/firebird/backups',
+    catalogDir: settings.catalogDir || path.join(stateDir, 'tronfire-catalog')
+  };
+}
+
+function normalizeHaSyncSettings(body) {
+  const current = rawHaSyncSettings();
+  const next = {
+    enabled: body.enabled === true,
+    standbyHost: String(body.standbyHost || '').trim(),
+    sshUser: String(body.sshUser || current.sshUser || 'root').trim(),
+    sshPort: Number(body.sshPort || current.sshPort || 22),
+    remoteBackupDir: String(body.remoteBackupDir || current.remoteBackupDir || '/opt/tronfire-storage/firebird/backups').trim(),
+    remoteCatalogDir: String(body.remoteCatalogDir || current.remoteCatalogDir || '/opt/tronos/state/tronfire-catalog').trim(),
+    backupDir: String(body.backupDir || current.backupDir || '/opt/tronfire-storage/firebird/backups').trim(),
+    catalogDir: String(body.catalogDir || current.catalogDir || path.join(stateDir, 'tronfire-catalog')).trim()
+  };
+  if (next.enabled && !next.standbyHost) throw new Error('host standby nao informado');
+  if (!/^[A-Za-z0-9_.@-]{1,80}$/.test(next.sshUser)) throw new Error('usuario SSH invalido');
+  if (!Number.isInteger(next.sshPort) || next.sshPort < 1 || next.sshPort > 65535) throw new Error('porta SSH invalida');
+  for (const key of ['remoteBackupDir', 'remoteCatalogDir', 'backupDir', 'catalogDir']) {
+    if (!next[key].startsWith('/')) throw new Error(`${key} deve ser caminho absoluto`);
+  }
+  return next;
+}
+
+function writeHaSyncSettings(body) {
+  ensureStateDir();
+  const settings = normalizeHaSyncSettings(body);
+  fs.writeFileSync(haSyncSettingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
+  appendEvent('HA_SYNC_SETTINGS_UPDATED', { enabled: settings.enabled, standbyHost: settings.standbyHost, sshUser: settings.sshUser, sshPort: settings.sshPort });
+  return publicHaSyncSettings(settings);
 }
 
 function publicSmtpSettings(settings) {
@@ -1301,6 +1358,58 @@ function startAppAction(app, action) {
   return publicActionJob(job);
 }
 
+function startHaSync() {
+  const settings = rawHaSyncSettings();
+  if (settings.enabled !== true) throw new Error('sync HA desabilitado');
+  if (!settings.standbyHost) throw new Error('host standby nao configurado');
+  const script = path.join(appRoot, 'scripts/ha-sync-to-standby.sh');
+  if (!fs.existsSync(script)) throw new Error(`script nao encontrado: ${script}`);
+  const id = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
+  const job = {
+    id,
+    app: 'ha-sync',
+    action: 'run',
+    command: 'bash',
+    args: [script],
+    status: 'running',
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    exitCode: null,
+    error: null,
+    stdout: '',
+    stderr: ''
+  };
+  actionJobs.set(id, job);
+  const env = {
+    ...process.env,
+    TRONSOFTOS_APP_DIR: appRoot,
+    HA_SYNC_STANDBY_HOST: settings.standbyHost,
+    HA_SYNC_SSH_USER: settings.sshUser || 'root',
+    HA_SYNC_SSH_PORT: String(settings.sshPort || 22),
+    HA_SYNC_REMOTE_BACKUP_DIR: settings.remoteBackupDir || '/opt/tronfire-storage/firebird/backups',
+    HA_SYNC_REMOTE_CATALOG_DIR: settings.remoteCatalogDir || '/opt/tronos/state/tronfire-catalog',
+    FIREBIRD_BACKUP_DIR: settings.backupDir || '/opt/tronfire-storage/firebird/backups',
+    TRONFIRE_CATALOG_EXPORT_DIR: settings.catalogDir || path.join(stateDir, 'tronfire-catalog')
+  };
+  const child = spawn('bash', [script], { cwd: appRoot, env, windowsHide: true });
+  child.stdout.on('data', chunk => appendActionLog(job, 'stdout', chunk));
+  child.stderr.on('data', chunk => appendActionLog(job, 'stderr', chunk));
+  child.on('error', err => {
+    job.status = 'failed';
+    job.error = err.message;
+    job.finishedAt = new Date().toISOString();
+    appendEvent('HA_SYNC_FAILED', { standbyHost: settings.standbyHost, error: err.message });
+  });
+  child.on('close', code => {
+    job.exitCode = code;
+    job.status = code === 0 ? 'success' : 'failed';
+    job.finishedAt = new Date().toISOString();
+    appendEvent(code === 0 ? 'HA_SYNC_FINISHED' : 'HA_SYNC_FAILED', { standbyHost: settings.standbyHost, exitCode: code, stdout: job.stdout, stderr: job.stderr });
+  });
+  appendEvent('HA_SYNC_STARTED', { standbyHost: settings.standbyHost, sshUser: settings.sshUser, sshPort: settings.sshPort });
+  return publicActionJob(job);
+}
+
 function dockerRegistryLogin(body) {
   const registry = String(body.registry || 'ghcr.io').trim();
   const username = String(body.username || '').trim();
@@ -1374,6 +1483,9 @@ async function handleApi(req, reply, url) {
   if (req.method === 'GET' && url.pathname === '/api/cluster/lock') return json(reply, 200, clusterLock());
   if (req.method === 'PATCH' && url.pathname === '/api/cluster/lock') return json(reply, 200, writeClusterLock(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/cluster/promotion/block') return json(reply, 200, blockClusterPromotion((await readBody(req).catch(() => ({}))).reason));
+  if (req.method === 'GET' && url.pathname === '/api/cluster/sync') return json(reply, 200, publicHaSyncSettings());
+  if (req.method === 'PATCH' && url.pathname === '/api/cluster/sync') return json(reply, 200, writeHaSyncSettings(await readBody(req)));
+  if (req.method === 'POST' && url.pathname === '/api/cluster/sync/run') return json(reply, 202, { ok: true, job: startHaSync() });
   if (req.method === 'GET' && url.pathname === '/api/node-identity') return json(reply, 200, nodeIdentity());
   if (req.method === 'PATCH' && url.pathname === '/api/node-identity') return json(reply, 200, writeNodeIdentity(await readBody(req)));
   if (req.method === 'GET' && url.pathname === '/api/backups') return json(reply, 200, await backupStatus());
