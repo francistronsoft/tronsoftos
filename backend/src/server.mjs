@@ -51,7 +51,6 @@ function ensureStateDir() {
 }
 
 function appendEvent(type, details = {}) {
-  ensureStateDir();
   const event = {
     id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     type,
@@ -59,7 +58,12 @@ function appendEvent(type, details = {}) {
     node: process.env.TRONSOFTOS_NODE_NAME || null,
     createdAt: new Date().toISOString()
   };
-  fs.appendFileSync(eventLogPath, `${JSON.stringify(event)}\n`);
+  try {
+    ensureStateDir();
+    fs.appendFileSync(eventLogPath, `${JSON.stringify(event)}\n`);
+  } catch (err) {
+    console.error(`Nao foi possivel gravar evento ${type} em ${eventLogPath}: ${err.message}`);
+  }
   return event;
 }
 
@@ -796,20 +800,40 @@ function parseJsonLines(text) {
 
 function parseEnvFile(filePath) {
   try {
-    return fs.readFileSync(filePath, 'utf8')
-      .split(/\r?\n/)
-      .map(line => line.trim())
-      .filter(line => line && !line.startsWith('#') && line.includes('='))
-      .reduce((acc, line) => {
-        const index = line.indexOf('=');
-        const key = line.slice(0, index).trim();
-        const value = line.slice(index + 1).trim().replace(/^["']|["']$/g, '');
-        acc[key] = value;
-        return acc;
-      }, {});
+    return parseEnvText(fs.readFileSync(filePath, 'utf8'));
   } catch {
     return {};
   }
+}
+
+function parseEnvText(text) {
+  return String(text || '')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line && !line.startsWith('#') && line.includes('='))
+    .reduce((acc, line) => {
+      const index = line.indexOf('=');
+      const key = line.slice(0, index).trim();
+      const value = line.slice(index + 1).trim().replace(/^["']|["']$/g, '');
+      acc[key] = value;
+      return acc;
+    }, {});
+}
+
+function normalizePairingContent(content) {
+  const env = parseEnvText(content);
+  const required = ['SESSION_SECRET', 'TRONSOFTOS_INTERNAL_TOKEN', 'POSTGRES_PASSWORD', 'FIREBIRD_PASSWORD'];
+  const normalized = {};
+  for (const key of required) {
+    const value = String(env[key] || '').trim();
+    if (!value) throw new Error(`${key} ausente no arquivo de pareamento`);
+    if (!/^[A-Za-z0-9+/=_.:@-]{4,256}$/.test(value)) throw new Error(`${key} possui caracteres invalidos`);
+    normalized[key] = value;
+  }
+  return {
+    values: normalized,
+    content: `${required.map(key => `${key}=${normalized[key]}`).join('\n')}\n`
+  };
 }
 
 function fileCheck(label, filePath, kind = 'file') {
@@ -940,13 +964,16 @@ function clusterStatus() {
     nodeRole: identity.nodeRole || process.env.TRONFIRE_NODE_ROLE || process.env.TRONSOFTOS_NODE_ROLE || 'primary',
     identity,
     vip: process.env.HA_VIP || null,
+    vipCidr: process.env.HA_VIP_CIDR || null,
     lockPath: clusterLockPath,
     lock,
     guard,
     keepalived: {
       enabled: process.env.TRONSOFTOS_KEEPALIVED_ENABLED === 'true',
       interface: process.env.HA_INTERFACE || null,
-      routerId: process.env.HA_ROUTER_ID || null
+      routerId: process.env.HA_ROUTER_ID || null,
+      nodeState: process.env.HA_NODE_ROLE || null,
+      priority: process.env.HA_PRIORITY || null
     }
   };
 }
@@ -1299,6 +1326,24 @@ function assertNetworkPayload(body) {
   return payload;
 }
 
+function assertVipPayload(body) {
+  const payload = {
+    interfaceName: String(body.interfaceName || '').trim(),
+    vipCidr: String(body.vipCidr || '').trim(),
+    routerId: Number(body.routerId || 51),
+    authPass: String(body.authPass || '').trim(),
+    nodeState: String(body.nodeState || 'BACKUP').trim().toUpperCase(),
+    priority: Number(body.priority || 100)
+  };
+  if (!/^[A-Za-z0-9_.:-]+$/.test(payload.interfaceName)) throw new Error('interface invalida');
+  if (!/^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/.test(payload.vipCidr)) throw new Error('vip/cidr invalido');
+  if (!Number.isInteger(payload.routerId) || payload.routerId < 1 || payload.routerId > 255) throw new Error('router id invalido');
+  if (!/^[A-Za-z0-9_.:-]{6,32}$/.test(payload.authPass)) throw new Error('senha VRRP invalida');
+  if (!['MASTER', 'BACKUP'].includes(payload.nodeState)) throw new Error('papel keepalived invalido');
+  if (!Number.isInteger(payload.priority) || payload.priority < 1 || payload.priority > 254) throw new Error('prioridade invalida');
+  return payload;
+}
+
 async function hostNetworkStatic(body) {
   const payload = assertNetworkPayload(body);
   const out = await privilegedRun('/usr/local/sbin/tronsoftos-network', [
@@ -1316,6 +1361,73 @@ async function hostNetworkStatic(body) {
     ...result,
     reloadRequired: true,
     reloadHint: 'Reinicie TronSoftOS e containers TronFire para carregar os envs atualizados.',
+    stderr: out.stderr
+  };
+}
+
+async function hostNetworkVip(body) {
+  const payload = assertVipPayload(body);
+  const out = await privilegedRun('/usr/local/sbin/tronsoftos-network', [
+    'apply-vip',
+    appRoot,
+    payload.interfaceName,
+    payload.vipCidr,
+    String(payload.routerId),
+    payload.authPass,
+    payload.nodeState,
+    String(payload.priority)
+  ], { timeout: 120_000, maxBuffer: 1024 * 1024 * 2 });
+  const result = parseJsonLines(out.stdout).at(-1) || { ok: true };
+  appendEvent('HOST_NETWORK_VIP_CONFIGURED', {
+    interfaceName: payload.interfaceName,
+    vipCidr: payload.vipCidr,
+    routerId: payload.routerId,
+    nodeState: payload.nodeState,
+    priority: payload.priority,
+    result
+  });
+  return {
+    ...result,
+    reloadRequired: true,
+    reloadHint: 'Reinicie TronSoftOS e containers TronFire para carregar os envs atualizados.',
+    stderr: out.stderr
+  };
+}
+
+async function importPairingFile(body) {
+  const rawContent = typeof body.content === 'string' ? body.content : '';
+  if (!rawContent.trim()) throw new Error('arquivo de pareamento vazio');
+  if (Buffer.byteLength(rawContent, 'utf8') > 64 * 1024) throw new Error('arquivo de pareamento muito grande');
+
+  ensureStateDir();
+  const pairing = normalizePairingContent(rawContent);
+  const importPath = path.join(stateDir, `pairing-import-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.env`);
+  fs.writeFileSync(importPath, pairing.content, { mode: 0o600 });
+
+  const out = await privilegedRun('/usr/local/sbin/tronsoftos-network', [
+    'apply-pairing',
+    appRoot,
+    importPath
+  ], { timeout: 60_000, maxBuffer: 1024 * 1024 });
+  const result = parseJsonLines(out.stdout).at(-1) || { ok: true };
+
+  process.env.TRONSOFTOS_INTERNAL_TOKEN = pairing.values.TRONSOFTOS_INTERNAL_TOKEN;
+  appendEvent('CLUSTER_PAIRING_IMPORTED', {
+    keys: Object.keys(pairing.values),
+    clusterSecrets: result.clusterSecrets || clusterSecretsPath,
+    tronfireEnv: result.tronfireEnv || path.join(appRoot, 'apps/tronfire/.env')
+  });
+  return {
+    ok: true,
+    importedKeys: Object.keys(pairing.values),
+    paths: {
+      clusterSecrets: result.clusterSecrets || clusterSecretsPath,
+      tronsoftosEnv: result.tronsoftosEnv || '/etc/tronsoftos/tronsoftos.env',
+      tronfireEnv: result.tronfireEnv || path.join(appRoot, 'apps/tronfire/.env'),
+      troncomandaEnvUpdated: result.troncomandaEnvUpdated === true
+    },
+    reloadRequired: true,
+    reloadHint: 'Reinicie TronSoftOS e TronFire para carregar os segredos importados.',
     stderr: out.stderr
   };
 }
@@ -1697,10 +1809,12 @@ async function handleApi(req, reply, url) {
   if (req.method === 'PATCH' && url.pathname === '/api/settings/smtp') return json(reply, 200, writeSmtpSettings(await readBody(req)));
   if (req.method === 'GET' && url.pathname === '/api/events') return json(reply, 200, { events: readEvents(Number(url.searchParams.get('limit') || 100)) });
   if (req.method === 'GET' && url.pathname === '/api/cluster/pairing-file') return exportPairingFile(reply);
+  if (req.method === 'POST' && url.pathname === '/api/cluster/pairing-file/import') return json(reply, 200, await importPairingFile(await readBody(req)));
   if (req.method === 'GET' && url.pathname === '/api/host/firebird') return json(reply, 200, await hostFirebirdStatus());
   if (req.method === 'POST' && url.pathname === '/api/host/firebird/aliases') return json(reply, 200, await hostFirebirdAliases(req));
   if (req.method === 'GET' && url.pathname === '/api/host/network') return json(reply, 200, await hostNetworkStatus());
   if (req.method === 'POST' && url.pathname === '/api/host/network/static') return json(reply, 200, await hostNetworkStatic(await readBody(req)));
+  if (req.method === 'POST' && url.pathname === '/api/host/network/vip') return json(reply, 200, await hostNetworkVip(await readBody(req)));
   const hostFirebirdMatch = url.pathname.match(/^\/api\/host\/firebird\/(start|stop|restart)$/);
   if (req.method === 'POST' && hostFirebirdMatch) return json(reply, 200, await hostFirebirdAction(hostFirebirdMatch[1]));
   const actionMatch = url.pathname.match(/^\/api\/apps\/([^/]+)\/(up|stop|restart|pull)$/);

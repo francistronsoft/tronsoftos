@@ -158,6 +158,10 @@ sed -i "s|/opt/tronsoftos|$APP_DIR|g" /etc/systemd/system/tronsoftos.service
 sed -i "s|/opt/tronsoftos|$APP_DIR|g" /etc/systemd/system/tronsoftos-rclone-backup.service
 
 chown -R "$USER_NAME:$GROUP_NAME" "$APP_DIR" /opt/tronfire-storage
+touch "$APP_DIR/state/events.jsonl"
+chown "$USER_NAME:$GROUP_NAME" "$APP_DIR/state/events.jsonl"
+chmod 700 "$APP_DIR/state"
+chmod 600 "$APP_DIR/state/events.jsonl"
 chmod +x "$APP_DIR/scripts/"*.sh "$APP_DIR/infra/keepalived/check-tronsoftos.sh"
 
 systemctl daemon-reload

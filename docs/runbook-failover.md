@@ -62,6 +62,13 @@ Ponto crítico: nunca permita dois nós escrevendo no mesmo banco Firebird ao me
 
 ## Teste De HA
 
+Para execucao completa com registro de evidencias, use tambem:
+
+```text
+docs/plano-testes-ha-failover.md
+scripts/ha-smoke-test.sh
+```
+
 Checklist mínimo:
 
 - VIP responde no MASTER.

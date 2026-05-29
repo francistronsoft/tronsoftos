@@ -165,6 +165,14 @@ function formatBytes(value) {
   return `${current >= 10 || unit === 0 ? Math.round(current) : current.toFixed(1)} ${units[unit]}`;
 }
 
+function formatDateTime(value) {
+  if (!value) return '-';
+  return new Date(value).toLocaleString('pt-BR', {
+    dateStyle: 'short',
+    timeStyle: 'medium'
+  });
+}
+
 function diagnosticIcon(status) {
   if (status === 'ok') return <CheckCircle2 className="h-4 w-4 text-green-600" />;
   if (status === 'warning') return <AlertTriangle className="h-4 w-4 text-amber-600" />;
@@ -286,11 +294,12 @@ function DashboardView({ dashboard }) {
   const alerts = dashboard.alerts || [];
   return (
     <div className="space-y-5">
-      <div className="grid gap-4 lg:grid-cols-4">
+      <div className="grid gap-4 lg:grid-cols-5">
         <Stat label="No atual" value={dashboard.cluster.nodeName} detail={dashboard.cluster.mode} icon={Server} tone="sky" />
         <Stat label="Papel" value={dashboard.cluster.nodeRole} detail={dashboard.cluster.vip || 'VIP nao configurado'} icon={ShieldCheck} tone="green" />
         <Stat label="Apps online" value={`${onlineApps}/${dashboard.apps.length}`} detail="containers gerenciados" icon={Boxes} tone="slate" />
         <Stat label="Alertas" value={alerts.length} detail={alerts[0]?.message || 'sem alertas ativos'} icon={AlertTriangle} tone={alerts.length ? 'amber' : 'green'} />
+        <Stat label="Hora servidor" value={formatDateTime(dashboard.generatedAt)} detail="gerado pelo backend" icon={FileClock} tone="slate" />
       </div>
       <div className="grid gap-5 xl:grid-cols-[1.3fr_0.7fr]">
         <Card title="Topologia" icon={GitBranch}><Topology dashboard={dashboard} /></Card>
@@ -509,6 +518,7 @@ function ClusterView({ dashboard }) {
   const [form, setForm] = useState(null);
   const [lockForm, setLockForm] = useState(null);
   const [syncForm, setSyncForm] = useState(null);
+  const [vipForm, setVipForm] = useState(null);
   const [syncJobId, setSyncJobId] = useState(null);
   const values = form || {
     clusterId: identity.clusterId || 'local',
@@ -533,6 +543,14 @@ function ClusterView({ dashboard }) {
     remoteCatalogDir: sync.remoteCatalogDir || '/opt/tronos/state/tronfire-catalog',
     backupDir: sync.backupDir || '/opt/tronfire-storage/firebird/backups',
     catalogDir: sync.catalogDir || '/opt/tronos/state/tronfire-catalog'
+  };
+  const vipValues = vipForm || {
+    interfaceName: cluster.keepalived?.interface || networkImpact.current?.interface || 'eth0',
+    vipCidr: cluster.vipCidr || (cluster.vip ? `${cluster.vip}/24` : ''),
+    routerId: Number(cluster.keepalived?.routerId || 51),
+    authPass: '',
+    nodeState: cluster.keepalived?.nodeState || (values.nodeRole === 'primary' ? 'MASTER' : 'BACKUP'),
+    priority: Number(cluster.keepalived?.priority || (values.nodeRole === 'primary' ? 150 : 100))
   };
   const saveMutation = useMutation({
     mutationFn: payload => fetch('/api/node-identity', {
@@ -648,9 +666,19 @@ function ClusterView({ dashboard }) {
     enabled: !!syncJobId,
     refetchInterval: query => query.state.data?.status === 'running' ? 1200 : false
   });
+  const vipMutation = useMutation({
+    mutationFn: payload => postApi('/api/host/network/vip', payload),
+    onSuccess: data => {
+      setVipForm(previous => ({ ...(previous || vipValues), vipCidr: data.vipCidr || vipValues.vipCidr, authPass: '' }));
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['cluster-network-impact'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    }
+  });
   const setValue = (key, value) => setForm(previous => ({ ...(previous || values), [key]: value }));
   const setLockValue = (key, value) => setLockForm(previous => ({ ...(previous || lockValues), [key]: value }));
   const setSyncValue = (key, value) => setSyncForm(previous => ({ ...(previous || syncValues), [key]: value }));
+  const setVipValue = (key, value) => setVipForm(previous => ({ ...(previous || vipValues), [key]: value }));
   return (
     <div className="grid gap-5 xl:grid-cols-[0.9fr_1.1fr]">
       <Card title="Estado do cluster" icon={GitBranch}>
@@ -746,6 +774,44 @@ function ClusterView({ dashboard }) {
             </ul>
           </div>
         ) : null}
+      </Card>
+      <Card title="VIP Keepalived" icon={Network} action={<StatusPill value={cluster.keepalived?.enabled ? 'online' : 'disabled'} />}>
+        <form
+          className="grid gap-3 md:grid-cols-2"
+          onSubmit={event => {
+            event.preventDefault();
+            vipMutation.mutate(vipValues);
+          }}
+        >
+          <Field label="Interface" value={vipValues.interfaceName} onChange={value => setVipValue('interfaceName', value)} placeholder="eth0" />
+          <Field label="VIP/CIDR" value={vipValues.vipCidr} onChange={value => setVipValue('vipCidr', value)} placeholder="192.168.1.200/24" />
+          <Field label="Router ID" type="number" value={vipValues.routerId} onChange={value => setVipValue('routerId', Number(value || 51))} placeholder="51" />
+          <Field label="Senha VRRP" type="password" value={vipValues.authPass} onChange={value => setVipValue('authPass', value)} placeholder="6 a 32 caracteres" />
+          <label className="block">
+            <span className="text-xs font-medium uppercase text-slate-500">Papel Keepalived</span>
+            <select value={vipValues.nodeState} onChange={event => setVipValue('nodeState', event.target.value)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100">
+              <option value="MASTER">MASTER</option>
+              <option value="BACKUP">BACKUP</option>
+            </select>
+          </label>
+          <Field label="Prioridade" type="number" value={vipValues.priority} onChange={value => setVipValue('priority', Number(value || 100))} placeholder="150" />
+          <div className="md:col-span-2 flex flex-wrap items-center gap-3">
+            <button disabled={vipMutation.isPending} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
+              <Save className="h-4 w-4" />
+              Aplicar VIP
+            </button>
+            {vipMutation.isSuccess ? <StatusPill value="online" /> : null}
+            {vipMutation.isError ? <span className="text-sm text-red-700">{vipMutation.error.message}</span> : null}
+          </div>
+          {vipMutation.data?.reloadRequired ? (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 md:col-span-2">
+              Keepalived atualizado. Reinicie TronSoftOS e apps gerenciados para recarregar variaveis sincronizadas.
+            </div>
+          ) : null}
+          <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800 md:col-span-2">
+            Use a mesma senha e router ID nos dois nos. O principal normalmente usa prioridade 150 e o standby 100.
+          </div>
+        </form>
       </Card>
       <Card title="Controle de promocao" icon={ShieldCheck} action={<StatusPill value={lockValues.allow_promotion ? 'warning' : 'disabled'} />}>
         <form
@@ -1361,7 +1427,29 @@ function SmtpSettings() {
   );
 }
 
-function SettingsView() {
+function SettingsView({ dashboard }) {
+  const queryClient = useQueryClient();
+  const cluster = dashboard.cluster || {};
+  const guard = cluster.guard || {};
+  const canExportPairing = cluster.mode !== 'ha' || guard.canServeProduction === true || cluster.nodeRole === 'primary';
+  const canImportPairing = cluster.mode === 'ha' && !canExportPairing && ['standby', 'recovery'].includes(cluster.nodeRole);
+  const pairingImportMutation = useMutation({
+    mutationFn: content => postApi('/api/cluster/pairing-file/import', { content }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+      queryClient.invalidateQueries({ queryKey: ['cluster-guard'] });
+    }
+  });
+  const importPairingFile = event => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => pairingImportMutation.mutate(String(reader.result || ''));
+    reader.readAsText(file);
+    event.target.value = '';
+  };
+
   return (
     <div className="space-y-5">
       <Card title="Ajustes" icon={Settings}>
@@ -1377,13 +1465,41 @@ function SettingsView() {
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
             <div className="text-sm font-semibold text-slate-900">Arquivo do no principal</div>
-            <div className="mt-1 text-sm text-slate-500">Use este arquivo no wizard do servidor standby para compartilhar os segredos do cluster.</div>
+            <div className="mt-1 text-sm text-slate-500">
+              {canExportPairing ? 'Exporte deste no ativo para parear um standby.' : 'Importe no standby o arquivo exportado pelo no ativo.'}
+            </div>
           </div>
-          <a href="/api/cluster/pairing-file" className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50">
-            <UploadCloud className="h-4 w-4" />
-            Exportar arquivo
-          </a>
+          <div className="flex flex-wrap items-center gap-3">
+            {canImportPairing ? (
+              <label className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800">
+                <UploadCloud className="h-4 w-4" />
+                Importar arquivo
+                <input type="file" accept=".env,text/plain" className="hidden" onChange={importPairingFile} />
+              </label>
+            ) : null}
+            {canExportPairing ? (
+              <a href="/api/cluster/pairing-file" className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50">
+                <UploadCloud className="h-4 w-4" />
+                Exportar arquivo
+              </a>
+            ) : null}
+          </div>
         </div>
+        {!canExportPairing && !canImportPairing ? (
+          <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+            Pareamento indisponivel para o estado atual do no.
+          </div>
+        ) : null}
+        {pairingImportMutation.isSuccess ? (
+          <div className="mt-4 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">
+            Pareamento importado. Reinicie TronSoftOS e TronFire para carregar os segredos no standby.
+          </div>
+        ) : null}
+        {pairingImportMutation.isError ? (
+          <div className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {pairingImportMutation.error.message}
+          </div>
+        ) : null}
       </Card>
     </div>
   );
@@ -1430,7 +1546,7 @@ export default function App() {
     cloudflare: <CloudflareView dashboard={dashboard} />,
     updates: <UpdatesView />,
     events: <EventsView />,
-    settings: <SettingsView />
+    settings: <SettingsView dashboard={dashboard} />
   }[active];
 
   return (
@@ -1463,6 +1579,10 @@ export default function App() {
             <h1 className="text-xl font-semibold text-slate-950">{activeItem.label}</h1>
           </div>
           <div className="flex items-center gap-3">
+            <div className="hidden text-right text-xs text-slate-500 sm:block">
+              <div className="font-medium uppercase">Hora do servidor</div>
+              <div className="font-mono text-slate-900">{formatDateTime(dashboard.generatedAt)}</div>
+            </div>
             {dashboardQuery.isError ? <StatusPill value="offline" /> : <StatusPill value="online" />}
             <StatusPill value={dashboard.cluster.nodeRole} />
           </div>

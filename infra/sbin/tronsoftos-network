@@ -47,6 +47,42 @@ set_env_value() {
   fi
 }
 
+apply_pairing() {
+  local app_dir="$1"
+  local source_file="$2"
+  local tronsoftos_env="/etc/tronsoftos/tronsoftos.env"
+  local tronfire_env="$app_dir/apps/tronfire/.env"
+  local troncomanda_env="$app_dir/apps/troncomanda/.env"
+  local cluster_secrets="$app_dir/state/cluster-secrets.env"
+
+  valid_app_dir "$app_dir" || fail "Diretorio da aplicacao invalido"
+  [[ "$source_file" =~ ^/opt/[A-Za-z0-9._/-]+/state/pairing-import-[A-Za-z0-9._-]+\.env$ ]] || fail "Caminho de pareamento invalido"
+  [ -f "$source_file" ] || fail "Arquivo de pareamento nao encontrado"
+
+  # shellcheck disable=SC1090
+  . "$source_file"
+
+  [ -n "${SESSION_SECRET:-}" ] || fail "SESSION_SECRET ausente no pareamento"
+  [ -n "${TRONSOFTOS_INTERNAL_TOKEN:-}" ] || fail "TRONSOFTOS_INTERNAL_TOKEN ausente no pareamento"
+  [ -n "${POSTGRES_PASSWORD:-}" ] || fail "POSTGRES_PASSWORD ausente no pareamento"
+  [ -n "${FIREBIRD_PASSWORD:-}" ] || fail "FIREBIRD_PASSWORD ausente no pareamento"
+
+  install -m 0600 "$source_file" "$cluster_secrets"
+
+  set_env_value "$tronsoftos_env" "TRONSOFTOS_INTERNAL_TOKEN" "$TRONSOFTOS_INTERNAL_TOKEN"
+
+  set_env_value "$tronfire_env" "SESSION_SECRET" "$SESSION_SECRET"
+  set_env_value "$tronfire_env" "TRONSOFTOS_INTERNAL_TOKEN" "$TRONSOFTOS_INTERNAL_TOKEN"
+  set_env_value "$tronfire_env" "FIREBIRD_PASSWORD" "$FIREBIRD_PASSWORD"
+
+  if [ -f "$troncomanda_env" ]; then
+    set_env_value "$troncomanda_env" "TRONCOMANDA_FIREBIRD_PASSWORD" "$FIREBIRD_PASSWORD"
+  fi
+
+  printf '{"ok":true,"clusterSecrets":"%s","tronsoftosEnv":"%s","tronfireEnv":"%s","troncomandaEnvUpdated":%s}\n' \
+    "$(json_escape "$cluster_secrets")" "$(json_escape "$tronsoftos_env")" "$(json_escape "$tronfire_env")" "$([ -f "$troncomanda_env" ] && echo true || echo false)"
+}
+
 sync_ip_envs() {
   local app_dir="$1"
   local iface="$2"
@@ -79,7 +115,7 @@ sync_ip_envs() {
   if [ -f "$tronfire_env" ] && grep -q '^TRONFIRE_PANEL_PORT=' "$tronfire_env"; then
     tronfire_port="$(grep '^TRONFIRE_PANEL_PORT=' "$tronfire_env" | tail -n1 | cut -d= -f2-)"
   fi
-  set_env_value "$tronfire_env" "PUBLIC_URL" "http://$server_ip:$tronfire_port"
+  set_env_value "$tronfire_env" "PUBLIC_URL" "http://$service_ip:$tronfire_port"
 
   if [ -f "$troncomanda_env" ]; then
     set_env_value "$troncomanda_env" "TRONCOMANDA_LAN_HOST" "$service_ip"
@@ -89,6 +125,114 @@ sync_ip_envs() {
     fi
     set_env_value "$troncomanda_env" "TRONCOMANDA_PUBLIC_URL" "http://$service_ip:$troncomanda_port"
   fi
+}
+
+sync_service_vip_envs() {
+  local app_dir="$1"
+  local service_ip="$2"
+  local tronsoftos_env="/etc/tronsoftos/tronsoftos.env"
+  local tronfire_env="$app_dir/apps/tronfire/.env"
+  local troncomanda_env="$app_dir/apps/troncomanda/.env"
+
+  valid_app_dir "$app_dir" || fail "Diretorio da aplicacao invalido"
+  valid_ipv4 "$service_ip" || fail "VIP invalido"
+
+  set_env_value "$tronsoftos_env" "CLOUDFLARE_TARGET_IP" "$service_ip"
+
+  set_env_value "$tronfire_env" "TRONFIRE_LAN_HOST" "$service_ip"
+  local tronfire_port="8081"
+  if [ -f "$tronfire_env" ] && grep -q '^TRONFIRE_PANEL_PORT=' "$tronfire_env"; then
+    tronfire_port="$(grep '^TRONFIRE_PANEL_PORT=' "$tronfire_env" | tail -n1 | cut -d= -f2-)"
+  fi
+  set_env_value "$tronfire_env" "PUBLIC_URL" "http://$service_ip:$tronfire_port"
+
+  if [ -f "$troncomanda_env" ]; then
+    set_env_value "$troncomanda_env" "TRONCOMANDA_LAN_HOST" "$service_ip"
+    local troncomanda_port="8000"
+    if grep -q '^TRONCOMANDA_WEB_PORT=' "$troncomanda_env"; then
+      troncomanda_port="$(grep '^TRONCOMANDA_WEB_PORT=' "$troncomanda_env" | tail -n1 | cut -d= -f2-)"
+    fi
+    set_env_value "$troncomanda_env" "TRONCOMANDA_PUBLIC_URL" "http://$service_ip:$troncomanda_port"
+  fi
+}
+
+apply_vip() {
+  local app_dir="${1:-}"
+  local iface="${2:-}"
+  local vip_cidr="${3:-}"
+  local router_id="${4:-51}"
+  local auth_pass="${5:-}"
+  local node_state="${6:-BACKUP}"
+  local priority="${7:-100}"
+
+  valid_app_dir "$app_dir" || fail "Diretorio da aplicacao invalido"
+  valid_iface "$iface" || fail "Interface invalida"
+  valid_cidr "$vip_cidr" || fail "VIP/CIDR invalido"
+  [[ "$router_id" =~ ^[0-9]{1,3}$ ]] || fail "Router ID invalido"
+  [ "$router_id" -ge 1 ] && [ "$router_id" -le 255 ] || fail "Router ID deve ficar entre 1 e 255"
+  [[ "$priority" =~ ^[0-9]{1,3}$ ]] || fail "Prioridade invalida"
+  [ "$priority" -ge 1 ] && [ "$priority" -le 254 ] || fail "Prioridade deve ficar entre 1 e 254"
+  [[ "$node_state" =~ ^(MASTER|BACKUP)$ ]] || fail "Papel keepalived invalido"
+  [[ "$auth_pass" =~ ^[A-Za-z0-9_.:-]{6,32}$ ]] || fail "Senha VRRP invalida; use 6 a 32 caracteres simples"
+
+  local vip="${vip_cidr%%/*}"
+  local tronsoftos_env="/etc/tronsoftos/tronsoftos.env"
+  local check_source="$app_dir/infra/keepalived/check-tronsoftos.sh"
+  local check_target="/etc/keepalived/check-tronsoftos.sh"
+  local conf_target="/etc/keepalived/keepalived.conf"
+
+  [ -f "$check_source" ] || fail "check-tronsoftos.sh nao encontrado"
+  mkdir -p /etc/keepalived
+  install -m 0755 "$check_source" "$check_target"
+
+  cat > "$conf_target" <<EOF
+vrrp_script chk_tronsoftos {
+    script "$check_target"
+    interval 2
+    timeout 2
+    fall 3
+    rise 2
+    weight -50
+}
+
+vrrp_instance TRONSOFTOS_VIP {
+    state $node_state
+    interface $iface
+    virtual_router_id $router_id
+    priority $priority
+    advert_int 1
+
+    authentication {
+        auth_type PASS
+        auth_pass $auth_pass
+    }
+
+    virtual_ipaddress {
+        $vip_cidr
+    }
+
+    track_script {
+        chk_tronsoftos
+    }
+}
+EOF
+
+  set_env_value "$tronsoftos_env" "TRONSOFTOS_KEEPALIVED_ENABLED" "true"
+  set_env_value "$tronsoftos_env" "HA_INTERFACE" "$iface"
+  set_env_value "$tronsoftos_env" "HA_VIP" "$vip"
+  set_env_value "$tronsoftos_env" "HA_VIP_CIDR" "$vip_cidr"
+  set_env_value "$tronsoftos_env" "HA_ROUTER_ID" "$router_id"
+  set_env_value "$tronsoftos_env" "HA_AUTH_PASS" "$auth_pass"
+  set_env_value "$tronsoftos_env" "HA_NODE_ROLE" "$node_state"
+  set_env_value "$tronsoftos_env" "HA_PRIORITY" "$priority"
+
+  sync_service_vip_envs "$app_dir" "$vip"
+
+  systemctl enable keepalived.service >/dev/null 2>&1 || true
+  systemctl restart keepalived.service
+
+  printf '{"ok":true,"interface":"%s","vip":"%s","vipCidr":"%s","routerId":%s,"nodeState":"%s","priority":%s,"config":"%s"}\n' \
+    "$(json_escape "$iface")" "$(json_escape "$vip")" "$(json_escape "$vip_cidr")" "$router_id" "$(json_escape "$node_state")" "$priority" "$(json_escape "$conf_target")"
 }
 
 apply_static() {
@@ -181,6 +325,14 @@ case "$action" in
   install-firebird-aliases)
     shift
     install_firebird_aliases "$@"
+    ;;
+  apply-pairing)
+    shift
+    apply_pairing "$@"
+    ;;
+  apply-vip)
+    shift
+    apply_vip "$@"
     ;;
   *)
     fail "Acao invalida"
