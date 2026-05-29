@@ -246,6 +246,28 @@ function Checkbox({ label, checked, onChange }) {
   );
 }
 
+function SubTabs({ items, active, onChange }) {
+  return (
+    <div className="flex flex-wrap gap-2 rounded-lg border border-slate-200 bg-white p-2 shadow-soft">
+      {items.map(item => {
+        const selected = item.id === active;
+        const Icon = item.icon;
+        return (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => onChange(item.id)}
+            className={`inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium ${selected ? 'bg-slate-950 text-white' : 'text-slate-700 hover:bg-slate-100'}`}
+          >
+            {Icon ? <Icon className="h-4 w-4" /> : null}
+            {item.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function ServiceNode({ data }) {
   return (
     <div className="min-w-40 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm shadow-soft">
@@ -520,6 +542,7 @@ function ClusterView({ dashboard }) {
   const [syncForm, setSyncForm] = useState(null);
   const [vipForm, setVipForm] = useState(null);
   const [syncJobId, setSyncJobId] = useState(null);
+  const [clusterTab, setClusterTab] = useState('overview');
   const values = form || {
     clusterId: identity.clusterId || 'local',
     nodeName: identity.nodeName || cluster.nodeName || 'servidor-01',
@@ -679,102 +702,136 @@ function ClusterView({ dashboard }) {
   const setLockValue = (key, value) => setLockForm(previous => ({ ...(previous || lockValues), [key]: value }));
   const setSyncValue = (key, value) => setSyncForm(previous => ({ ...(previous || syncValues), [key]: value }));
   const setVipValue = (key, value) => setVipForm(previous => ({ ...(previous || vipValues), [key]: value }));
+  const clusterTabs = [
+    { id: 'overview', label: 'Visao geral', icon: Activity },
+    { id: 'identity', label: 'Identidade', icon: ShieldCheck },
+    { id: 'vip', label: 'VIP', icon: Network },
+    { id: 'sync', label: 'Sync', icon: RefreshCw },
+    { id: 'promotion', label: 'Promocao', icon: GitBranch }
+  ];
   return (
-    <div className="grid gap-5 xl:grid-cols-[0.9fr_1.1fr]">
-      <Card title="Estado do cluster" icon={GitBranch}>
-        <dl className="grid gap-3 text-sm">
-          {[
-            ['Modo', cluster.mode],
-            ['No', cluster.nodeName],
-            ['Papel', cluster.nodeRole],
-            ['Cluster ID', identity.clusterId || '-'],
-            ['Node ID', identity.nodeId || '-'],
-            ['Install ID', identity.installId || '-'],
-            ['VIP', cluster.vip || 'nao configurado'],
-            ['Keepalived', cluster.keepalived?.enabled ? 'ativo' : 'nao configurado'],
-            ['Cluster lock', cluster.lock ? 'presente' : 'ausente'],
-            ['Guard', guard.status || '-']
-          ].map(([label, value]) => (
-            <div key={label} className="flex items-center justify-between border-b border-slate-100 pb-2">
-              <dt className="text-slate-500">{label}</dt>
-              <dd className="font-medium text-slate-950">{value}</dd>
-            </div>
-          ))}
-        </dl>
-      </Card>
-      <Card title="Identidade do no" icon={ShieldCheck}>
-        <form
-          className="grid gap-3 md:grid-cols-2"
-          onSubmit={event => {
-            event.preventDefault();
-            saveMutation.mutate(values);
-          }}
-        >
-          <Field label="Cluster ID" value={values.clusterId} onChange={value => setValue('clusterId', value)} placeholder="cliente-x" />
-          <Field label="Nome do no" value={values.nodeName} onChange={value => setValue('nodeName', value)} placeholder="servidor-01" />
-          <label className="block">
-            <span className="text-xs font-medium uppercase text-slate-500">Modo</span>
-            <select value={values.deploymentMode} onChange={event => setValue('deploymentMode', event.target.value)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100">
-              <option value="simple">simple</option>
-              <option value="ha">ha</option>
-            </select>
-          </label>
-          <label className="block">
-            <span className="text-xs font-medium uppercase text-slate-500">Papel</span>
-            <select value={values.nodeRole} onChange={event => setValue('nodeRole', event.target.value)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100">
-              <option value="primary">primary</option>
-              <option value="standby">standby</option>
-              <option value="recovery">recovery</option>
-            </select>
-          </label>
-          <div className="md:col-span-2 flex flex-wrap items-center gap-3">
-            <button disabled={saveMutation.isPending} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
-              <Save className="h-4 w-4" />
-              Salvar identidade
-            </button>
-            {saveMutation.isSuccess ? <span className="text-sm text-green-700">Identidade salva.</span> : null}
-            {saveMutation.isError ? <span className="text-sm text-red-700">{saveMutation.error?.message}</span> : null}
+    <div className="space-y-5">
+      <SubTabs items={clusterTabs} active={clusterTab} onChange={setClusterTab} />
+
+      {clusterTab === 'overview' ? (
+        <div className="space-y-5">
+          <div className="grid gap-4 lg:grid-cols-4">
+            <Stat label="No atual" value={cluster.nodeName} detail={identity.clusterId || 'cluster local'} icon={Server} tone="sky" />
+            <Stat label="Papel" value={cluster.nodeRole} detail={guard.status || 'guard'} icon={ShieldCheck} tone={guard.canServeProduction ? 'green' : 'amber'} />
+            <Stat label="VIP" value={cluster.vip || '-'} detail={cluster.keepalived?.enabled ? 'keepalived ativo' : 'nao configurado'} icon={Network} tone={cluster.keepalived?.enabled ? 'green' : 'amber'} />
+            <Stat label="Promocao" value={guard.canPromote ? 'liberada' : 'bloqueada'} detail={guard.reason || 'cluster-lock'} icon={GitBranch} tone={guard.canPromote ? 'amber' : 'green'} />
           </div>
-        </form>
-      </Card>
-      <Card title="Impacto de rede HA" icon={Network} action={<StatusPill value={networkImpact.vipSameSubnet === false ? 'warning' : 'online'} />}>
-        <div className="grid gap-3 text-sm">
-          {[
-            ['Interface', networkImpact.current?.interface || '-'],
-            ['IP real atual', networkImpact.current?.cidr || '-'],
-            ['Novo IP analisado', networkImpact.proposed?.cidr || networkImpact.current?.cidr || '-'],
-            ['VIP', networkImpact.vip || 'nao configurado'],
-            ['VIP na mesma rede', networkImpact.vipSameSubnet === null || networkImpact.vipSameSubnet === undefined ? '-' : networkImpact.vipSameSubnet ? 'sim' : 'nao'],
-            ['Sync HA standby', networkImpact.sync?.standbyHost || 'nao configurado'],
-            ['Cloudflare destino', networkImpact.cloudflare?.targetIp || 'nao configurado']
-          ].map(([label, value]) => (
-            <div key={label} className="flex items-center justify-between gap-4 border-b border-slate-100 pb-2">
-              <span className="text-slate-500">{label}</span>
-              <span className="text-right font-medium text-slate-950">{value}</span>
-            </div>
-          ))}
-        </div>
-        <div className="mt-4">
-          <Field label="Simular novo IP/CIDR real do host" value={networkProposal} onChange={setNetworkProposal} placeholder={networkImpact.current?.cidr || '192.168.1.152/24'} />
-        </div>
-        {networkImpact.warnings?.length ? (
-          <div className="mt-4 grid gap-2">
-            {networkImpact.warnings.map((item, index) => (
-              <div key={`${item.message}-${index}`} className={`rounded-md border px-3 py-2 text-sm ${item.level === 'danger' ? 'border-red-200 bg-red-50 text-red-700' : item.level === 'warning' ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-sky-200 bg-sky-50 text-sky-800'}`}>
-                {item.message}
+          <div className="grid gap-5 xl:grid-cols-[1.25fr_0.75fr]">
+            <Card title="Topologia HA" icon={Activity}><Topology dashboard={dashboard} /></Card>
+            <Card title="Estado do cluster" icon={GitBranch}>
+              <dl className="grid gap-3 text-sm">
+                {[
+                  ['Modo', cluster.mode],
+                  ['No', cluster.nodeName],
+                  ['Papel', cluster.nodeRole],
+                  ['Cluster ID', identity.clusterId || '-'],
+                  ['VIP', cluster.vip || 'nao configurado'],
+                  ['Keepalived', cluster.keepalived?.enabled ? 'ativo' : 'nao configurado'],
+                  ['Cluster lock', cluster.lock ? 'presente' : 'ausente'],
+                  ['Guard', guard.status || '-']
+                ].map(([label, value]) => (
+                  <div key={label} className="flex items-center justify-between border-b border-slate-100 pb-2">
+                    <dt className="text-slate-500">{label}</dt>
+                    <dd className="font-medium text-slate-950">{value}</dd>
+                  </div>
+                ))}
+              </dl>
+            </Card>
+          </div>
+          <div className="grid gap-5 xl:grid-cols-2">
+            <Card title="Protecao de duplo primary" icon={ShieldCheck} action={<StatusPill value={guard.canHoldVip ? 'online' : 'blocked'} />}>
+              <div className="grid gap-3 text-sm">
+                {[
+                  ['Status', guard.status || '-'],
+                  ['Motivo', guard.reason || '-'],
+                  ['No local', guard.thisNode || values.nodeName],
+                  ['No ativo', guard.activeNode || 'nao definido'],
+                  ['Pode segurar VIP', guard.canHoldVip ? 'sim' : 'nao'],
+                  ['Pode servir producao', guard.canServeProduction ? 'sim' : 'nao'],
+                  ['Pode promover', guard.canPromote ? 'sim' : 'nao']
+                ].map(([label, value]) => (
+                  <div key={label} className="flex items-center justify-between gap-4 border-b border-slate-100 pb-2">
+                    <span className="text-slate-500">{label}</span>
+                    <span className="text-right font-medium text-slate-950">{value}</span>
+                  </div>
+                ))}
               </div>
-            ))}
+              {guard.returnedFormerPrimary ? <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">Este no parece ser um antigo principal retornando. Ele fica bloqueado para VIP/producao ate ressincronizar.</div> : null}
+            </Card>
+            <Card title="Impacto de rede HA" icon={Network} action={<StatusPill value={networkImpact.vipSameSubnet === false ? 'warning' : 'online'} />}>
+              <div className="grid gap-3 text-sm">
+                {[
+                  ['Interface', networkImpact.current?.interface || '-'],
+                  ['IP real atual', networkImpact.current?.cidr || '-'],
+                  ['VIP', networkImpact.vip || 'nao configurado'],
+                  ['VIP na mesma rede', networkImpact.vipSameSubnet === null || networkImpact.vipSameSubnet === undefined ? '-' : networkImpact.vipSameSubnet ? 'sim' : 'nao'],
+                  ['Sync HA standby', networkImpact.sync?.standbyHost || 'nao configurado'],
+                  ['Cloudflare destino', networkImpact.cloudflare?.targetIp || 'nao configurado']
+                ].map(([label, value]) => (
+                  <div key={label} className="flex items-center justify-between gap-4 border-b border-slate-100 pb-2">
+                    <span className="text-slate-500">{label}</span>
+                    <span className="text-right font-medium text-slate-950">{value}</span>
+                  </div>
+                ))}
+              </div>
+              {networkImpact.warnings?.length ? (
+                <div className="mt-4 grid gap-2">
+                  {networkImpact.warnings.map((item, index) => (
+                    <div key={`${item.message}-${index}`} className={`rounded-md border px-3 py-2 text-sm ${item.level === 'danger' ? 'border-red-200 bg-red-50 text-red-700' : item.level === 'warning' ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-sky-200 bg-sky-50 text-sky-800'}`}>
+                      {item.message}
+                    </div>
+                  ))}
+                </div>
+              ) : <div className="mt-4 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Nenhum impacto critico detectado para a configuracao atual.</div>}
+            </Card>
           </div>
-        ) : <div className="mt-4 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Nenhum impacto critico detectado para a configuracao atual.</div>}
-        {networkImpact.actions?.length ? (
-          <div className="mt-4">
-            <div className="mb-2 text-xs font-medium uppercase text-slate-500">Ajustes sugeridos</div>
-            <ul className="space-y-1 text-sm text-slate-700">
-              {networkImpact.actions.map(item => <li key={item}>- {item}</li>)}
-            </ul>
-          </div>
-        ) : null}
-      </Card>
+        </div>
+      ) : null}
+
+      {clusterTab === 'identity' ? (
+        <Card title="Identidade do no" icon={ShieldCheck}>
+          <form
+            className="grid gap-3 md:grid-cols-2"
+            onSubmit={event => {
+              event.preventDefault();
+              saveMutation.mutate(values);
+            }}
+          >
+            <Field label="Cluster ID" value={values.clusterId} onChange={value => setValue('clusterId', value)} placeholder="cliente-x" />
+            <Field label="Nome do no" value={values.nodeName} onChange={value => setValue('nodeName', value)} placeholder="servidor-01" />
+            <label className="block">
+              <span className="text-xs font-medium uppercase text-slate-500">Modo</span>
+              <select value={values.deploymentMode} onChange={event => setValue('deploymentMode', event.target.value)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100">
+                <option value="simple">simple</option>
+                <option value="ha">ha</option>
+              </select>
+            </label>
+            <label className="block">
+              <span className="text-xs font-medium uppercase text-slate-500">Papel</span>
+              <select value={values.nodeRole} onChange={event => setValue('nodeRole', event.target.value)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100">
+                <option value="primary">primary</option>
+                <option value="standby">standby</option>
+                <option value="recovery">recovery</option>
+              </select>
+            </label>
+            <div className="md:col-span-2 flex flex-wrap items-center gap-3">
+              <button disabled={saveMutation.isPending} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
+                <Save className="h-4 w-4" />
+                Salvar identidade
+              </button>
+              {saveMutation.isSuccess ? <span className="text-sm text-green-700">Identidade salva.</span> : null}
+              {saveMutation.isError ? <span className="text-sm text-red-700">{saveMutation.error?.message}</span> : null}
+            </div>
+          </form>
+        </Card>
+      ) : null}
+
+      {clusterTab === 'vip' ? (
       <Card title="VIP Keepalived" icon={Network} action={<StatusPill value={cluster.keepalived?.enabled ? 'online' : 'disabled'} />}>
         <form
           className="grid gap-3 md:grid-cols-2"
@@ -813,6 +870,10 @@ function ClusterView({ dashboard }) {
           </div>
         </form>
       </Card>
+      ) : null}
+
+      {clusterTab === 'promotion' ? (
+        <div className="grid gap-5 xl:grid-cols-2">
       <Card title="Controle de promocao" icon={ShieldCheck} action={<StatusPill value={lockValues.allow_promotion ? 'warning' : 'disabled'} />}>
         <form
           className="grid gap-3 md:grid-cols-2"
@@ -878,6 +939,10 @@ function ClusterView({ dashboard }) {
         {activateMutation.isSuccess || recoveryMutation.isSuccess ? <div className="mt-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Protecao atualizada.</div> : null}
         {activateMutation.isError || recoveryMutation.isError ? <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{activateMutation.error?.message || recoveryMutation.error?.message}</div> : null}
       </Card>
+        </div>
+      ) : null}
+
+      {clusterTab === 'sync' ? (
       <Card title="Sync HA" icon={RefreshCw} action={<StatusPill value={syncValues.enabled ? 'online' : 'disabled'} />}>
         <form
           className="grid gap-3 md:grid-cols-2"
@@ -912,7 +977,7 @@ function ClusterView({ dashboard }) {
         </form>
         {syncJobQuery.data ? <InlineTerminal job={syncJobQuery.data} /> : null}
       </Card>
-      <Card title="Topologia HA" icon={Activity}><Topology dashboard={dashboard} /></Card>
+      ) : null}
     </div>
   );
 }

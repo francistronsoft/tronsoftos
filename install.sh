@@ -192,4 +192,18 @@ fi
 
 echo "Instalacao concluida."
 echo "Edite $ENV_FILE e $APP_DIR/apps/tronfire/.env conforme o cliente."
-echo "Acesse: http://IP-DO-SERVIDOR:8080"
+ACCESS_PORT="8080"
+ACCESS_HOST=""
+if [ -f "$ENV_FILE" ]; then
+  ACCESS_PORT="$(grep '^TRONSOFTOS_PORT=' "$ENV_FILE" | tail -n1 | cut -d= -f2- || true)"
+  ACCESS_HOST="$(grep '^HA_VIP=' "$ENV_FILE" | tail -n1 | cut -d= -f2- || true)"
+  if [ -z "$ACCESS_HOST" ]; then
+    ACCESS_HOST="$(grep '^HOST_STATIC_IP_ADDRESS_CIDR=' "$ENV_FILE" | tail -n1 | cut -d= -f2- | cut -d/ -f1 || true)"
+  fi
+fi
+if [ -z "$ACCESS_HOST" ]; then
+  ACCESS_HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"
+fi
+ACCESS_PORT="${ACCESS_PORT:-8080}"
+ACCESS_HOST="${ACCESS_HOST:-IP-DO-SERVIDOR}"
+echo "Acesse: http://$ACCESS_HOST:$ACCESS_PORT"
