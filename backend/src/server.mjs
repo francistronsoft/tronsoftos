@@ -294,7 +294,7 @@ function rawHaSyncSettings() {
   return {
     enabled: false,
     standbyHost: process.env.HA_SYNC_STANDBY_HOST || '',
-    sshUser: process.env.HA_SYNC_SSH_USER || 'root',
+    sshUser: process.env.HA_SYNC_SSH_USER || 'tronsoftos',
     sshPort: Number(process.env.HA_SYNC_SSH_PORT || 22),
     remoteBackupDir: process.env.HA_SYNC_REMOTE_BACKUP_DIR || '/opt/tronfire-storage/firebird/backups',
     remoteCatalogDir: process.env.HA_SYNC_REMOTE_CATALOG_DIR || '/opt/tronos/state/tronfire-catalog',
@@ -308,7 +308,7 @@ function publicHaSyncSettings(settings = rawHaSyncSettings()) {
   return {
     enabled: settings.enabled === true,
     standbyHost: settings.standbyHost || '',
-    sshUser: settings.sshUser || 'root',
+    sshUser: settings.sshUser || 'tronsoftos',
     sshPort: Number(settings.sshPort || 22),
     remoteBackupDir: settings.remoteBackupDir || '/opt/tronfire-storage/firebird/backups',
     remoteCatalogDir: settings.remoteCatalogDir || '/opt/tronos/state/tronfire-catalog',
@@ -322,7 +322,7 @@ function normalizeHaSyncSettings(body) {
   const next = {
     enabled: body.enabled === true,
     standbyHost: String(body.standbyHost || '').trim(),
-    sshUser: String(body.sshUser || current.sshUser || 'root').trim(),
+    sshUser: String(body.sshUser || current.sshUser || 'tronsoftos').trim(),
     sshPort: Number(body.sshPort || current.sshPort || 22),
     remoteBackupDir: String(body.remoteBackupDir || current.remoteBackupDir || '/opt/tronfire-storage/firebird/backups').trim(),
     remoteCatalogDir: String(body.remoteCatalogDir || current.remoteCatalogDir || '/opt/tronos/state/tronfire-catalog').trim(),
@@ -339,6 +339,10 @@ function normalizeHaSyncSettings(body) {
 }
 
 function writeHaSyncSettings(body) {
+  const guard = clusterGuard();
+  if (nodeIdentity().deploymentMode === 'ha' && guard.canServeProduction !== true) {
+    throw new Error('Sync HA deve ser configurado no no primary/ativo');
+  }
   ensureStateDir();
   const settings = normalizeHaSyncSettings(body);
   fs.writeFileSync(haSyncSettingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
@@ -830,9 +834,17 @@ function normalizePairingContent(content) {
     if (!/^[A-Za-z0-9+/=_.:@-]{4,256}$/.test(value)) throw new Error(`${key} possui caracteres invalidos`);
     normalized[key] = value;
   }
+  const sshPublicKey = String(env.TRONSOFTOS_SSH_PUBLIC_KEY || '').trim();
+  if (sshPublicKey) {
+    if (!/^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)) [A-Za-z0-9+/=]+(?: [A-Za-z0-9_.@:-]+)?$/.test(sshPublicKey)) {
+      throw new Error('TRONSOFTOS_SSH_PUBLIC_KEY invalida');
+    }
+    normalized.TRONSOFTOS_SSH_PUBLIC_KEY = sshPublicKey;
+  }
+  const keys = [...required, ...(normalized.TRONSOFTOS_SSH_PUBLIC_KEY ? ['TRONSOFTOS_SSH_PUBLIC_KEY'] : [])];
   return {
     values: normalized,
-    content: `${required.map(key => `${key}=${normalized[key]}`).join('\n')}\n`
+    content: `${keys.map(key => `${key}='${normalized[key]}'`).join('\n')}\n`
   };
 }
 
@@ -1658,6 +1670,10 @@ function startAppAction(app, action) {
 }
 
 function startHaSync() {
+  const guard = clusterGuard();
+  if (nodeIdentity().deploymentMode === 'ha' && guard.canServeProduction !== true) {
+    throw new Error('Sync HA deve ser executado no no primary/ativo');
+  }
   const settings = rawHaSyncSettings();
   if (settings.enabled !== true) throw new Error('sync HA desabilitado');
   if (!settings.standbyHost) throw new Error('host standby nao configurado');
@@ -1683,7 +1699,7 @@ function startHaSync() {
     ...process.env,
     TRONSOFTOS_APP_DIR: appRoot,
     HA_SYNC_STANDBY_HOST: settings.standbyHost,
-    HA_SYNC_SSH_USER: settings.sshUser || 'root',
+    HA_SYNC_SSH_USER: settings.sshUser || 'tronsoftos',
     HA_SYNC_SSH_PORT: String(settings.sshPort || 22),
     HA_SYNC_REMOTE_BACKUP_DIR: settings.remoteBackupDir || '/opt/tronfire-storage/firebird/backups',
     HA_SYNC_REMOTE_CATALOG_DIR: settings.remoteCatalogDir || '/opt/tronos/state/tronfire-catalog',
@@ -1707,6 +1723,112 @@ function startHaSync() {
   });
   appendEvent('HA_SYNC_STARTED', { standbyHost: settings.standbyHost, sshUser: settings.sshUser, sshPort: settings.sshPort });
   return publicActionJob(job);
+}
+
+function startCommandJob({ app, action, command, args, env = process.env, cwd = appRoot, eventPrefix = 'MAINTENANCE' }) {
+  const id = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
+  const job = {
+    id,
+    app,
+    action,
+    command,
+    args,
+    status: 'running',
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    exitCode: null,
+    error: null,
+    stdout: '',
+    stderr: ''
+  };
+  actionJobs.set(id, job);
+  const child = spawn(command, args, { cwd, env, windowsHide: true });
+  child.stdout.on('data', chunk => appendActionLog(job, 'stdout', chunk));
+  child.stderr.on('data', chunk => appendActionLog(job, 'stderr', chunk));
+  child.on('error', err => {
+    job.status = 'failed';
+    job.error = err.message;
+    job.finishedAt = new Date().toISOString();
+    appendEvent(`${eventPrefix}_${action.toUpperCase()}_FAILED`, { app, error: err.message });
+  });
+  child.on('close', code => {
+    job.exitCode = code;
+    job.status = code === 0 ? 'success' : 'failed';
+    job.finishedAt = new Date().toISOString();
+    appendEvent(`${eventPrefix}_${action.toUpperCase()}`, { app, exitCode: code, stdout: job.stdout, stderr: job.stderr });
+  });
+  return publicActionJob(job);
+}
+
+function privilegedCommandArgs(command, args) {
+  if (process.getuid && process.getuid() !== 0) {
+    return { command: 'sudo', args: [command, ...args] };
+  }
+  return { command, args };
+}
+
+function requireConfirmation(body, expected) {
+  const confirmation = String(body.confirmation || '').trim();
+  if (confirmation !== expected) throw new Error(`confirmacao invalida; digite ${expected}`);
+}
+
+async function maintenanceStatus() {
+  let localKeepalived = 'unknown';
+  try {
+    const { stdout } = await run('systemctl', ['is-active', 'keepalived.service'], { timeout: 5000 });
+    localKeepalived = stdout.trim() || 'unknown';
+  } catch (err) {
+    localKeepalived = String(err.stdout || err.message || 'unknown').trim();
+  }
+  return {
+    generatedAt: new Date().toISOString(),
+    cluster: clusterStatus(),
+    guard: clusterGuard(),
+    sync: publicHaSyncSettings(),
+    local: {
+      keepalived: localKeepalived
+    }
+  };
+}
+
+function startLocalKeepalived(action, body = {}) {
+  if (!['start', 'stop', 'restart'].includes(action)) throw new Error('acao keepalived invalida');
+  requireConfirmation(body, action === 'stop' ? 'SUSPENDER LOCAL' : action === 'start' ? 'REATIVAR LOCAL' : 'REINICIAR LOCAL');
+  const cmd = privilegedCommandArgs('/usr/local/sbin/tronsoftos-network', ['local-keepalived', action]);
+  return startCommandJob({ app: 'keepalived-local', action, ...cmd });
+}
+
+function startStandbyKeepalived(action, body = {}) {
+  if (!['start', 'stop'].includes(action)) throw new Error('acao keepalived invalida');
+  requireConfirmation(body, action === 'stop' ? 'SUSPENDER STANDBY' : 'REATIVAR STANDBY');
+  const settings = rawHaSyncSettings();
+  if (!settings.standbyHost) throw new Error('host standby nao configurado no Sync HA');
+  const sshUser = settings.sshUser || 'tronsoftos';
+  const sshPort = String(settings.sshPort || 22);
+  const remoteCommand = `sudo -n systemctl ${action} keepalived.service`;
+  const knownHosts = path.join(stateDir, 'known_hosts');
+  fs.mkdirSync(path.dirname(knownHosts), { recursive: true });
+  fs.closeSync(fs.openSync(knownHosts, 'a'));
+  return startCommandJob({
+    app: 'keepalived-standby',
+    action,
+    command: 'ssh',
+    args: [
+      '-p', sshPort,
+      '-o', 'BatchMode=yes',
+      '-o', 'StrictHostKeyChecking=accept-new',
+      '-o', `UserKnownHostsFile=${knownHosts}`,
+      `${sshUser}@${settings.standbyHost}`,
+      remoteCommand
+    ]
+  });
+}
+
+function startHostPower(action, body = {}) {
+  if (!['reboot', 'poweroff'].includes(action)) throw new Error('acao de energia invalida');
+  requireConfirmation(body, action === 'reboot' ? 'REINICIAR HOST' : 'DESLIGAR HOST');
+  const cmd = privilegedCommandArgs('/usr/local/sbin/tronsoftos-network', ['host-power', action]);
+  return startCommandJob({ app: 'host', action, ...cmd });
 }
 
 function dockerRegistryLogin(body) {
@@ -1808,6 +1930,13 @@ async function handleApi(req, reply, url) {
   if (req.method === 'GET' && url.pathname === '/api/settings/smtp') return json(reply, 200, smtpSettings());
   if (req.method === 'PATCH' && url.pathname === '/api/settings/smtp') return json(reply, 200, writeSmtpSettings(await readBody(req)));
   if (req.method === 'GET' && url.pathname === '/api/events') return json(reply, 200, { events: readEvents(Number(url.searchParams.get('limit') || 100)) });
+  if (req.method === 'GET' && url.pathname === '/api/maintenance') return json(reply, 200, await maintenanceStatus());
+  if (req.method === 'POST' && url.pathname === '/api/maintenance/standby/keepalived/stop') return json(reply, 202, { ok: true, job: startStandbyKeepalived('stop', await readBody(req)) });
+  if (req.method === 'POST' && url.pathname === '/api/maintenance/standby/keepalived/start') return json(reply, 202, { ok: true, job: startStandbyKeepalived('start', await readBody(req)) });
+  if (req.method === 'POST' && url.pathname === '/api/maintenance/local/keepalived/stop') return json(reply, 202, { ok: true, job: startLocalKeepalived('stop', await readBody(req)) });
+  if (req.method === 'POST' && url.pathname === '/api/maintenance/local/keepalived/start') return json(reply, 202, { ok: true, job: startLocalKeepalived('start', await readBody(req)) });
+  if (req.method === 'POST' && url.pathname === '/api/maintenance/host/reboot') return json(reply, 202, { ok: true, job: startHostPower('reboot', await readBody(req)) });
+  if (req.method === 'POST' && url.pathname === '/api/maintenance/host/poweroff') return json(reply, 202, { ok: true, job: startHostPower('poweroff', await readBody(req)) });
   if (req.method === 'GET' && url.pathname === '/api/cluster/pairing-file') return exportPairingFile(reply);
   if (req.method === 'POST' && url.pathname === '/api/cluster/pairing-file/import') return json(reply, 200, await importPairingFile(await readBody(req)));
   if (req.method === 'GET' && url.pathname === '/api/host/firebird') return json(reply, 200, await hostFirebirdStatus());

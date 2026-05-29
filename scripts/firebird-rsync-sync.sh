@@ -7,9 +7,15 @@ set -euo pipefail
 : "${FIREBIRD_DB_PATTERN:=*.fdb}"
 : "${FIREBIRD_RSYNC_TARGET:?missing FIREBIRD_RSYNC_TARGET}"
 
-RSYNC_SSH_USER="${FIREBIRD_RSYNC_SSH_USER:-root}"
+APP_DIR="${TRONSOFTOS_APP_DIR:-/opt/tronos}"
+RSYNC_SSH_USER="${FIREBIRD_RSYNC_SSH_USER:-tronsoftos}"
 RSYNC_SSH_PORT="${FIREBIRD_RSYNC_SSH_PORT:-22}"
-SSH_OPTS="ssh -p ${RSYNC_SSH_PORT}"
+KNOWN_HOSTS="${TRONSOFTOS_SSH_KNOWN_HOSTS:-${APP_DIR}/state/known_hosts}"
+SSH_OPTS="ssh -p ${RSYNC_SSH_PORT} -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${KNOWN_HOSTS}"
+
+mkdir -p "$(dirname "$KNOWN_HOSTS")"
+touch "$KNOWN_HOSTS"
+chmod 600 "$KNOWN_HOSTS" 2>/dev/null || true
 
 if [[ "${FIREBIRD_STOP_DURING_SYNC:-false}" == "true" ]]; then
   : "${FIREBIRD_SERVICE:=firebird}"

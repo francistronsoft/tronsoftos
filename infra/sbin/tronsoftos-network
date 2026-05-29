@@ -54,6 +54,8 @@ apply_pairing() {
   local tronfire_env="$app_dir/apps/tronfire/.env"
   local troncomanda_env="$app_dir/apps/troncomanda/.env"
   local cluster_secrets="$app_dir/state/cluster-secrets.env"
+  local ssh_dir="$app_dir/.ssh"
+  local authorized_keys="$ssh_dir/authorized_keys"
 
   valid_app_dir "$app_dir" || fail "Diretorio da aplicacao invalido"
   [[ "$source_file" =~ ^/opt/[A-Za-z0-9._/-]+/state/pairing-import-[A-Za-z0-9._-]+\.env$ ]] || fail "Caminho de pareamento invalido"
@@ -77,6 +79,18 @@ apply_pairing() {
 
   if [ -f "$troncomanda_env" ]; then
     set_env_value "$troncomanda_env" "TRONCOMANDA_FIREBIRD_PASSWORD" "$FIREBIRD_PASSWORD"
+  fi
+
+  if [ -n "${TRONSOFTOS_SSH_PUBLIC_KEY:-}" ]; then
+    [[ "$TRONSOFTOS_SSH_PUBLIC_KEY" =~ ^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521))[[:space:]][A-Za-z0-9+/=]+([[:space:]][A-Za-z0-9_.@:-]+)?$ ]] || fail "Chave publica SSH invalida"
+    mkdir -p "$ssh_dir"
+    touch "$authorized_keys"
+    if ! grep -Fxq "$TRONSOFTOS_SSH_PUBLIC_KEY" "$authorized_keys"; then
+      printf '%s\n' "$TRONSOFTOS_SSH_PUBLIC_KEY" >> "$authorized_keys"
+    fi
+    chown -R tronsoftos:tronsoftos "$ssh_dir" "$app_dir/state" 2>/dev/null || true
+    chmod 700 "$ssh_dir"
+    chmod 600 "$authorized_keys"
   fi
 
   printf '{"ok":true,"clusterSecrets":"%s","tronsoftosEnv":"%s","tronfireEnv":"%s","troncomandaEnvUpdated":%s}\n' \
@@ -317,6 +331,26 @@ install_firebird_aliases() {
   printf '{"ok":true,"target":"%s"}\n' "$(json_escape "$target")"
 }
 
+local_keepalived() {
+  local action="${1:-}"
+  [[ "$action" =~ ^(start|stop|restart)$ ]] || fail "Acao keepalived invalida"
+  systemctl "$action" keepalived.service
+  local status="unknown"
+  status="$(systemctl is-active keepalived.service 2>/dev/null || true)"
+  printf '{"ok":true,"service":"keepalived","action":"%s","status":"%s"}\n' "$(json_escape "$action")" "$(json_escape "$status")"
+}
+
+host_power() {
+  local action="${1:-}"
+  [[ "$action" =~ ^(reboot|poweroff)$ ]] || fail "Acao de energia invalida"
+  if [ "$action" = "reboot" ]; then
+    nohup sh -c 'sleep 2; systemctl reboot' >/dev/null 2>&1 &
+  else
+    nohup sh -c 'sleep 2; systemctl poweroff' >/dev/null 2>&1 &
+  fi
+  printf '{"ok":true,"action":"%s","scheduled":true,"delaySeconds":2}\n' "$(json_escape "$action")"
+}
+
 case "$action" in
   apply-static)
     shift
@@ -333,6 +367,14 @@ case "$action" in
   apply-vip)
     shift
     apply_vip "$@"
+    ;;
+  local-keepalived)
+    shift
+    local_keepalived "$@"
+    ;;
+  host-power)
+    shift
+    host_power "$@"
     ;;
   *)
     fail "Acao invalida"

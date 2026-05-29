@@ -15,6 +15,7 @@ import {
   LayoutDashboard,
   Network,
   Play,
+  Power,
   RefreshCw,
   Save,
   Server,
@@ -47,6 +48,7 @@ const navItems = [
   { id: 'cluster', label: 'Cluster HA', icon: GitBranch },
   { id: 'backups', label: 'Backups', icon: UploadCloud },
   { id: 'cloudflare', label: 'Cloudflare', icon: Cloud },
+  { id: 'maintenance', label: 'Manutencao', icon: Power },
   { id: 'updates', label: 'Atualizacoes', icon: RefreshCw },
   { id: 'events', label: 'Eventos', icon: Terminal },
   { id: 'settings', label: 'Ajustes', icon: Settings }
@@ -560,7 +562,7 @@ function ClusterView({ dashboard }) {
   const syncValues = syncForm || {
     enabled: sync.enabled || false,
     standbyHost: sync.standbyHost || '',
-    sshUser: sync.sshUser || 'root',
+    sshUser: sync.sshUser || 'tronsoftos',
     sshPort: sync.sshPort || 22,
     remoteBackupDir: sync.remoteBackupDir || '/opt/tronfire-storage/firebird/backups',
     remoteCatalogDir: sync.remoteCatalogDir || '/opt/tronos/state/tronfire-catalog',
@@ -702,11 +704,12 @@ function ClusterView({ dashboard }) {
   const setLockValue = (key, value) => setLockForm(previous => ({ ...(previous || lockValues), [key]: value }));
   const setSyncValue = (key, value) => setSyncForm(previous => ({ ...(previous || syncValues), [key]: value }));
   const setVipValue = (key, value) => setVipForm(previous => ({ ...(previous || vipValues), [key]: value }));
+  const canManageSync = values.deploymentMode !== 'ha' || guard.canServeProduction === true || values.nodeRole === 'primary';
   const clusterTabs = [
     { id: 'overview', label: 'Visao geral', icon: Activity },
     { id: 'identity', label: 'Identidade', icon: ShieldCheck },
     { id: 'vip', label: 'VIP', icon: Network },
-    { id: 'sync', label: 'Sync', icon: RefreshCw },
+    ...(canManageSync ? [{ id: 'sync', label: 'Sync', icon: RefreshCw }] : []),
     { id: 'promotion', label: 'Promocao', icon: GitBranch }
   ];
   return (
@@ -943,6 +946,7 @@ function ClusterView({ dashboard }) {
       ) : null}
 
       {clusterTab === 'sync' ? (
+        canManageSync ? (
       <Card title="Sync HA" icon={RefreshCw} action={<StatusPill value={syncValues.enabled ? 'online' : 'disabled'} />}>
         <form
           className="grid gap-3 md:grid-cols-2"
@@ -955,7 +959,7 @@ function ClusterView({ dashboard }) {
             <Checkbox label="Habilitar sincronizacao para standby" checked={syncValues.enabled} onChange={value => setSyncValue('enabled', value)} />
           </div>
           <Field label="Host/IP standby" value={syncValues.standbyHost} onChange={value => setSyncValue('standbyHost', value)} placeholder="192.168.1.153" />
-          <Field label="Usuario SSH" value={syncValues.sshUser} onChange={value => setSyncValue('sshUser', value)} placeholder="root" />
+          <Field label="Usuario SSH" value={syncValues.sshUser} onChange={value => setSyncValue('sshUser', value)} placeholder="tronsoftos" />
           <Field label="Porta SSH" type="number" value={syncValues.sshPort} onChange={value => setSyncValue('sshPort', Number(value || 22))} placeholder="22" />
           <Field label="Backups locais" value={syncValues.backupDir} onChange={value => setSyncValue('backupDir', value)} placeholder="/opt/tronfire-storage/firebird/backups" />
           <Field label="Destino backups standby" value={syncValues.remoteBackupDir} onChange={value => setSyncValue('remoteBackupDir', value)} placeholder="/opt/tronfire-storage/firebird/backups" />
@@ -977,6 +981,13 @@ function ClusterView({ dashboard }) {
         </form>
         {syncJobQuery.data ? <InlineTerminal job={syncJobQuery.data} /> : null}
       </Card>
+        ) : (
+          <Card title="Sync HA" icon={RefreshCw} action={<StatusPill value="disabled" />}>
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              Sync HA deve ser configurado e executado somente no no primary/ativo. Este no nao esta autorizado a enviar dados para standby.
+            </div>
+          </Card>
+        )
       ) : null}
     </div>
   );
@@ -1354,6 +1365,115 @@ function EventsView() {
   );
 }
 
+function ConfirmAction({ label, icon: Icon, confirmation, tone = 'slate', disabled, onConfirm }) {
+  const [value, setValue] = useState('');
+  const ready = value.trim() === confirmation;
+  const buttonClass = tone === 'red'
+    ? 'bg-red-600 text-white hover:bg-red-700'
+    : tone === 'amber'
+      ? 'bg-amber-600 text-white hover:bg-amber-700'
+      : 'bg-slate-950 text-white hover:bg-slate-800';
+  return (
+    <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+      <div className="mb-2 text-xs font-medium uppercase text-slate-500">Confirmacao exigida</div>
+      <Field label={`Digite ${confirmation}`} value={value} onChange={setValue} placeholder={confirmation} />
+      <button
+        type="button"
+        disabled={disabled || !ready}
+        onClick={() => {
+          onConfirm({ confirmation });
+          setValue('');
+        }}
+        className={`mt-3 inline-flex w-full items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium disabled:opacity-50 ${buttonClass}`}
+      >
+        {Icon ? <Icon className="h-4 w-4" /> : null}
+        {label}
+      </button>
+    </div>
+  );
+}
+
+function MaintenanceView() {
+  const queryClient = useQueryClient();
+  const maintenanceQuery = useQuery({ queryKey: ['maintenance'], queryFn: () => api('/api/maintenance'), refetchInterval: 10000 });
+  const [jobId, setJobId] = useState(null);
+  const actionMutation = useMutation({
+    mutationFn: ({ path, confirmation }) => postApi(path, { confirmation }),
+    onSuccess: data => {
+      setJobId(data.job?.id || null);
+      queryClient.invalidateQueries({ queryKey: ['maintenance'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    }
+  });
+  const jobQuery = useQuery({
+    queryKey: ['maintenance-job', jobId],
+    queryFn: () => api(`/api/actions/${jobId}`),
+    enabled: !!jobId,
+    refetchInterval: query => query.state.data?.status === 'running' ? 1200 : false
+  });
+  const data = maintenanceQuery.data || {};
+  const cluster = data.cluster || {};
+  const sync = data.sync || {};
+  const busy = actionMutation.isPending || jobQuery.data?.status === 'running';
+  const run = path => payload => actionMutation.mutate({ path, ...payload });
+
+  return (
+    <div className="space-y-5">
+      <div className="grid gap-4 lg:grid-cols-4">
+        <Stat label="No atual" value={cluster.nodeName || '-'} detail={cluster.nodeRole || '-'} icon={Server} tone="sky" />
+        <Stat label="Keepalived local" value={data.local?.keepalived || '-'} detail={cluster.vip || 'VIP nao configurado'} icon={Network} tone={data.local?.keepalived === 'active' ? 'green' : 'amber'} />
+        <Stat label="Standby" value={sync.standbyHost || '-'} detail={sync.enabled ? 'sync habilitado' : 'sync desabilitado'} icon={GitBranch} tone={sync.standbyHost ? 'green' : 'amber'} />
+        <Stat label="Hora servidor" value={formatDateTime(data.generatedAt)} detail="backend local" icon={FileClock} tone="slate" />
+      </div>
+
+      {jobQuery.data ? <ActionTerminal job={jobQuery.data} /> : null}
+
+      <div className="grid gap-5 xl:grid-cols-2">
+        <Card title="Failover em manutencao" icon={ShieldCheck} action={<StatusPill value={sync.standbyHost ? 'online' : 'warning'} />}>
+          <div className="mb-4 grid gap-3 text-sm">
+            {[
+              ['Host standby', sync.standbyHost || 'nao configurado'],
+              ['Usuario SSH', sync.sshUser || 'tronsoftos'],
+              ['Porta SSH', sync.sshPort || 22],
+              ['Uso', 'parar keepalived no standby antes de reiniciar o primary sem failover']
+            ].map(([label, value]) => (
+              <div key={label} className="flex items-center justify-between gap-4 border-b border-slate-100 pb-2">
+                <span className="text-slate-500">{label}</span>
+                <span className="text-right font-medium text-slate-950">{value}</span>
+              </div>
+            ))}
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <ConfirmAction label="Suspender failover no standby" icon={Square} confirmation="SUSPENDER STANDBY" tone="amber" disabled={busy || !sync.standbyHost} onConfirm={run('/api/maintenance/standby/keepalived/stop')} />
+            <ConfirmAction label="Reativar failover no standby" icon={Play} confirmation="REATIVAR STANDBY" disabled={busy || !sync.standbyHost} onConfirm={run('/api/maintenance/standby/keepalived/start')} />
+          </div>
+          {actionMutation.isError ? <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{actionMutation.error.message}</div> : null}
+        </Card>
+
+        <Card title="Energia do host local" icon={Power} action={<StatusPill value="critico" />}>
+          <div className="mb-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+            Reiniciar ou desligar o host local pode interromper a producao. Para reiniciar o primary sem failover, suspenda o keepalived no standby antes.
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <ConfirmAction label="Reiniciar host" icon={RefreshCw} confirmation="REINICIAR HOST" tone="amber" disabled={busy} onConfirm={run('/api/maintenance/host/reboot')} />
+            <ConfirmAction label="Desligar host" icon={Power} confirmation="DESLIGAR HOST" tone="red" disabled={busy} onConfirm={run('/api/maintenance/host/poweroff')} />
+          </div>
+        </Card>
+
+        <Card title="Keepalived local" icon={Network}>
+          <div className="mb-4 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+            Use estes controles apenas quando estiver operando diretamente no no correto. Em manutencao planejada do primary, normalmente voce suspende o keepalived no standby.
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <ConfirmAction label="Parar keepalived local" icon={Square} confirmation="SUSPENDER LOCAL" tone="amber" disabled={busy} onConfirm={run('/api/maintenance/local/keepalived/stop')} />
+            <ConfirmAction label="Iniciar keepalived local" icon={Play} confirmation="REATIVAR LOCAL" disabled={busy} onConfirm={run('/api/maintenance/local/keepalived/start')} />
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
 function NetworkSettings() {
   const queryClient = useQueryClient();
   const networkQuery = useQuery({ queryKey: ['host-network'], queryFn: () => api('/api/host/network') });
@@ -1609,6 +1729,7 @@ export default function App() {
     cluster: <ClusterView dashboard={dashboard} />,
     backups: <BackupsView dashboard={dashboard} />,
     cloudflare: <CloudflareView dashboard={dashboard} />,
+    maintenance: <MaintenanceView />,
     updates: <UpdatesView />,
     events: <EventsView />,
     settings: <SettingsView dashboard={dashboard} />
@@ -1644,10 +1765,6 @@ export default function App() {
             <h1 className="text-xl font-semibold text-slate-950">{activeItem.label}</h1>
           </div>
           <div className="flex items-center gap-3">
-            <div className="hidden text-right text-xs text-slate-500 sm:block">
-              <div className="font-medium uppercase">Hora do servidor</div>
-              <div className="font-mono text-slate-900">{formatDateTime(dashboard.generatedAt)}</div>
-            </div>
             {dashboardQuery.isError ? <StatusPill value="offline" /> : <StatusPill value="online" />}
             <StatusPill value={dashboard.cluster.nodeRole} />
           </div>

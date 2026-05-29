@@ -103,9 +103,10 @@ if ! getent group "$GROUP_NAME" >/dev/null; then
   groupadd --system "$GROUP_NAME"
 fi
 if ! id "$USER_NAME" >/dev/null 2>&1; then
-  useradd --system --gid "$GROUP_NAME" --home-dir "$APP_DIR" --shell /usr/sbin/nologin "$USER_NAME"
+  useradd --system --gid "$GROUP_NAME" --home-dir "$APP_DIR" --shell /bin/bash "$USER_NAME"
 fi
 usermod -aG docker "$USER_NAME" || true
+usermod --home "$APP_DIR" --shell /bin/bash "$USER_NAME" || true
 
 mkdir -p "$APP_DIR" "$ENV_DIR" "$APP_DIR/state" "$APP_DIR/config" "$APP_DIR/logs" /opt/tronfire-storage
 mkdir -p /opt/tronfire-storage/troncomanda/qr-static
@@ -124,6 +125,18 @@ fi
 if [ ! -f "$APP_DIR/config/managed-apps.json" ]; then
   cp "$APP_DIR/config/managed-apps.example.json" "$APP_DIR/config/managed-apps.json"
 fi
+
+mkdir -p "$APP_DIR/state/ssh" "$APP_DIR/.ssh"
+chown -R "$USER_NAME:$GROUP_NAME" "$APP_DIR/state" "$APP_DIR/.ssh"
+chmod 700 "$APP_DIR/state" "$APP_DIR/state/ssh" "$APP_DIR/.ssh"
+if [ ! -f "$APP_DIR/state/ssh/id_ed25519" ]; then
+  sudo -u "$USER_NAME" ssh-keygen -t ed25519 -f "$APP_DIR/state/ssh/id_ed25519" -N "" -C "tronsoftos@$HOSTNAME" >/dev/null
+fi
+touch "$APP_DIR/.ssh/authorized_keys" "$APP_DIR/state/known_hosts"
+chown -R "$USER_NAME:$GROUP_NAME" "$APP_DIR/state/ssh" "$APP_DIR/.ssh"
+chown "$USER_NAME:$GROUP_NAME" "$APP_DIR/state/known_hosts"
+chmod 600 "$APP_DIR/.ssh/authorized_keys" "$APP_DIR/state/known_hosts"
+chmod 600 "$APP_DIR/state/ssh/id_ed25519"
 
 if [ "${TRONSOFTOS_SKIP_WIZARD:-false}" != "true" ]; then
   TRONSOFTOS_APP_DIR="$APP_DIR" bash "$APP_DIR/scripts/configure-wizard.sh"

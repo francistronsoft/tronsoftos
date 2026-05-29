@@ -11,6 +11,7 @@ TRONCOMANDA_ENV="$APP_DIR/apps/troncomanda/.env"
 MANAGED_APPS="$APP_DIR/config/managed-apps.json"
 CLUSTER_SECRETS="$APP_DIR/state/cluster-secrets.env"
 NODE_IDENTITY="$APP_DIR/state/node-identity.json"
+SSH_PUBLIC_KEY_PATH="$APP_DIR/state/ssh/id_ed25519.pub"
 
 for secrets_file in "$APP_DIR/config/installer-secrets.env" "$ENV_DIR/installer-secrets.env"; do
   if [ -f "$secrets_file" ]; then
@@ -219,6 +220,7 @@ INSTALL_ID="$(new_uuid)"
 
 SESSION_SECRET=""
 INTERNAL_TOKEN=""
+TRONSOFTOS_SSH_PUBLIC_KEY=""
 if [ "$DEPLOYMENT_MODE" = "ha" ] && [ "$NODE_ROLE" != "primary" ]; then
   if yes_no "Voce tem o arquivo de pareamento do no principal? (s/n)" "s"; then
     PAIRING_FILE="$(ask "Caminho do arquivo cluster-secrets.env" "$CLUSTER_SECRETS")"
@@ -227,6 +229,7 @@ if [ "$DEPLOYMENT_MODE" = "ha" ] && [ "$NODE_ROLE" != "primary" ]; then
       . "$PAIRING_FILE"
       SESSION_SECRET="${SESSION_SECRET:-}"
       INTERNAL_TOKEN="${TRONSOFTOS_INTERNAL_TOKEN:-${INTERNAL_TOKEN:-}}"
+      TRONSOFTOS_SSH_PUBLIC_KEY="${TRONSOFTOS_SSH_PUBLIC_KEY:-}"
     else
       echo "Arquivo de pareamento nao encontrado. Segredos serao gerados neste no."
     fi
@@ -327,8 +330,10 @@ FIREBIRD_BACKUP_DIR=/opt/tronfire-storage/firebird/backups
 FIREBIRD_SYNC_MODE=backups
 FIREBIRD_DB_PATTERN=*.fdb
 FIREBIRD_RSYNC_TARGET=
-FIREBIRD_RSYNC_SSH_USER=root
+FIREBIRD_RSYNC_SSH_USER=tronsoftos
 FIREBIRD_RSYNC_SSH_PORT=22
+HA_SYNC_SSH_USER=tronsoftos
+HA_SYNC_SSH_PORT=22
 
 TRONFIRE_POSTGRES_CONTAINER=tronfire_postgres
 TRONFIRE_POSTGRES_DB=tronfire
@@ -445,6 +450,10 @@ TRONSOFTOS_INTERNAL_TOKEN=$INTERNAL_TOKEN
 POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 FIREBIRD_PASSWORD=$FIREBIRD_PASSWORD
 EOF
+
+if [ -f "$SSH_PUBLIC_KEY_PATH" ]; then
+  printf "TRONSOFTOS_SSH_PUBLIC_KEY='%s'\n" "$(cat "$SSH_PUBLIC_KEY_PATH")" >> "$CLUSTER_SECRETS"
+fi
 
 cat > "$NODE_IDENTITY" <<EOF
 {
