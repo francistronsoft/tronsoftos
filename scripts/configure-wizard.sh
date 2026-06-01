@@ -81,11 +81,12 @@ yes_no() {
 choose_node_role() {
   local value
   while true; do
-    echo "Papel deste no:"
-    echo "  1) primary"
-    echo "  2) standby"
-    echo "  3) recovery"
-    read -r -p "Escolha [1]: " value
+    echo "Papel deste no:" >&2
+    echo "  1) primary" >&2
+    echo "  2) standby" >&2
+    echo "  3) recovery" >&2
+    printf "Escolha [1]: " >&2
+    read -r value
     value="${value:-1}"
     case "$value" in
       1|primary) echo "primary"; return 0 ;;
