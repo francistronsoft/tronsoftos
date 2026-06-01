@@ -45,6 +45,21 @@ const navItems = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'diagnostics', label: 'Diagnostico', icon: CheckCircle2 },
   { id: 'apps', label: 'Apps', icon: Boxes },
+  {
+    id: 'tronfire',
+    label: 'TronFire',
+    icon: Database,
+    children: [
+      { id: 'tronfire-dashboard', label: 'Dashboard', hash: 'dashboard' },
+      { id: 'tronfire-databases', label: 'Bancos', hash: 'databases' },
+      { id: 'tronfire-uploads', label: 'Migracao GBK / FBK', hash: 'uploads' },
+      { id: 'tronfire-backups', label: 'Backups', hash: 'backups' },
+      { id: 'tronfire-alerts', label: 'Alertas', hash: 'alerts' },
+      { id: 'tronfire-logs', label: 'Logs', hash: 'logs' },
+      { id: 'tronfire-settings', label: 'Configuracoes', hash: 'settings' },
+      { id: 'tronfire-preflight', label: 'Diagnostico', hash: 'preflight' }
+    ]
+  },
   { id: 'cluster', label: 'Cluster HA', icon: GitBranch },
   { id: 'backups', label: 'Backups', icon: UploadCloud },
   { id: 'cloudflare', label: 'Cloudflare', icon: Cloud },
@@ -53,6 +68,8 @@ const navItems = [
   { id: 'events', label: 'Eventos', icon: Terminal },
   { id: 'settings', label: 'Ajustes', icon: Settings }
 ];
+
+const flatNavItems = navItems.flatMap(item => [item, ...(item.children || []).map(child => ({ ...child, parentId: item.id, parentLabel: item.label, icon: item.icon }))]);
 
 const fallbackDashboard = {
   generatedAt: new Date().toISOString(),
@@ -1690,6 +1707,20 @@ function SettingsView({ dashboard }) {
   );
 }
 
+function TronFireView({ section = 'dashboard' }) {
+  const src = `/tronfire/?embed=1#${section}`;
+  return (
+    <div className="h-[calc(100vh-6.5rem)] overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm">
+      <iframe
+        key={section}
+        title="TronFire"
+        src={src}
+        className="h-full w-full border-0"
+      />
+    </div>
+  );
+}
+
 export default function App() {
   const [active, setActive] = useState('dashboard');
   const [actionJobId, setActionJobId] = useState(null);
@@ -1720,12 +1751,18 @@ export default function App() {
   }, [actionJobQuery.data?.status, queryClient]);
   const dashboard = dashboardQuery.data || fallbackDashboard;
   const appActionPending = actionMutation.isPending || actionJobQuery.data?.status === 'running';
-  const activeItem = useMemo(() => navItems.find(item => item.id === active) || navItems[0], [active]);
+  const activeItem = useMemo(() => flatNavItems.find(item => item.id === active) || navItems[0], [active]);
+  const activeTronFireSection = activeItem.parentId === 'tronfire'
+    ? activeItem.hash
+    : active === 'tronfire'
+      ? 'dashboard'
+      : null;
 
   const View = {
     dashboard: <DashboardView dashboard={dashboard} />,
     diagnostics: <DiagnosticsView />,
     apps: <AppsView dashboard={dashboard} actionPending={appActionPending} actionJob={actionJobQuery.data} onAction={(app, action) => actionMutation.mutate({ app, action })} />,
+    tronfire: <TronFireView section="dashboard" />,
     cluster: <ClusterView dashboard={dashboard} />,
     backups: <BackupsView dashboard={dashboard} />,
     cloudflare: <CloudflareView dashboard={dashboard} />,
@@ -1733,7 +1770,7 @@ export default function App() {
     updates: <UpdatesView />,
     events: <EventsView />,
     settings: <SettingsView dashboard={dashboard} />
-  }[active];
+  }[active] || (activeTronFireSection ? <TronFireView section={activeTronFireSection} /> : null);
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-950">
@@ -1748,12 +1785,28 @@ export default function App() {
         <nav className="space-y-1 p-3">
           {navItems.map(item => {
             const Icon = item.icon;
-            const selected = item.id === active;
+            const selected = item.id === active || item.children?.some(child => child.id === active);
+            const targetId = item.children?.[0]?.id || item.id;
             return (
-              <button key={item.id} onClick={() => setActive(item.id)} className={`flex w-full items-center gap-3 rounded-md px-3 py-2 text-left text-sm ${selected ? 'bg-white text-slate-950' : 'text-slate-300 hover:bg-white/10 hover:text-white'}`}>
-                <Icon className="h-4 w-4" />
-                {item.label}
-              </button>
+              <div key={item.id}>
+                <button onClick={() => setActive(targetId)} className={`flex w-full items-center gap-3 rounded-md px-3 py-2 text-left text-sm ${selected ? 'bg-white text-slate-950' : 'text-slate-300 hover:bg-white/10 hover:text-white'}`}>
+                  <Icon className="h-4 w-4" />
+                  {item.label}
+                </button>
+                {item.children && selected ? (
+                  <div className="mt-1 space-y-1 pl-8">
+                    {item.children.map(child => (
+                      <button
+                        key={child.id}
+                        onClick={() => setActive(child.id)}
+                        className={`block w-full rounded-md px-3 py-1.5 text-left text-xs ${child.id === active ? 'bg-sky-500 text-white' : 'text-slate-400 hover:bg-white/10 hover:text-white'}`}
+                      >
+                        {child.label}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             );
           })}
         </nav>
@@ -1762,7 +1815,7 @@ export default function App() {
         <header className="sticky top-0 z-10 flex min-h-16 items-center justify-between border-b border-slate-200 bg-white/95 px-4 backdrop-blur lg:px-6">
           <div>
             <div className="text-xs font-medium uppercase text-slate-500">{dashboard.cluster.mode}</div>
-            <h1 className="text-xl font-semibold text-slate-950">{activeItem.label}</h1>
+            <h1 className="text-xl font-semibold text-slate-950">{activeItem.parentLabel ? `${activeItem.parentLabel} / ${activeItem.label}` : activeItem.label}</h1>
           </div>
           <div className="flex items-center gap-3">
             {dashboardQuery.isError ? <StatusPill value="offline" /> : <StatusPill value="online" />}

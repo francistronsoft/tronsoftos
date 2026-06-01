@@ -1,7 +1,21 @@
+const tronsoftosProxyBase = window.location.pathname.startsWith('/tronfire') ? '/tronfire' : '';
+const tronsoftosEmbedded = new URLSearchParams(window.location.search).get('embed') === '1';
+
+function apiUrl(path) {
+  const value = String(path || '');
+  if (/^https?:\/\//i.test(value)) return value;
+  if (value.startsWith('/api/')) return `${tronsoftosProxyBase}${value}`;
+  return value;
+}
+
+if (tronsoftosEmbedded) {
+  document.body.classList.add('tronsoftos-embedded');
+}
+
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (options.body !== undefined && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
-  const res = await fetch(path, { credentials: 'include', headers, ...options });
+  const res = await fetch(apiUrl(path), { credentials: 'include', headers, ...options });
   if (!res.ok) {
     const payload = await res.json().catch(() => ({}));
     const err = new Error(payload.error || 'Erro na API');
@@ -14,7 +28,7 @@ async function api(path, options = {}) {
 }
 
 async function apiForm(path, form) {
-  const res = await fetch(path, { method: 'POST', credentials: 'include', body: form });
+  const res = await fetch(apiUrl(path), { method: 'POST', credentials: 'include', body: form });
   if (!res.ok) throw new Error((await res.json()).error || 'Erro no upload');
   return res.json();
 }
@@ -22,7 +36,7 @@ async function apiForm(path, form) {
 function apiFormProgress(path, form, onProgress) {
   const xhr = new XMLHttpRequest();
   const promise = new Promise((resolve, reject) => {
-    xhr.open('POST', path);
+    xhr.open('POST', apiUrl(path));
     xhr.withCredentials = true;
     xhr.upload.onprogress = event => {
       if (event.lengthComputable && onProgress) {
@@ -882,7 +896,7 @@ async function backups() {
       : j.driveStatus === 'TRONSOFTOS'
         ? 'TronSoftOS'
         : `${escapeHtml(j.driveStatus || 'TRONSOFTOS')}${j.driveErrorMessage ? ` - ${escapeHtml(j.driveErrorMessage)}` : ''}`;
-    return `<tr><td>${escapeHtml(j.database?.name || '')}</td><td>${escapeHtml(j.status)}</td><td>${externalText}</td><td>${escapeHtml(j.backupPath || '')}</td><td>${formatBytes(j.backupSize || 0)}</td><td>${new Date(j.createdAt).toLocaleString()}</td><td>${j.status === 'SUCCESS' ? `<a class="btn btn-sm btn-outline-primary" href="/api/backups/${j.id}/download">Download</a>` : escapeHtml(j.errorMessage || '')}</td></tr>`;
+    return `<tr><td>${escapeHtml(j.database?.name || '')}</td><td>${escapeHtml(j.status)}</td><td>${externalText}</td><td>${escapeHtml(j.backupPath || '')}</td><td>${formatBytes(j.backupSize || 0)}</td><td>${new Date(j.createdAt).toLocaleString()}</td><td>${j.status === 'SUCCESS' ? `<a class="btn btn-sm btn-outline-primary" href="${apiUrl(`/api/backups/${j.id}/download`)}">Download</a>` : escapeHtml(j.errorMessage || '')}</td></tr>`;
   }).join('')}</tbody></table></div></div>`;
   const cleanupQuery = () => `olderThanDays=${encodeURIComponent(cleanupDays.value || 0)}&keepLastPerDatabase=${encodeURIComponent(cleanupKeep.value || 0)}`;
   btnPreviewCleanup.onclick = async () => {

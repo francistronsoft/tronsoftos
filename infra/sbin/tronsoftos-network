@@ -125,11 +125,11 @@ sync_ip_envs() {
   fi
 
   set_env_value "$tronfire_env" "TRONFIRE_LAN_HOST" "$service_ip"
-  local tronfire_port="8081"
-  if [ -f "$tronfire_env" ] && grep -q '^TRONFIRE_PANEL_PORT=' "$tronfire_env"; then
-    tronfire_port="$(grep '^TRONFIRE_PANEL_PORT=' "$tronfire_env" | tail -n1 | cut -d= -f2-)"
+  local tronsoftos_port="8080"
+  if [ -f "$tronsoftos_env" ] && grep -q '^TRONSOFTOS_PORT=' "$tronsoftos_env"; then
+    tronsoftos_port="$(grep '^TRONSOFTOS_PORT=' "$tronsoftos_env" | tail -n1 | cut -d= -f2-)"
   fi
-  set_env_value "$tronfire_env" "PUBLIC_URL" "http://$service_ip:$tronfire_port"
+  set_env_value "$tronfire_env" "PUBLIC_URL" "http://$service_ip:$tronsoftos_port/tronfire"
 
   if [ -f "$troncomanda_env" ]; then
     set_env_value "$troncomanda_env" "TRONCOMANDA_LAN_HOST" "$service_ip"
@@ -154,11 +154,11 @@ sync_service_vip_envs() {
   set_env_value "$tronsoftos_env" "CLOUDFLARE_TARGET_IP" "$service_ip"
 
   set_env_value "$tronfire_env" "TRONFIRE_LAN_HOST" "$service_ip"
-  local tronfire_port="8081"
-  if [ -f "$tronfire_env" ] && grep -q '^TRONFIRE_PANEL_PORT=' "$tronfire_env"; then
-    tronfire_port="$(grep '^TRONFIRE_PANEL_PORT=' "$tronfire_env" | tail -n1 | cut -d= -f2-)"
+  local tronsoftos_port="8080"
+  if [ -f "$tronsoftos_env" ] && grep -q '^TRONSOFTOS_PORT=' "$tronsoftos_env"; then
+    tronsoftos_port="$(grep '^TRONSOFTOS_PORT=' "$tronsoftos_env" | tail -n1 | cut -d= -f2-)"
   fi
-  set_env_value "$tronfire_env" "PUBLIC_URL" "http://$service_ip:$tronfire_port"
+  set_env_value "$tronfire_env" "PUBLIC_URL" "http://$service_ip:$tronsoftos_port/tronfire"
 
   if [ -f "$troncomanda_env" ]; then
     set_env_value "$troncomanda_env" "TRONCOMANDA_LAN_HOST" "$service_ip"

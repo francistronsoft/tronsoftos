@@ -413,7 +413,7 @@ FIREBIRD_EXEC_MODE=$FIREBIRD_MODE
 TRONFIRE_PANEL_PORT=$TRONFIRE_PANEL_PORT
 TRONFIRE_FIREBIRD_PORT=$FIREBIRD_PORT
 TRONFIRE_LAN_HOST=${HA_VIP:-$SERVER_IP}
-PUBLIC_URL=http://$SERVER_IP:$TRONFIRE_PANEL_PORT
+PUBLIC_URL=http://${HA_VIP:-$SERVER_IP}:$TRONSOFTOS_PORT/tronfire
 
 FIREBIRD_PACKAGE_URL=https://tronsoft.bitrix24.com.br/~qQVae
 FIREBIRD_TEMPLATE_URL=https://tronsoft.bitrix24.com.br/~wUw0m
@@ -483,7 +483,7 @@ if [ "$FIREBIRD_MODE" = "host" ]; then
       ],
       "projectName": "tronfire",
       "healthUrl": "http://127.0.0.1:$TRONFIRE_PANEL_PORT/health",
-      "publicUrl": "http://$SERVER_IP:$TRONFIRE_PANEL_PORT",
+      "publicUrl": "/tronfire/",
       "containers": [
         "tronfire_backend",
         "tronfire_worker",
@@ -524,7 +524,7 @@ else
       "composeFiles": ["apps/tronfire/docker-compose.yml"],
       "projectName": "tronfire",
       "healthUrl": "http://127.0.0.1:$TRONFIRE_PANEL_PORT/health",
-      "publicUrl": "http://$SERVER_IP:$TRONFIRE_PANEL_PORT",
+      "publicUrl": "/tronfire/",
       "containers": [
         "tronfire_backend",
         "tronfire_worker",

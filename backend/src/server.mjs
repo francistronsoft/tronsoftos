@@ -1,4 +1,5 @@
 import http from 'node:http';
+import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -757,12 +758,10 @@ function publicApp(app) {
 }
 
 function appAccessUrl(app) {
-  if (app.publicUrl || app.accessUrl) return app.publicUrl || app.accessUrl;
   if (app.name === 'tronfire') {
-    const env = parseEnvFile(path.join(appRoot, 'apps/tronfire/.env'));
-    if (env.PUBLIC_URL) return env.PUBLIC_URL;
-    if (env.TRONFIRE_LAN_HOST && env.TRONFIRE_PANEL_PORT) return `http://${env.TRONFIRE_LAN_HOST}:${env.TRONFIRE_PANEL_PORT}`;
+    return process.env.TRONFIRE_PROXY_PATH || '/tronfire/';
   }
+  if (app.publicUrl || app.accessUrl) return app.publicUrl || app.accessUrl;
   if (app.name === 'troncomanda') {
     const env = parseEnvFile(path.join(appRoot, 'apps/troncomanda/.env'));
     if (env.TRONCOMANDA_PUBLIC_URL) return env.TRONCOMANDA_PUBLIC_URL;
@@ -1886,6 +1885,50 @@ function serveStatic(req, reply) {
   fs.createReadStream(finalPath).pipe(reply);
 }
 
+function tronfireProxyTarget() {
+  const env = parseEnvFile(path.join(appRoot, 'apps/tronfire/.env'));
+  const panelPort = env.TRONFIRE_PANEL_PORT || process.env.TRONFIRE_PANEL_PORT || 8081;
+  return new URL(process.env.TRONFIRE_PROXY_TARGET || `http://127.0.0.1:${panelPort}`);
+}
+
+function proxyHeaders(headers, target) {
+  const blocked = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'host']);
+  const next = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (!blocked.has(key.toLowerCase())) next[key] = value;
+  }
+  next.host = target.host;
+  next['x-forwarded-prefix'] = '/tronfire';
+  next['x-forwarded-host'] = headers.host || '';
+  next['x-forwarded-proto'] = headers['x-forwarded-proto'] || 'http';
+  return next;
+}
+
+function proxyTronfire(req, reply) {
+  const target = tronfireProxyTarget();
+  const upstreamPath = req.url.replace(/^\/tronfire(?=\/|$)/, '') || '/';
+  const client = target.protocol === 'https:' ? https : http;
+  const request = client.request({
+    protocol: target.protocol,
+    hostname: target.hostname,
+    port: target.port,
+    method: req.method,
+    path: upstreamPath,
+    headers: proxyHeaders(req.headers, target)
+  }, upstream => {
+    const headers = { ...upstream.headers };
+    if (typeof headers.location === 'string' && headers.location.startsWith('/')) {
+      headers.location = `/tronfire${headers.location}`;
+    }
+    reply.writeHead(upstream.statusCode || 502, headers);
+    upstream.pipe(reply);
+  });
+  request.on('error', err => {
+    json(reply, 502, { error: `TronFire indisponivel em ${target.origin}: ${err.message}` });
+  });
+  req.pipe(request);
+}
+
 async function handleApi(req, reply, url) {
   if (req.method === 'GET' && url.pathname === '/health') {
     return json(reply, 200, { ok: true, app: 'TronSoftOS', version: '0.1.0' });
@@ -1959,6 +2002,13 @@ async function handleApi(req, reply, url) {
 const server = http.createServer(async (req, reply) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    if (url.pathname === '/tronfire') {
+      reply.writeHead(302, { location: '/tronfire/' });
+      return reply.end();
+    }
+    if (url.pathname.startsWith('/tronfire/')) {
+      return proxyTronfire(req, reply);
+    }
     if (url.pathname === '/health' || url.pathname.startsWith('/api/')) {
       return await handleApi(req, reply, url);
     }
