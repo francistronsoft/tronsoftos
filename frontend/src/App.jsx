@@ -135,8 +135,11 @@ function statusClass(status) {
     running: 'bg-green-100 text-green-800 border-green-200',
     primary: 'bg-green-100 text-green-800 border-green-200',
     success: 'bg-green-100 text-green-800 border-green-200',
+    READY: 'bg-green-100 text-green-800 border-green-200',
+    critical: 'bg-red-100 text-red-800 border-red-200',
     degraded: 'bg-amber-100 text-amber-800 border-amber-200',
     warning: 'bg-amber-100 text-amber-800 border-amber-200',
+    atrasado: 'bg-amber-100 text-amber-800 border-amber-200',
     blocked: 'bg-red-100 text-red-800 border-red-200',
     'promotion-allowed': 'bg-amber-100 text-amber-800 border-amber-200',
     standby: 'bg-blue-100 text-blue-800 border-blue-200',
@@ -172,6 +175,16 @@ function formatDateTime(value) {
     dateStyle: 'short',
     timeStyle: 'medium'
   });
+}
+
+function formatDurationFrom(value) {
+  if (!value) return '-';
+  const minutes = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 60000));
+  if (minutes < 1) return 'agora';
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours}h ${rest}min` : `${hours}h`;
 }
 
 function diagnosticIcon(status) {
@@ -341,6 +354,22 @@ function DashboardView({ dashboard }) {
           </div>
         </Card>
       </div>
+      <Card title="Alertas ativos" icon={AlertTriangle} action={<StatusPill value={alerts.length ? 'warning' : 'online'} />}>
+        {alerts.length ? (
+          <div className="grid gap-2">
+            {alerts.slice(0, 8).map((alert, index) => (
+              <div key={`${alert.message}-${index}`} className={`flex items-center justify-between gap-4 rounded-md border px-3 py-2 text-sm ${alert.severity === 'critical' ? 'border-red-200 bg-red-50 text-red-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
+                <span>{alert.message}</span>
+                <StatusPill value={alert.severity === 'critical' ? 'critical' : 'warning'} />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">
+            Nenhum alerta ativo no TronSoftOS ou TronFire.
+          </div>
+        )}
+      </Card>
     </div>
   );
 }
@@ -487,6 +516,14 @@ function ClusterView({ dashboard }) {
     deploymentMode: identity.deploymentMode || cluster.mode || 'simple'
   };
   const isSyncReceiver = values.deploymentMode === 'ha' && ['standby', 'recovery'].includes(values.nodeRole);
+  const standbyReady = syncStatus.standbyReady === true;
+  const promotionReady = syncStatus.promotionReady === true;
+  const standbyLag = Number.isFinite(Number(syncStatus.standbyLagMinutes)) ? Number(syncStatus.standbyLagMinutes) : null;
+  const latestBackupReceived = syncStatus.tronfireStandby?.latestBackupAt || syncStatus.receiver?.latestBackup?.modifiedAt || null;
+  const latestRestoreValidated = syncStatus.tronfireStandby?.latestValidatedAt || null;
+  const standbyDatabaseSummary = syncStatus.tronfireStandby?.databaseCount
+    ? `${syncStatus.tronfireStandby.readyCount || 0}/${syncStatus.tronfireStandby.databaseCount}`
+    : '-';
   const lockValues = lockForm || {
     cluster: lock.cluster || values.clusterId,
     active_node: lock.active_node || (values.nodeRole === 'primary' ? values.nodeName : ''),
@@ -703,7 +740,7 @@ function ClusterView({ dashboard }) {
               </dl>
             </Card>
           </div>
-          <div className="grid gap-5 xl:grid-cols-2">
+          <div className="grid gap-5 xl:grid-cols-3">
             <Card title="Sync HA" icon={RefreshCw} action={<StatusPill value={isSyncReceiver ? 'receptor' : (syncStatus.status || 'disabled')} />}>
               <div className="grid gap-3 text-sm">
                 {(isSyncReceiver ? [
@@ -715,10 +752,13 @@ function ClusterView({ dashboard }) {
                   ['Diretorio backups', syncStatus.receiver?.backupDir || '/opt/tronfire-storage/firebird/backups']
                 ] : [
                   ['Status', syncStatus.status || (syncStatus.enabled ? 'enabled' : 'disabled')],
+                  ['Automatico', syncStatus.autoEnabled ? 'habilitado' : 'desativado'],
+                  ['Intervalo', syncStatus.intervalMinutes ? `${syncStatus.intervalMinutes} min` : '-'],
                   ['Standby', syncStatus.standbyHost || 'nao configurado'],
                   ['Usuario SSH', syncStatus.sshUser || 'tronsoftos'],
-                  ['Ultimo evento', syncStatus.lastEvent?.type || 'nenhum'],
-                  ['Quando', syncStatus.lastEvent?.createdAt ? formatDateTime(syncStatus.lastEvent.createdAt) : '-'],
+                  ['Ultimo sync', syncStatus.lastEvent?.createdAt ? formatDateTime(syncStatus.lastEvent.createdAt) : '-'],
+                  ['Proximo sync', syncStatus.nextRunAt ? formatDateTime(syncStatus.nextRunAt) : '-'],
+                  ['Defasagem', standbyLag === null ? '-' : `${standbyLag} min`],
                   ['Exit code', syncStatus.lastEvent?.exitCode ?? '-']
                 ]).map(([label, value]) => (
                   <div key={label} className="flex items-center justify-between gap-4 border-b border-slate-100 pb-2">
@@ -748,6 +788,26 @@ function ClusterView({ dashboard }) {
                   Sync HA ainda nao esta habilitado.
                 </div>
               )}
+            </Card>
+            <Card title="Prontidao do standby" icon={ShieldCheck} action={<StatusPill value={standbyReady ? 'READY' : 'atrasado'} />}>
+              <div className="grid gap-3 text-sm">
+                {[
+                  ['Status', standbyReady ? 'Standby READY' : 'Standby atrasado'],
+                  ['Bancos prontos', standbyDatabaseSummary],
+                  ['Ultimo backup recebido', latestBackupReceived ? formatDateTime(latestBackupReceived) : 'aguardando'],
+                  ['Ultimo restore validado', latestRestoreValidated ? formatDateTime(latestRestoreValidated) : 'aguardando'],
+                  ['Tempo de defasagem', standbyLag === null ? '-' : `${standbyLag} min`],
+                  ['Apto para promocao', promotionReady ? 'sim' : 'nao']
+                ].map(([label, value]) => (
+                  <div key={label} className="flex items-center justify-between gap-4 border-b border-slate-100 pb-2">
+                    <span className="text-slate-500">{label}</span>
+                    <span className="min-w-0 truncate text-right font-medium text-slate-950">{value}</span>
+                  </div>
+                ))}
+              </div>
+              <div className={`mt-4 rounded-md border px-3 py-2 text-sm ${promotionReady ? 'border-green-200 bg-green-50 text-green-700' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
+                {promotionReady ? 'Standby com backup validado dentro da janela configurada.' : 'Standby ainda nao deve ser promovido sem validar a defasagem e o ultimo backup recebido.'}
+              </div>
             </Card>
             <Card title="Protecao de duplo primary" icon={ShieldCheck} action={<StatusPill value={guard.canHoldVip ? 'online' : 'blocked'} />}>
               <div className="grid gap-3 text-sm">
@@ -1814,6 +1874,13 @@ export default function App() {
   const activeItem = useMemo(() => navItems.find(item => item.id === active) || navItems[0], [active]);
   const haMaintenance = dashboard.cluster?.maintenance;
   const haMaintenanceActive = haMaintenance?.active === true;
+  const reactivateFailoverMutation = useMutation({
+    mutationFn: () => postApi('/api/maintenance/standby/keepalived/start', { confirmation: 'REATIVAR STANDBY' }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    }
+  });
 
   const View = {
     dashboard: <DashboardView dashboard={dashboard} />,
@@ -1869,10 +1936,19 @@ export default function App() {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2 font-medium">
                 <AlertTriangle className="h-4 w-4" />
-                Manutencao HA ativa: failover suspenso no standby{haMaintenance.standbyHost ? ` (${haMaintenance.standbyHost})` : ''}.
+                Manutencao HA ativa ha {formatDurationFrom(haMaintenance.startedAt)}: failover suspenso no standby{haMaintenance.standbyHost ? ` (${haMaintenance.standbyHost})` : ''}.
               </div>
-              <span className="text-xs uppercase tracking-normal">Reative em Manutencao &gt; Failover HA ao concluir.</span>
+              <button
+                type="button"
+                disabled={reactivateFailoverMutation.isPending || !haMaintenance.standbyHost}
+                onClick={() => reactivateFailoverMutation.mutate()}
+                className="inline-flex items-center gap-2 rounded-md bg-amber-950 px-3 py-2 text-xs font-medium uppercase text-white hover:bg-amber-900 disabled:opacity-50"
+              >
+                <Play className="h-4 w-4" />
+                Reativar failover
+              </button>
             </div>
+            {reactivateFailoverMutation.isError ? <div className="mt-2 text-xs text-red-700">{reactivateFailoverMutation.error.message}</div> : null}
           </div>
         ) : null}
         <div className="p-4 lg:p-6">{View}</div>

@@ -1,5 +1,7 @@
 import http from 'node:http';
 import https from 'node:https';
+import net from 'node:net';
+import tls from 'node:tls';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -32,6 +34,7 @@ const dockerConfigDir = process.env.TRONSOFTOS_DOCKER_CONFIG || path.join(stateD
 let rcloneQuotaCache = { key: null, checkedAt: 0, value: null };
 let haSyncSchedulerTimer = null;
 let lastAutoHaSyncStartedAt = 0;
+const smtpAlertSentAt = new Map();
 
 function json(reply, status, body) {
   const payload = JSON.stringify(body, null, 2);
@@ -334,6 +337,16 @@ function haSyncStatus() {
   const latestCatalog = latestFileInfo(receiverCatalogPath, /\.(dump)$/i);
   const latestBackup = latestFileInfo(receiverBackupPath, /\.(gbk|fbk|gbk\.gz|fbk\.gz|manifest\.json)$/i);
   const lastExitCode = lastEvent?.details?.exitCode;
+  const intervalMinutes = Number(settings.intervalMinutes || 10);
+  const lastSyncAtMs = lastEvent?.createdAt ? new Date(lastEvent.createdAt).getTime() : 0;
+  const nextRunAt = settings.enabled && settings.autoEnabled && lastSyncAtMs
+    ? new Date(lastSyncAtMs + intervalMinutes * 60 * 1000).toISOString()
+    : settings.enabled && settings.autoEnabled
+      ? new Date().toISOString()
+      : null;
+  const lastBackupAtMs = latestBackup?.modifiedAt ? new Date(latestBackup.modifiedAt).getTime() : 0;
+  const standbyLagMinutes = lastBackupAtMs ? Math.max(0, Math.round((Date.now() - lastBackupAtMs) / 60000)) : null;
+  const standbyReady = !!latestCatalog && !!latestBackup && (standbyLagMinutes === null || standbyLagMinutes <= intervalMinutes * 2);
   let status = 'disabled';
   if (runningJob) status = 'running';
   else if (settings.enabled && !settings.standbyHost) status = 'warning';
@@ -351,6 +364,10 @@ function haSyncStatus() {
       error: lastEvent.details?.error || null
     } : null,
     runningJobId: runningJob?.id || null,
+    nextRunAt,
+    standbyLagMinutes,
+    standbyReady,
+    promotionReady: standbyReady && status !== 'failed',
     receiver: {
       catalogDir: receiverCatalogPath,
       backupDir: receiverBackupPath,
@@ -459,6 +476,109 @@ function writeSmtpSettings(body) {
   fs.writeFileSync(smtpSettingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
   appendEvent('SMTP_SETTINGS_UPDATED', { enabled: settings.enabled, host: settings.host, port: settings.port, to: settings.to });
   return publicSmtpSettings(settings);
+}
+
+function smtpReadline(socket, timeoutMs = 20_000) {
+  return new Promise((resolve, reject) => {
+    let buffer = '';
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error('timeout SMTP'));
+    }, timeoutMs);
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off('data', onData);
+      socket.off('error', onError);
+    };
+    const onError = err => {
+      cleanup();
+      reject(err);
+    };
+    const onData = chunk => {
+      buffer += chunk.toString('utf8');
+      const lines = buffer.split(/\r?\n/).filter(Boolean);
+      const last = lines[lines.length - 1] || '';
+      if (/^\d{3}\s/.test(last)) {
+        cleanup();
+        resolve(buffer);
+      }
+    };
+    socket.on('data', onData);
+    socket.on('error', onError);
+  });
+}
+
+async function smtpCommand(socket, command, expected = /^[23]/) {
+  if (command) socket.write(`${command}\r\n`);
+  const response = await smtpReadline(socket);
+  if (!expected.test(response)) throw new Error(`SMTP falhou em ${command || 'greeting'}: ${response.trim()}`);
+  return response;
+}
+
+async function sendSmtpMessage(settings, subject, body) {
+  if (!settings.enabled || !settings.host || !settings.to || !settings.from) return false;
+  const socket = settings.secure
+    ? tls.connect({ host: settings.host, port: settings.port || 465, servername: settings.host })
+    : net.connect({ host: settings.host, port: settings.port || 587 });
+  await smtpCommand(socket, null);
+  await smtpCommand(socket, `EHLO ${nodeIdentity().nodeName || 'tronsoftos'}`);
+  if (!settings.secure && settings.port === 587) {
+    await smtpCommand(socket, 'STARTTLS');
+    const secureSocket = tls.connect({ socket, servername: settings.host });
+    await smtpCommand(secureSocket, `EHLO ${nodeIdentity().nodeName || 'tronsoftos'}`);
+    return sendSmtpMessageOnSocket(secureSocket, settings, subject, body);
+  }
+  return sendSmtpMessageOnSocket(socket, settings, subject, body);
+}
+
+async function sendSmtpMessageOnSocket(socket, settings, subject, body) {
+  if (settings.user && settings.password) {
+    await smtpCommand(socket, 'AUTH LOGIN', /^334/);
+    await smtpCommand(socket, Buffer.from(settings.user).toString('base64'), /^334/);
+    await smtpCommand(socket, Buffer.from(settings.password).toString('base64'));
+  }
+  const recipients = String(settings.to).split(',').map(item => item.trim()).filter(Boolean);
+  await smtpCommand(socket, `MAIL FROM:<${settings.from.replace(/^.*<|>.*$/g, '')}>`);
+  for (const recipient of recipients) await smtpCommand(socket, `RCPT TO:<${recipient.replace(/^.*<|>.*$/g, '')}>`);
+  await smtpCommand(socket, 'DATA', /^354/);
+  const message = [
+    `From: ${settings.from}`,
+    `To: ${recipients.join(', ')}`,
+    `Subject: ${settings.subjectPrefix || '[TronSoftOS]'} ${subject}`,
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    body.replace(/\n\./g, '\n..'),
+    '.'
+  ].join('\r\n');
+  socket.write(`${message}\r\n`);
+  await smtpCommand(socket, null);
+  await smtpCommand(socket, 'QUIT', /^[23]/).catch(() => null);
+  socket.end();
+  return true;
+}
+
+async function notifyCriticalAlerts(alerts) {
+  const settings = readJson(smtpSettingsPath, {});
+  if (settings.enabled !== true) return;
+  const critical = alerts.filter(alert => ['critical', 'critico', 'danger'].includes(String(alert.severity || '').toLowerCase()));
+  for (const alert of critical) {
+    const key = `${alert.source || 'TronSoftOS'}:${alert.type || alert.message}`;
+    const lastSent = smtpAlertSentAt.get(key) || 0;
+    if (Date.now() - lastSent < 30 * 60 * 1000) continue;
+    try {
+      await sendSmtpMessage(settings, alert.message || 'Alerta critico', [
+        `Origem: ${alert.source || 'TronSoftOS'}`,
+        `Severidade: ${alert.severity}`,
+        `Mensagem: ${alert.message}`,
+        `No: ${nodeIdentity().nodeName}`,
+        `Quando: ${new Date().toISOString()}`
+      ].join('\n'));
+      smtpAlertSentAt.set(key, Date.now());
+      appendEvent('SMTP_ALERT_SENT', { key, message: alert.message });
+    } catch (err) {
+      appendEvent('SMTP_ALERT_FAILED', { key, error: err.message });
+    }
+  }
 }
 
 function defaultRcloneConfigPath() {
@@ -870,6 +990,31 @@ async function rcloneAbout() {
   }
 }
 
+async function diskUsageForPath(targetPath) {
+  if (process.platform === 'win32') return null;
+  const dirPath = fs.existsSync(targetPath) ? targetPath : path.dirname(targetPath);
+  try {
+    const out = await run('df', ['-Pk', dirPath], { timeout: 10_000, maxBuffer: 256 * 1024 });
+    const lines = out.stdout.trim().split(/\r?\n/);
+    const columns = lines.at(-1)?.trim().split(/\s+/) || [];
+    const sizeKb = Number(columns[1] || 0);
+    const usedKb = Number(columns[2] || 0);
+    const availableKb = Number(columns[3] || 0);
+    const percentUsed = Number(String(columns[4] || '').replace('%', ''));
+    return {
+      ok: true,
+      path: dirPath,
+      filesystem: columns[0] || '',
+      total: sizeKb * 1024,
+      used: usedKb * 1024,
+      free: availableKb * 1024,
+      percentUsed: Number.isFinite(percentUsed) ? percentUsed : null
+    };
+  } catch (err) {
+    return { ok: false, path: dirPath, error: err.message };
+  }
+}
+
 function managedConfig() {
   return readJson(configPath, readJson(fallbackConfigPath, { apps: [] }));
 }
@@ -1054,6 +1199,48 @@ async function tronfireAlerts() {
   }
 }
 
+async function tronfireHaStatus() {
+  try {
+    const target = tronfireProxyTarget();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2500);
+    const response = await fetch(new URL('/api/ha/status', target), { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!response.ok) return null;
+    const payload = await response.json();
+    const databases = Array.isArray(payload.databases) ? payload.databases : [];
+    const activeDatabases = databases.filter(db => db.standbyRequiredForPromotion !== false);
+    const readyDatabases = activeDatabases.filter(db => String(db.standbyStatus || '').toUpperCase() === 'READY');
+    const latestBackupAt = activeDatabases
+      .map(db => db.lastStandbyBackupAt)
+      .filter(Boolean)
+      .sort((a, b) => new Date(b) - new Date(a))[0] || null;
+    const latestValidatedAt = activeDatabases
+      .map(db => db.lastStandbyValidatedAt)
+      .filter(Boolean)
+      .sort((a, b) => new Date(b) - new Date(a))[0] || null;
+    return {
+      ok: true,
+      deploymentMode: payload.deploymentMode || null,
+      nodeRole: payload.nodeRole || null,
+      databaseCount: activeDatabases.length,
+      readyCount: readyDatabases.length,
+      allReady: activeDatabases.length > 0 && readyDatabases.length === activeDatabases.length,
+      latestBackupAt,
+      latestValidatedAt,
+      databases: activeDatabases.map(db => ({
+        alias: db.alias,
+        name: db.name,
+        standbyStatus: db.standbyStatus,
+        lastStandbyBackupAt: db.lastStandbyBackupAt,
+        lastStandbyValidatedAt: db.lastStandbyValidatedAt
+      }))
+    };
+  } catch {
+    return null;
+  }
+}
+
 function checkSeverity(ok, warn = false) {
   if (ok) return 'ok';
   return warn ? 'warning' : 'error';
@@ -1164,11 +1351,15 @@ async function backupStatus() {
     // Directory may not exist before install.
   }
   files.sort((a, b) => new Date(b.modifiedAt) - new Date(a.modifiedAt));
-  const quota = await rcloneAbout();
+  const [quota, disk] = await Promise.all([
+    rcloneAbout(),
+    diskUsageForPath(backupDir)
+  ]);
   return {
     backupDir,
     rclone,
     quota,
+    disk,
     recentFiles: files.slice(0, 20)
   };
 }
@@ -1321,6 +1512,16 @@ async function hostFirebirdStatus() {
 
 async function hostFirebirdAction(action) {
   if (!['start', 'stop', 'restart'].includes(action)) throw new Error('invalid action');
+  const identity = nodeIdentity();
+  const sync = rawHaSyncSettings();
+  if (['stop', 'restart'].includes(action) && identity.deploymentMode === 'ha' && identity.nodeRole === 'primary' && sync.standbyHost && maintenanceState().active !== true) {
+    try {
+      startStandbyKeepalived('stop', { confirmation: 'SUSPENDER STANDBY' });
+      appendEvent('HA_MAINTENANCE_AUTO_BEFORE_FIREBIRD', { action, standbyHost: sync.standbyHost });
+    } catch (err) {
+      appendEvent('HA_MAINTENANCE_AUTO_BEFORE_FIREBIRD_FAILED', { action, standbyHost: sync.standbyHost, error: err.message });
+    }
+  }
   const service = process.env.FIREBIRD_SERVICE || 'firebird';
   const out = await privilegedRun('/usr/bin/systemctl', [action, service], { timeout: action === 'restart' ? 120_000 : 60_000, maxBuffer: 1024 * 1024 * 2 });
   appendEvent(`FIREBIRD_HOST_${action.toUpperCase()}`, { service, stdout: out.stdout, stderr: out.stderr });
@@ -1619,17 +1820,43 @@ function exportPairingFile(reply) {
 }
 
 async function dashboard() {
-  const [apps] = await Promise.all([appsStatus()]);
+  const [apps, tronfireHa] = await Promise.all([appsStatus(), tronfireHaStatus()]);
   const cluster = clusterStatus();
+  if (tronfireHa && cluster.sync) {
+    cluster.sync.tronfireStandby = tronfireHa;
+    if (tronfireHa.latestBackupAt) {
+      const lagMinutes = Math.max(0, Math.round((Date.now() - new Date(tronfireHa.latestBackupAt).getTime()) / 60000));
+      cluster.sync.standbyLagMinutes = lagMinutes;
+      cluster.sync.standbyReady = tronfireHa.allReady === true && lagMinutes <= Number(cluster.sync.intervalMinutes || 10) * 2;
+      cluster.sync.promotionReady = cluster.sync.standbyReady && cluster.sync.status !== 'failed';
+    }
+  }
   const backups = await backupStatus();
   const alerts = [];
   if (apps.some(app => app.status === 'offline' && app.enabled)) alerts.push({ severity: 'critical', message: 'App gerenciado offline' });
   if (cluster.mode === 'ha' && !cluster.lock) alerts.push({ severity: 'warning', message: 'Cluster HA sem cluster-lock' });
+  if (cluster.sync?.status === 'failed') alerts.push({ severity: 'critical', message: 'Sync HA falhou na ultima execucao' });
+  if (cluster.sync?.enabled && cluster.sync?.standbyLagMinutes !== null && cluster.sync.standbyLagMinutes > Number(cluster.sync.intervalMinutes || 10) * 2) {
+    alerts.push({ severity: 'warning', message: `Standby atrasado: ${cluster.sync.standbyLagMinutes} min sem backup recebido` });
+  }
+  if (cluster.sync?.enabled) {
+    const intervalMinutes = Number(cluster.sync.intervalMinutes || 10);
+    const latestBackupAt = cluster.sync.receiver?.latestBackup?.modifiedAt ? new Date(cluster.sync.receiver.latestBackup.modifiedAt).getTime() : 0;
+    const backupAgeMinutes = latestBackupAt ? Math.round((Date.now() - latestBackupAt) / 60000) : null;
+    if (backupAgeMinutes === null) {
+      alerts.push({ severity: 'warning', message: 'Sync HA sem backup validado disponivel' });
+    } else if (backupAgeMinutes > intervalMinutes * 2) {
+      alerts.push({ severity: 'warning', message: `Backup validado atrasado: ${backupAgeMinutes} min desde o ultimo arquivo` });
+    }
+  }
   if (!backups.rclone.remote) alerts.push({ severity: 'warning', message: 'Remote rclone nao configurado' });
+  if (backups.disk?.percentUsed >= 97) alerts.push({ severity: 'critical', message: `Disco de backup com ${backups.disk.percentUsed}% de uso` });
+  else if (backups.disk?.percentUsed >= 90) alerts.push({ severity: 'warning', message: `Disco de backup com ${backups.disk.percentUsed}% de uso` });
   if (backups.quota?.percentUsed >= 97) alerts.push({ severity: 'critical', message: `Google Drive com ${backups.quota.percentUsed}% de uso` });
   else if (backups.quota?.percentUsed >= 90) alerts.push({ severity: 'warning', message: `Google Drive com ${backups.quota.percentUsed}% de uso` });
   if (backups.quota && backups.quota.ok === false) alerts.push({ severity: 'warning', message: `Falha ao consultar espaco do Google Drive: ${backups.quota.error}` });
   alerts.push(...await tronfireAlerts());
+  await notifyCriticalAlerts(alerts);
   return {
     generatedAt: new Date().toISOString(),
     cluster,
