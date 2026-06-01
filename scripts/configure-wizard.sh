@@ -260,7 +260,7 @@ SERVER_IP="$(ask "IP atual deste servidor na rede do cliente" "$DEFAULT_SERVER_I
 FIREBIRD_MODE="host"
 echo "Firebird 2.5.9 sera instalado/usado no host Debian."
 
-TRONFIRE_PANEL_PORT="$(ask "Porta do painel TronFire" "8081")"
+TRONFIRE_PANEL_PORT="8081"
 TRONSOFTOS_PORT="$(ask "Porta do painel TronSoftOS" "8080")"
 FIREBIRD_PORT="3050"
 echo "Porta Firebird padrao: $FIREBIRD_PORT"
@@ -414,6 +414,7 @@ TRONFIRE_PANEL_PORT=$TRONFIRE_PANEL_PORT
 TRONFIRE_FIREBIRD_PORT=$FIREBIRD_PORT
 TRONFIRE_LAN_HOST=${HA_VIP:-$SERVER_IP}
 PUBLIC_URL=http://${HA_VIP:-$SERVER_IP}:$TRONSOFTOS_PORT/tronfire
+TRONFIRE_AUTH_DISABLED=true
 
 FIREBIRD_PACKAGE_URL=https://tronsoft.bitrix24.com.br/~qQVae
 FIREBIRD_TEMPLATE_URL=https://tronsoft.bitrix24.com.br/~wUw0m

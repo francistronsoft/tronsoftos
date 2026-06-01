@@ -91,6 +91,7 @@ services:
       TRONFIRE_FIREBIRD_PORT: ${TRONFIRE_FIREBIRD_PORT:-3050}
       TRONFIRE_LAN_HOST: ${TRONFIRE_LAN_HOST:-}
       PUBLIC_URL: ${PUBLIC_URL:-http://localhost:8081}
+      TRONFIRE_AUTH_DISABLED: ${TRONFIRE_AUTH_DISABLED:-true}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${STORAGE_ROOT}/firebird:/firebird

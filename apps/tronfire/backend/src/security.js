@@ -3,6 +3,14 @@ import bcrypt from 'bcryptjs';
 import { prisma } from './prisma.js';
 
 const SESSION_DURATION_MS = Math.max(Number(process.env.SESSION_DURATION_HOURS || 24), 1) * 60 * 60 * 1000;
+const AUTH_DISABLED = String(process.env.TRONFIRE_AUTH_DISABLED ?? 'true').toLowerCase() !== 'false';
+const SYSTEM_USER = {
+  id: null,
+  name: 'TronSoftOS',
+  email: 'tronsoftos@local',
+  role: 'ADMIN',
+  active: true
+};
 
 export function sha256(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
@@ -22,6 +30,11 @@ export async function createSession(user, req) {
 }
 
 export async function requireAuth(req, reply) {
+  if (AUTH_DISABLED) {
+    req.user = SYSTEM_USER;
+    req.session = null;
+    return;
+  }
   const token = req.cookies.tronfire_session;
   if (!token) return reply.code(401).send({ error: 'UNAUTHORIZED' });
   const session = await prisma.session.findUnique({ where: { tokenHash: sha256(token) }, include: { user: true } });
