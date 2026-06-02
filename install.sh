@@ -126,9 +126,22 @@ if [ ! -f "$APP_DIR/config/managed-apps.json" ]; then
   cp "$APP_DIR/config/managed-apps.example.json" "$APP_DIR/config/managed-apps.json"
 fi
 
+VERSION_VALUE="$(cat "$APP_DIR/VERSION" 2>/dev/null || printf '0.1.0')"
+GIT_COMMIT="$(git -C "$APP_DIR" rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
+GIT_BRANCH="$(git -C "$APP_DIR" branch --show-current 2>/dev/null || printf 'unknown')"
+cat > "$APP_DIR/state/build-info.json" <<EOF
+{
+  "version": "$VERSION_VALUE",
+  "commit": "$GIT_COMMIT",
+  "branch": "$GIT_BRANCH",
+  "installedAt": "$(date -Is)"
+}
+EOF
+
 mkdir -p "$APP_DIR/state/ssh" "$APP_DIR/.ssh"
 chown -R "$USER_NAME:$GROUP_NAME" "$APP_DIR/state" "$APP_DIR/.ssh"
 chmod 700 "$APP_DIR/state" "$APP_DIR/state/ssh" "$APP_DIR/.ssh"
+chmod 600 "$APP_DIR/state/build-info.json" 2>/dev/null || true
 if [ ! -f "$APP_DIR/state/ssh/id_ed25519" ]; then
   sudo -u "$USER_NAME" ssh-keygen -t ed25519 -f "$APP_DIR/state/ssh/id_ed25519" -N "" -C "tronsoftos@$HOSTNAME" >/dev/null
 fi

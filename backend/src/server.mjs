@@ -16,6 +16,8 @@ const port = Number(process.env.TRONSOFTOS_PORT || 8080);
 const configPath = process.env.MANAGED_APPS_CONFIG || path.join(appRoot, 'config/managed-apps.json');
 const fallbackConfigPath = path.join(appRoot, 'config/managed-apps.example.json');
 const stateDir = process.env.TRONSOFTOS_STATE_DIR || path.join(appRoot, 'state');
+const versionPath = path.join(appRoot, 'VERSION');
+const buildInfoPath = process.env.TRONSOFTOS_BUILD_INFO || path.join(stateDir, 'build-info.json');
 const nodeIdentityPath = process.env.TRONSOFTOS_NODE_IDENTITY || path.join(stateDir, 'node-identity.json');
 const clusterLockPath = process.env.TRONSOFTOS_CLUSTER_LOCK || path.join(stateDir, 'cluster-lock.json');
 const clusterSecretsPath = process.env.TRONSOFTOS_CLUSTER_SECRETS || path.join(stateDir, 'cluster-secrets.env');
@@ -55,6 +57,17 @@ function readJson(filePath, fallback) {
 
 function ensureStateDir() {
   fs.mkdirSync(stateDir, { recursive: true });
+}
+
+function buildInfo() {
+  const version = String(process.env.TRONSOFTOS_VERSION || (fs.existsSync(versionPath) ? fs.readFileSync(versionPath, 'utf8') : '0.1.0')).trim() || '0.1.0';
+  const saved = readJson(buildInfoPath, {});
+  return {
+    version: saved.version || version,
+    commit: saved.commit || process.env.TRONSOFTOS_GIT_COMMIT || 'unknown',
+    branch: saved.branch || process.env.TRONSOFTOS_GIT_BRANCH || 'unknown',
+    installedAt: saved.installedAt || null
+  };
 }
 
 function appendEvent(type, details = {}) {
@@ -1287,6 +1300,28 @@ async function tronfireHaStatus() {
   }
 }
 
+async function remoteTronsoftosHealth(host) {
+  const targetHost = String(host || '').trim();
+  if (!targetHost) return null;
+  const base = /^https?:\/\//i.test(targetHost) ? targetHost : `http://${targetHost}:${port}`;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2500);
+    const response = await fetch(new URL('/health', base), { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!response.ok) return { ok: false, url: base, status: response.status };
+    const payload = await response.json();
+    return { ok: true, url: base, ...payload };
+  } catch (err) {
+    return { ok: false, url: base, error: err.message };
+  }
+}
+
+function buildsDiffer(left, right) {
+  if (!left || !right) return false;
+  return Boolean((left.commit && right.commit && left.commit !== right.commit) || (left.version && right.version && left.version !== right.version));
+}
+
 function checkSeverity(ok, warn = false) {
   if (ok) return 'ok';
   return warn ? 'warning' : 'error';
@@ -1363,6 +1398,7 @@ function clusterStatus() {
     mode: identity.deploymentMode || process.env.TRONSOFTOS_DEPLOYMENT_MODE || 'simple',
     nodeName: identity.nodeName || process.env.TRONSOFTOS_NODE_NAME || 'local',
     nodeRole: identity.nodeRole || process.env.TRONFIRE_NODE_ROLE || process.env.TRONSOFTOS_NODE_ROLE || 'primary',
+    build: buildInfo(),
     identity,
     vip: process.env.HA_VIP || null,
     vipCidr: process.env.HA_VIP_CIDR || null,
@@ -1874,6 +1910,9 @@ function exportPairingFile(reply) {
 async function dashboard() {
   const [apps, tronfireHa] = await Promise.all([appsStatus(), tronfireHaStatus()]);
   const cluster = clusterStatus();
+  if (cluster.mode === 'ha' && cluster.sync?.standbyHost) {
+    cluster.standbyHealth = await remoteTronsoftosHealth(cluster.sync.standbyHost);
+  }
   if (tronfireHa && cluster.sync) {
     cluster.sync.tronfireStandby = tronfireHa;
     const requiredReady = tronfireHa.allReady === true;
@@ -1888,6 +1927,7 @@ async function dashboard() {
   const backups = await backupStatus();
   const alerts = [];
   if (apps.some(app => app.status === 'offline' && app.enabled)) alerts.push({ severity: 'critical', message: 'App gerenciado offline' });
+  if (buildsDiffer(cluster.build, cluster.standbyHealth)) alerts.push({ severity: 'warning', message: `Nós HA em versões diferentes: local ${cluster.build.commit || cluster.build.version}, standby ${cluster.standbyHealth.commit || cluster.standbyHealth.version}` });
   if (cluster.mode === 'ha' && !cluster.lock) alerts.push({ severity: 'warning', message: 'Cluster HA sem cluster-lock' });
   if (cluster.sync?.status === 'failed') alerts.push({ severity: 'critical', message: 'Sync HA falhou na ultima execucao' });
   if (cluster.sync?.enabled && cluster.sync?.standbyLagMinutes !== null && cluster.sync.standbyLagMinutes > Number(cluster.sync.intervalMinutes || 10) * 2) {
@@ -1913,6 +1953,7 @@ async function dashboard() {
   await notifyCriticalAlerts(alerts);
   return {
     generatedAt: new Date().toISOString(),
+    build: buildInfo(),
     cluster,
     apps,
     backups,
@@ -1988,6 +2029,7 @@ async function diagnostics() {
   };
   return {
     generatedAt: new Date().toISOString(),
+    build: buildInfo(),
     summary,
     checks,
     apps,
@@ -2497,7 +2539,7 @@ function proxyTronfire(req, reply) {
 
 async function handleApi(req, reply, url) {
   if (req.method === 'GET' && url.pathname === '/health') {
-    return json(reply, 200, { ok: true, app: 'TronSoftOS', version: '0.1.0' });
+    return json(reply, 200, { ok: true, app: 'TronSoftOS', ...buildInfo(), node: nodeIdentity() });
   }
   if (req.method === 'GET' && url.pathname === '/api/dashboard') return json(reply, 200, await dashboard());
   if (req.method === 'GET' && url.pathname === '/api/diagnostics') return json(reply, 200, await diagnostics());

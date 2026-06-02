@@ -337,6 +337,10 @@ function DashboardView({ dashboard }) {
         <Stat label="Alertas" value={alerts.length} detail={alerts[0]?.message || 'sem alertas ativos'} icon={AlertTriangle} tone={alerts.length ? 'amber' : 'green'} />
         <Stat label="Hora servidor" value={formatDateTime(dashboard.generatedAt)} detail="gerado pelo backend" icon={FileClock} tone="slate" />
       </div>
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Stat label="Versao local" value={dashboard.build?.version || dashboard.cluster.build?.version || '-'} detail={`commit ${dashboard.build?.commit || dashboard.cluster.build?.commit || 'unknown'}`} icon={GitBranch} tone="slate" />
+        <Stat label="Versao standby" value={dashboard.cluster.standbyHealth?.version || '-'} detail={dashboard.cluster.standbyHealth?.ok ? `commit ${dashboard.cluster.standbyHealth.commit || 'unknown'}` : dashboard.cluster.standbyHealth?.error || 'nao consultado'} icon={GitBranch} tone={dashboard.cluster.standbyHealth?.ok ? ((dashboard.cluster.standbyHealth.commit && dashboard.cluster.build?.commit && dashboard.cluster.standbyHealth.commit !== dashboard.cluster.build.commit) ? 'amber' : 'green') : 'slate'} />
+      </div>
       <div className="grid gap-5 xl:grid-cols-[1.3fr_0.7fr]">
         <Card title="Topologia" icon={GitBranch}><Topology dashboard={dashboard} /></Card>
         <Card title="Saude" icon={Gauge}>
