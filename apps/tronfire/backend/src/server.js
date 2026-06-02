@@ -29,7 +29,7 @@ const firebirdLogsDir = '/firebird/logs';
 const deploymentMode = String(process.env.TRONFIRE_DEPLOYMENT_MODE || 'simple').toLowerCase();
 const nodeRole = String(process.env.TRONFIRE_NODE_ROLE || 'primary').toLowerCase();
 const clusterLockPath = process.env.TRONSOFTOS_CLUSTER_LOCK || '/opt/tronsoftos/state/cluster-lock.json';
-const internalToken = process.env.TRONSOFTOS_INTERNAL_TOKEN || '';
+const clusterSecretsPath = process.env.TRONSOFTOS_CLUSTER_SECRETS || path.join(path.dirname(clusterLockPath), 'cluster-secrets.env');
 const firebirdExecMode = String(process.env.FIREBIRD_EXEC_MODE || 'container').toLowerCase();
 const tronsoftosApiUrl = String(process.env.TRONSOFTOS_API_URL || 'http://host.docker.internal:8080').replace(/\/+$/, '');
 const firebirdInternalHost = process.env.FIREBIRD_HOST || 'host.docker.internal';
@@ -128,7 +128,30 @@ function assertPrimaryWritable() {
   }
 }
 
+function parseEnvFile(filePath) {
+  try {
+    return fs.readFileSync(filePath, 'utf8')
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(line => line && !line.startsWith('#') && line.includes('='))
+      .reduce((acc, line) => {
+        const index = line.indexOf('=');
+        const key = line.slice(0, index).trim();
+        const value = line.slice(index + 1).trim().replace(/^["']|["']$/g, '');
+        acc[key] = value;
+        return acc;
+      }, {});
+  } catch {
+    return {};
+  }
+}
+
+function internalTokenValue() {
+  return process.env.TRONSOFTOS_INTERNAL_TOKEN || parseEnvFile(clusterSecretsPath).TRONSOFTOS_INTERNAL_TOKEN || '';
+}
+
 function assertInternalTronsoftos(req) {
+  const internalToken = internalTokenValue();
   if (!internalToken) {
     const error = new Error('TRONSOFTOS_INTERNAL_TOKEN nao configurado');
     error.statusCode = 503;
@@ -152,6 +175,7 @@ function readClusterLock() {
 }
 
 async function tronsoftosRequest(pathname, options = {}) {
+  const internalToken = internalTokenValue();
   const headers = { ...(options.headers || {}) };
   if (internalToken) headers['x-tronsoftos-token'] = internalToken;
   const response = await fetch(`${tronsoftosApiUrl}${pathname}`, { ...options, headers });
