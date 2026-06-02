@@ -30,6 +30,7 @@ const maintenanceStatePath = process.env.TRONSOFTOS_MAINTENANCE_STATE || path.jo
 const googleCredentialsPath = process.env.TRONSOFTOS_GOOGLE_CREDENTIALS || path.join(stateDir, 'google-drive-credentials.json');
 const googleOauthDir = process.env.TRONSOFTOS_GOOGLE_OAUTH_DIR || path.join(stateDir, 'google-oauth');
 const frontendDist = process.env.TRONSOFTOS_FRONTEND_DIST || path.join(appRoot, 'frontend/dist');
+const haSyncLogDir = process.env.TRONSOFTOS_HA_SYNC_LOG_DIR || path.join(appRoot, 'logs', 'ha-sync');
 const actionJobs = new Map();
 const maxActionLogLength = 1024 * 128;
 const dockerConfigDir = process.env.TRONSOFTOS_DOCKER_CONFIG || path.join(stateDir, 'docker-config');
@@ -1095,6 +1096,44 @@ function parseEnvFile(filePath) {
   } catch {
     return {};
   }
+}
+
+function haSyncLogs(selectedName = '') {
+  const safeSelectedName = path.basename(String(selectedName || ''));
+  let files = [];
+  try {
+    files = fs.readdirSync(haSyncLogDir)
+      .filter(name => /^ha-sync-\d{14}\.log$/.test(name))
+      .map(name => {
+        const filePath = path.join(haSyncLogDir, name);
+        const stat = fs.statSync(filePath);
+        const tail = fs.readFileSync(filePath, 'utf8').slice(-4096);
+        const failed = /(^|\n)(curl:|.*\bfailed\b|.*\berror\b|.*Falha|.*erro|.*exit\s+[1-9]\d*)/i.test(tail);
+        return {
+          name,
+          size: stat.size,
+          modifiedAt: stat.mtime.toISOString(),
+          status: failed ? 'failed' : 'success',
+          summary: tail.trim().split(/\r?\n/).slice(-4).join('\n')
+        };
+      })
+      .sort((a, b) => new Date(b.modifiedAt) - new Date(a.modifiedAt))
+      .slice(0, 50);
+  } catch {
+    files = [];
+  }
+
+  const selected = files.find(file => file.name === safeSelectedName) || files[0] || null;
+  let content = '';
+  if (selected) {
+    const selectedPath = path.join(haSyncLogDir, selected.name);
+    const resolved = path.resolve(selectedPath);
+    const allowedRoot = path.resolve(haSyncLogDir);
+    if (resolved.startsWith(allowedRoot + path.sep)) {
+      content = fs.readFileSync(resolved, 'utf8').slice(-1024 * 128);
+    }
+  }
+  return { logDir: haSyncLogDir, files, selected, content };
 }
 
 function internalTokenValue() {
@@ -2565,6 +2604,7 @@ async function handleApi(req, reply, url) {
   if (req.method === 'POST' && url.pathname === '/api/cluster/recovery-local') return json(reply, 200, putLocalNodeInRecovery(await readBody(req).catch(() => ({}))));
   if (req.method === 'GET' && url.pathname === '/api/cluster/network-impact') return json(reply, 200, await clusterNetworkImpact(url.searchParams.get('proposed') || ''));
   if (req.method === 'GET' && url.pathname === '/api/cluster/sync') return json(reply, 200, publicHaSyncSettings());
+  if (req.method === 'GET' && url.pathname === '/api/cluster/sync/logs') return json(reply, 200, haSyncLogs(url.searchParams.get('file') || ''));
   if (req.method === 'PATCH' && url.pathname === '/api/cluster/sync') return json(reply, 200, writeHaSyncSettings(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/cluster/sync/run') return json(reply, 202, { ok: true, job: startHaSync() });
   if (req.method === 'GET' && url.pathname === '/api/node-identity') return json(reply, 200, nodeIdentity());

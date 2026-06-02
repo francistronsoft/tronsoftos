@@ -513,6 +513,7 @@ function ClusterView({ dashboard }) {
   const [vipForm, setVipForm] = useState(null);
   const [syncJobId, setSyncJobId] = useState(null);
   const [clusterTab, setClusterTab] = useState('overview');
+  const [selectedHaLog, setSelectedHaLog] = useState('');
   const values = form || {
     clusterId: identity.clusterId || 'local',
     nodeName: identity.nodeName || cluster.nodeName || 'servidor-01',
@@ -672,6 +673,11 @@ function ClusterView({ dashboard }) {
     enabled: !!syncJobId,
     refetchInterval: query => query.state.data?.status === 'running' ? 1200 : false
   });
+  const haLogsQuery = useQuery({
+    queryKey: ['ha-sync-logs', selectedHaLog],
+    queryFn: () => api(`/api/cluster/sync/logs${selectedHaLog ? `?file=${encodeURIComponent(selectedHaLog)}` : ''}`),
+    refetchInterval: clusterTab === 'logs' ? 5000 : false
+  });
   const vipMutation = useMutation({
     mutationFn: payload => postApi('/api/host/network/vip', payload),
     onSuccess: data => {
@@ -710,6 +716,7 @@ function ClusterView({ dashboard }) {
     { id: 'pairing', label: 'Pareamento', icon: UploadCloud },
     { id: 'vip', label: 'VIP', icon: Network },
     ...(canManageSync ? [{ id: 'sync', label: 'Sync', icon: RefreshCw }] : []),
+    { id: 'logs', label: 'Logs HA', icon: Terminal },
     { id: 'promotion', label: 'Promocao', icon: GitBranch }
   ];
   return (
@@ -1023,6 +1030,55 @@ function ClusterView({ dashboard }) {
           </div>
         </form>
       </Card>
+      ) : null}
+
+      {clusterTab === 'logs' ? (
+        <div className="grid gap-5 xl:grid-cols-[360px_1fr]">
+          <Card title="Logs do Sync HA" icon={Terminal} action={<StatusPill value={haLogsQuery.data?.selected?.status || 'logs'} />}>
+            <div className="mb-3 text-xs text-slate-500">
+              Diretorio: <span className="font-mono">{haLogsQuery.data?.logDir || '-'}</span>
+            </div>
+            <div className="grid max-h-[34rem] gap-2 overflow-auto pr-1">
+              {(haLogsQuery.data?.files || []).map(file => {
+                const selected = (haLogsQuery.data?.selected?.name || selectedHaLog) === file.name;
+                return (
+                  <button
+                    key={file.name}
+                    type="button"
+                    onClick={() => setSelectedHaLog(file.name)}
+                    className={`rounded-md border px-3 py-2 text-left text-sm ${selected ? 'border-slate-900 bg-slate-950 text-white' : 'border-slate-200 bg-white hover:bg-slate-50'}`}
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="truncate font-mono text-xs">{file.name}</span>
+                      <StatusPill value={file.status} />
+                    </div>
+                    <div className={`mt-1 text-xs ${selected ? 'text-slate-300' : 'text-slate-500'}`}>
+                      {formatDateTime(file.modifiedAt)} · {formatBytes(file.size)}
+                    </div>
+                    {file.summary ? (
+                      <pre className={`mt-2 max-h-16 overflow-hidden whitespace-pre-wrap text-xs ${selected ? 'text-slate-200' : 'text-slate-500'}`}>{file.summary}</pre>
+                    ) : null}
+                  </button>
+                );
+              })}
+              {haLogsQuery.data && (haLogsQuery.data.files || []).length === 0 ? (
+                <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
+                  Nenhum log de Sync HA encontrado ainda.
+                </div>
+              ) : null}
+              {haLogsQuery.isError ? (
+                <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {haLogsQuery.error.message}
+                </div>
+              ) : null}
+            </div>
+          </Card>
+          <Card title={haLogsQuery.data?.selected?.name || 'Conteudo do log'} icon={Terminal} action={<button type="button" onClick={() => haLogsQuery.refetch()} className="inline-flex items-center gap-2 rounded-md border border-slate-200 px-3 py-1.5 text-xs font-medium hover:bg-slate-50"><RefreshCw className="h-3.5 w-3.5" />Atualizar</button>}>
+            <pre className="min-h-[34rem] max-h-[calc(100vh-18rem)] overflow-auto rounded-md bg-slate-950 p-4 font-mono text-xs leading-5 text-slate-100">
+              {haLogsQuery.isLoading ? 'Carregando logs...' : (haLogsQuery.data?.content || 'Selecione um log para visualizar.')}
+            </pre>
+          </Card>
+        </div>
       ) : null}
 
       {clusterTab === 'promotion' ? (
