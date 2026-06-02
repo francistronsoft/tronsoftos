@@ -664,7 +664,13 @@ app.get('/api/dashboard', { preHandler: requireAuth }, async (req) => {
     prisma.backupJob.findMany({ orderBy: { createdAt: 'desc' }, take: 5, include: { database: true } }),
     loadDashboardMetrics(reqQueryRange(req))
   ]);
-  return { databases: dbs, alerts, backups: backups.map(j => ({ ...j, backupSize: j.backupSize?.toString() })), metrics };
+  return {
+    databases: dbs,
+    alerts,
+    backups: backups.map(j => ({ ...j, backupSize: j.backupSize?.toString() })),
+    metrics,
+    ha: { deploymentMode, nodeRole }
+  };
 });
 
 function reqQueryRange(req) {
@@ -845,7 +851,7 @@ app.post('/api/databases', { preHandler: requireOperator }, async (req, reply) =
       accessMode: body.accessMode || 'READ_WRITE',
       isPrimary: !!body.isPrimary,
       backupEnabled: !!body.backupEnabled,
-      backupFrequencyMinutes: Number(body.backupFrequencyMinutes || 60),
+      backupFrequencyMinutes: Number(body.backupFrequencyMinutes || 20),
       retentionDays: Number(body.retentionDays || 7)
     }
   });
@@ -871,7 +877,7 @@ app.post('/api/databases/:id/mark-primary', { preHandler: requireAdmin }, async 
 
 app.patch('/api/databases/:id/backup-settings', { preHandler: requireOperator }, async (req) => {
   const body = req.body || {};
-  const backupFrequencyMinutes = Math.max(Number(body.backupFrequencyMinutes || 60), 1);
+  const backupFrequencyMinutes = Math.max(Number(body.backupFrequencyMinutes || 20), 1);
   const retentionDays = Math.max(Number(body.retentionDays || 7), 1);
   const db = await prisma.managedDatabase.update({
     where: { id: req.params.id },

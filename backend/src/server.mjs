@@ -299,8 +299,8 @@ function sameIpv4Subnet(left, right) {
 
 function rawHaSyncSettings() {
   return {
-    enabled: false,
-    autoEnabled: false,
+    enabled: true,
+    autoEnabled: true,
     intervalMinutes: 10,
     standbyHost: process.env.HA_SYNC_STANDBY_HOST || '',
     sshUser: process.env.HA_SYNC_SSH_USER || 'tronsoftos',
@@ -315,8 +315,8 @@ function rawHaSyncSettings() {
 
 function publicHaSyncSettings(settings = rawHaSyncSettings()) {
   return {
-    enabled: settings.enabled === true,
-    autoEnabled: settings.autoEnabled === true,
+    enabled: true,
+    autoEnabled: true,
     intervalMinutes: Number(settings.intervalMinutes || 10),
     standbyHost: settings.standbyHost || '',
     sshUser: settings.sshUser || 'tronsoftos',
@@ -396,8 +396,8 @@ function latestFileInfo(dirPath, pattern) {
 function normalizeHaSyncSettings(body) {
   const current = rawHaSyncSettings();
   const next = {
-    enabled: body.enabled === true,
-    autoEnabled: body.autoEnabled === true,
+    enabled: true,
+    autoEnabled: true,
     intervalMinutes: Number(body.intervalMinutes || current.intervalMinutes || 10),
     standbyHost: String(body.standbyHost || '').trim(),
     sshUser: String(body.sshUser || current.sshUser || 'tronsoftos').trim(),
@@ -408,7 +408,6 @@ function normalizeHaSyncSettings(body) {
     catalogDir: String(body.catalogDir || current.catalogDir || path.join(stateDir, 'tronfire-catalog')).trim()
   };
   if (next.enabled && !next.standbyHost) throw new Error('host standby nao informado');
-  if (next.autoEnabled && !next.enabled) throw new Error('habilite o Sync HA antes de ativar o automatico');
   if (!Number.isInteger(next.intervalMinutes) || next.intervalMinutes < 2 || next.intervalMinutes > 1440) throw new Error('intervalo automatico deve ficar entre 2 e 1440 minutos');
   if (!/^[A-Za-z0-9_.@-]{1,80}$/.test(next.sshUser)) throw new Error('usuario SSH invalido');
   if (!Number.isInteger(next.sshPort) || next.sshPort < 1 || next.sshPort > 65535) throw new Error('porta SSH invalida');
@@ -1116,11 +1115,46 @@ function normalizePairingContent(content) {
     }
     normalized.TRONSOFTOS_SSH_PUBLIC_KEY = sshPublicKey;
   }
-  const keys = [...required, ...(normalized.TRONSOFTOS_SSH_PUBLIC_KEY ? ['TRONSOFTOS_SSH_PUBLIC_KEY'] : [])];
+  if (env.HA_VIP_CIDR || env.HA_VIP || env.HA_ROUTER_ID || env.HA_AUTH_PASS) {
+    const vipCidr = String(env.HA_VIP_CIDR || '').trim();
+    const vip = String(env.HA_VIP || (vipCidr ? vipCidr.split('/')[0] : '')).trim();
+    const routerId = String(env.HA_ROUTER_ID || '').trim();
+    const authPass = String(env.HA_AUTH_PASS || '').trim();
+    if (!/^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/.test(vipCidr)) throw new Error('HA_VIP_CIDR invalido no arquivo de pareamento');
+    if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(vip)) throw new Error('HA_VIP invalido no arquivo de pareamento');
+    if (!/^\d{1,3}$/.test(routerId) || Number(routerId) < 1 || Number(routerId) > 255) throw new Error('HA_ROUTER_ID invalido no arquivo de pareamento');
+    if (!/^[A-Za-z0-9_.:-]{6,32}$/.test(authPass)) throw new Error('HA_AUTH_PASS invalido no arquivo de pareamento');
+    normalized.HA_VIP = vip;
+    normalized.HA_VIP_CIDR = vipCidr;
+    normalized.HA_ROUTER_ID = routerId;
+    normalized.HA_AUTH_PASS = authPass;
+  }
+  const optionalKeys = ['TRONSOFTOS_SSH_PUBLIC_KEY', 'HA_VIP', 'HA_VIP_CIDR', 'HA_ROUTER_ID', 'HA_AUTH_PASS'].filter(key => normalized[key]);
+  const keys = [...required, ...optionalKeys];
   return {
     values: normalized,
     content: `${keys.map(key => `${key}='${normalized[key]}'`).join('\n')}\n`
   };
+}
+
+function exportPairingContent() {
+  const base = fs.existsSync(clusterSecretsPath) ? parseEnvText(fs.readFileSync(clusterSecretsPath, 'utf8')) : {};
+  const current = {
+    ...base,
+    SESSION_SECRET: base.SESSION_SECRET || process.env.SESSION_SECRET || '',
+    TRONSOFTOS_INTERNAL_TOKEN: base.TRONSOFTOS_INTERNAL_TOKEN || process.env.TRONSOFTOS_INTERNAL_TOKEN || '',
+    POSTGRES_PASSWORD: base.POSTGRES_PASSWORD || process.env.POSTGRES_PASSWORD || '',
+    FIREBIRD_PASSWORD: base.FIREBIRD_PASSWORD || process.env.FIREBIRD_PASSWORD || '',
+    TRONSOFTOS_SSH_PUBLIC_KEY: base.TRONSOFTOS_SSH_PUBLIC_KEY || process.env.TRONSOFTOS_SSH_PUBLIC_KEY || '',
+    HA_VIP: process.env.HA_VIP || base.HA_VIP || '',
+    HA_VIP_CIDR: process.env.HA_VIP_CIDR || base.HA_VIP_CIDR || (process.env.HA_VIP ? `${process.env.HA_VIP}/24` : ''),
+    HA_ROUTER_ID: process.env.HA_ROUTER_ID || base.HA_ROUTER_ID || '',
+    HA_AUTH_PASS: process.env.HA_AUTH_PASS || base.HA_AUTH_PASS || ''
+  };
+  return normalizePairingContent(Object.entries(current)
+    .filter(([, value]) => String(value || '').trim())
+    .map(([key, value]) => `${key}='${String(value).replace(/'/g, "'\\''")}'`)
+    .join('\n')).content;
 }
 
 function fileCheck(label, filePath, kind = 'file') {
@@ -1702,7 +1736,7 @@ function assertVipPayload(body) {
     interfaceName: String(body.interfaceName || '').trim(),
     vipCidr: String(body.vipCidr || '').trim(),
     routerId: Number(body.routerId || 51),
-    authPass: String(body.authPass || '').trim(),
+    authPass: String(body.authPass || process.env.HA_AUTH_PASS || '').trim(),
     nodeState: String(body.nodeState || 'BACKUP').trim().toUpperCase(),
     priority: Number(body.priority || 100)
   };
@@ -1783,6 +1817,9 @@ async function importPairingFile(body) {
   const result = parseJsonLines(out.stdout).at(-1) || { ok: true };
 
   process.env.TRONSOFTOS_INTERNAL_TOKEN = pairing.values.TRONSOFTOS_INTERNAL_TOKEN;
+  for (const key of ['HA_VIP', 'HA_VIP_CIDR', 'HA_ROUTER_ID', 'HA_AUTH_PASS']) {
+    if (pairing.values[key]) process.env[key] = pairing.values[key];
+  }
   appendEvent('CLUSTER_PAIRING_IMPORTED', {
     keys: Object.keys(pairing.values),
     clusterSecrets: result.clusterSecrets || clusterSecretsPath,
@@ -1808,15 +1845,18 @@ async function importPairingFile(body) {
 }
 
 function exportPairingFile(reply) {
-  if (!fs.existsSync(clusterSecretsPath)) {
-    return json(reply, 404, { error: 'cluster-secrets.env not found' });
+  let content;
+  try {
+    content = exportPairingContent();
+  } catch (err) {
+    return json(reply, 404, { error: err.message || 'cluster-secrets.env not found' });
   }
   reply.writeHead(200, {
     'content-type': 'application/octet-stream',
     'content-disposition': 'attachment; filename="cluster-secrets.env"',
     'cache-control': 'no-store'
   });
-  fs.createReadStream(clusterSecretsPath).pipe(reply);
+  reply.end(content);
 }
 
 async function dashboard() {
@@ -1824,12 +1864,14 @@ async function dashboard() {
   const cluster = clusterStatus();
   if (tronfireHa && cluster.sync) {
     cluster.sync.tronfireStandby = tronfireHa;
-    if (tronfireHa.latestBackupAt) {
-      const lagMinutes = Math.max(0, Math.round((Date.now() - new Date(tronfireHa.latestBackupAt).getTime()) / 60000));
-      cluster.sync.standbyLagMinutes = lagMinutes;
-      cluster.sync.standbyReady = tronfireHa.allReady === true && lagMinutes <= Number(cluster.sync.intervalMinutes || 10) * 2;
-      cluster.sync.promotionReady = cluster.sync.standbyReady && cluster.sync.status !== 'failed';
-    }
+    const requiredReady = tronfireHa.allReady === true;
+    const latestRestoredBackupAt = tronfireHa.latestBackupAt ? new Date(tronfireHa.latestBackupAt).getTime() : 0;
+    const latestReceivedBackupAt = cluster.sync.receiver?.latestBackup?.modifiedAt ? new Date(cluster.sync.receiver.latestBackup.modifiedAt).getTime() : 0;
+    const latestBackupAtMs = latestRestoredBackupAt || latestReceivedBackupAt;
+    const lagMinutes = latestBackupAtMs ? Math.max(0, Math.round((Date.now() - latestBackupAtMs) / 60000)) : null;
+    cluster.sync.standbyLagMinutes = lagMinutes;
+    cluster.sync.standbyReady = requiredReady && lagMinutes !== null && lagMinutes <= Number(cluster.sync.intervalMinutes || 10) * 2;
+    cluster.sync.promotionReady = cluster.sync.standbyReady && cluster.sync.status !== 'failed';
   }
   const backups = await backupStatus();
   const alerts = [];
@@ -2064,7 +2106,7 @@ function startHaSync() {
   if (nodeIdentity().deploymentMode === 'ha' && guard.canServeProduction !== true) {
     throw new Error('Sync HA deve ser executado no no primary/ativo');
   }
-  const settings = rawHaSyncSettings();
+  const settings = publicHaSyncSettings(rawHaSyncSettings());
   if (settings.enabled !== true) throw new Error('sync HA desabilitado');
   if (!settings.standbyHost) throw new Error('host standby nao configurado');
   const runningJob = [...actionJobs.values()].reverse().find(job => job.app === 'ha-sync' && job.status === 'running');

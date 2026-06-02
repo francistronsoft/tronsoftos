@@ -516,8 +516,10 @@ function ClusterView({ dashboard }) {
     deploymentMode: identity.deploymentMode || cluster.mode || 'simple'
   };
   const isSyncReceiver = values.deploymentMode === 'ha' && ['standby', 'recovery'].includes(values.nodeRole);
-  const standbyReady = syncStatus.standbyReady === true;
-  const promotionReady = syncStatus.promotionReady === true;
+  const standbyDbStatusKnown = Number.isFinite(Number(syncStatus.tronfireStandby?.databaseCount));
+  const standbyDbAllReady = syncStatus.tronfireStandby?.allReady === true;
+  const standbyReady = syncStatus.standbyReady === true && (!standbyDbStatusKnown || standbyDbAllReady);
+  const promotionReady = syncStatus.promotionReady === true && (!standbyDbStatusKnown || standbyDbAllReady);
   const standbyLag = Number.isFinite(Number(syncStatus.standbyLagMinutes)) ? Number(syncStatus.standbyLagMinutes) : null;
   const latestBackupReceived = syncStatus.tronfireStandby?.latestBackupAt || syncStatus.receiver?.latestBackup?.modifiedAt || null;
   const latestRestoreValidated = syncStatus.tronfireStandby?.latestValidatedAt || null;
@@ -533,11 +535,11 @@ function ClusterView({ dashboard }) {
     reason: lock.reason || ''
   };
   const syncValues = syncForm || {
-    enabled: sync.enabled || false,
+    enabled: true,
     standbyHost: sync.standbyHost || '',
     sshUser: sync.sshUser || 'tronsoftos',
     sshPort: sync.sshPort || 22,
-    autoEnabled: sync.autoEnabled || false,
+    autoEnabled: true,
     intervalMinutes: sync.intervalMinutes || 10,
     remoteBackupDir: sync.remoteBackupDir || '/opt/tronfire-storage/firebird/backups',
     remoteCatalogDir: sync.remoteCatalogDir || '/opt/tronos/state/tronfire-catalog',
@@ -806,7 +808,11 @@ function ClusterView({ dashboard }) {
                 ))}
               </div>
               <div className={`mt-4 rounded-md border px-3 py-2 text-sm ${promotionReady ? 'border-green-200 bg-green-50 text-green-700' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
-                {promotionReady ? 'Standby com backup validado dentro da janela configurada.' : 'Standby ainda nao deve ser promovido sem validar a defasagem e o ultimo backup recebido.'}
+                {promotionReady
+                  ? 'Standby com restore validado dentro da janela configurada.'
+                  : standbyDbStatusKnown && !standbyDbAllReady
+                    ? 'Backup recebido, mas ainda falta restaurar e validar todos os bancos obrigatorios no standby.'
+                    : 'Standby ainda nao deve ser promovido sem validar a defasagem e o ultimo backup recebido.'}
               </div>
             </Card>
             <Card title="Protecao de duplo primary" icon={ShieldCheck} action={<StatusPill value={guard.canHoldVip ? 'online' : 'blocked'} />}>
@@ -955,10 +961,13 @@ function ClusterView({ dashboard }) {
             vipMutation.mutate(vipValues);
           }}
         >
-          <Field label="Interface" value={vipValues.interfaceName} onChange={value => setVipValue('interfaceName', value)} placeholder="eth0" />
-          <Field label="VIP/CIDR" value={vipValues.vipCidr} onChange={value => setVipValue('vipCidr', value)} placeholder="192.168.1.200/24" />
-          <Field label="Router ID" type="number" value={vipValues.routerId} onChange={value => setVipValue('routerId', Number(value || 51))} placeholder="51" />
-          <Field label="Senha VRRP" type="password" value={vipValues.authPass} onChange={value => setVipValue('authPass', value)} placeholder="6 a 32 caracteres" />
+          <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800 md:col-span-2">
+            VIP/CIDR, Router ID e senha VRRP sao dados do cluster e acompanham o arquivo de pareamento exportado pelo primary. Interface e prioridade continuam sendo configuracao local deste no.
+          </div>
+          <Field label="VIP/CIDR do cluster" value={vipValues.vipCidr} onChange={value => setVipValue('vipCidr', value)} placeholder="192.168.1.200/24" />
+          <Field label="Router ID do cluster" type="number" value={vipValues.routerId} onChange={value => setVipValue('routerId', Number(value || 51))} placeholder="51" />
+          <Field label="Senha VRRP do cluster" type="password" value={vipValues.authPass} onChange={value => setVipValue('authPass', value)} placeholder="importada do primary ou 6 a 32 caracteres" />
+          <Field label="Interface local" value={vipValues.interfaceName} onChange={value => setVipValue('interfaceName', value)} placeholder="eth0, ens18" />
           <label className="block">
             <span className="text-xs font-medium uppercase text-slate-500">Papel Keepalived</span>
             <select value={vipValues.nodeState} onChange={event => setVipValue('nodeState', event.target.value)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100">
@@ -966,7 +975,7 @@ function ClusterView({ dashboard }) {
               <option value="BACKUP">BACKUP</option>
             </select>
           </label>
-          <Field label="Prioridade" type="number" value={vipValues.priority} onChange={value => setVipValue('priority', Number(value || 100))} placeholder="150" />
+          <Field label="Prioridade local" type="number" value={vipValues.priority} onChange={value => setVipValue('priority', Number(value || 100))} placeholder="primary 150, standby 100" />
           <div className="md:col-span-2 flex flex-wrap items-center gap-3">
             <button disabled={vipMutation.isPending} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
               <Save className="h-4 w-4" />
@@ -980,8 +989,8 @@ function ClusterView({ dashboard }) {
               Keepalived atualizado. Reinicie TronSoftOS e apps gerenciados para recarregar variaveis sincronizadas.
             </div>
           ) : null}
-          <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800 md:col-span-2">
-            Use a mesma senha e router ID nos dois nos. O principal normalmente usa prioridade 150 e o standby 100.
+          <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700 md:col-span-2">
+            O primary normalmente usa prioridade 150 e o standby 100. Ajuste a interface local conforme o nome real da placa de rede neste host.
           </div>
         </form>
       </Card>
@@ -1059,21 +1068,21 @@ function ClusterView({ dashboard }) {
 
       {clusterTab === 'sync' ? (
         canManageSync ? (
-      <Card title="Sync HA" icon={RefreshCw} action={<StatusPill value={syncValues.enabled ? 'online' : 'disabled'} />}>
+      <Card title="Sync HA" icon={RefreshCw} action={<StatusPill value={syncValues.standbyHost ? 'automatico' : 'configurar'} />}>
         <form
           className="grid gap-3 md:grid-cols-2"
           onSubmit={event => {
             event.preventDefault();
-            syncMutation.mutate(syncValues);
+            syncMutation.mutate({ ...syncValues, enabled: true, autoEnabled: true });
           }}
         >
-          <div className="md:col-span-2">
-            <Checkbox label="Habilitar sincronizacao para standby" checked={syncValues.enabled} onChange={value => setSyncValue('enabled', value)} />
-          </div>
           <div className="md:col-span-2 rounded-md border border-slate-200 bg-slate-50 p-3">
             <div className="grid gap-3 md:grid-cols-[1fr_220px]">
-              <div className="flex items-center">
-                <Checkbox label="Executar Sync HA automatico" checked={syncValues.autoEnabled} onChange={value => setSyncValue('autoEnabled', value)} />
+              <div>
+                <div className="text-sm font-medium text-slate-950">Sincronizacao automatica ativa</div>
+                <div className="mt-1 text-xs text-slate-500">
+                  O primary envia backups validados, catalogo e restore do standby conforme o intervalo configurado.
+                </div>
               </div>
               <label className="block">
                 <span className="text-xs font-medium uppercase text-slate-500">Intervalo</span>

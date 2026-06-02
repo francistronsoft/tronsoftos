@@ -73,6 +73,18 @@ apply_pairing() {
   install -m 0600 "$source_file" "$cluster_secrets"
 
   set_env_value "$tronsoftos_env" "TRONSOFTOS_INTERNAL_TOKEN" "$TRONSOFTOS_INTERNAL_TOKEN"
+  if [ -n "${HA_VIP:-}" ]; then
+    set_env_value "$tronsoftos_env" "HA_VIP" "$HA_VIP"
+  fi
+  if [ -n "${HA_VIP_CIDR:-}" ]; then
+    set_env_value "$tronsoftos_env" "HA_VIP_CIDR" "$HA_VIP_CIDR"
+  fi
+  if [ -n "${HA_ROUTER_ID:-}" ]; then
+    set_env_value "$tronsoftos_env" "HA_ROUTER_ID" "$HA_ROUTER_ID"
+  fi
+  if [ -n "${HA_AUTH_PASS:-}" ]; then
+    set_env_value "$tronsoftos_env" "HA_AUTH_PASS" "$HA_AUTH_PASS"
+  fi
 
   set_env_value "$tronfire_env" "SESSION_SECRET" "$SESSION_SECRET"
   set_env_value "$tronfire_env" "TRONSOFTOS_INTERNAL_TOKEN" "$TRONSOFTOS_INTERNAL_TOKEN"

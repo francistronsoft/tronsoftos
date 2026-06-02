@@ -180,6 +180,13 @@ function databaseStatusView(db, diagnostic) {
   return { text: db.status || 'UNKNOWN', className: 'secondary', title: 'Status ainda nao validado' };
 }
 
+function haOperationWarning(haStatus) {
+  if (haStatus?.deploymentMode !== 'ha' || haStatus?.nodeRole !== 'primary') return '';
+  return `<div class="alert alert-warning mb-3">
+    Ambiente HA primary detectado. Antes de manutencao, restore ou migracao de banco, suspenda o failover no standby pelo TronSoftOS para evitar promocao durante uma parada planejada do Firebird.
+  </div>`;
+}
+
 function num(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
@@ -516,7 +523,7 @@ function connectionPanel(info) {
     </div>`;
 }
 
-function databaseDetailsPanel(db, diagnostic) {
+function databaseDetailsPanel(db, diagnostic, haStatus) {
   const status = databaseStatusView(db, diagnostic);
   return `
     <div class="card mb-3" id="databaseDetailsPanel">
@@ -526,6 +533,7 @@ function databaseDetailsPanel(db, diagnostic) {
       </div>
       <div class="card-body">
         <div class="alert alert-${status.className === 'success' ? 'success' : status.className === 'danger' ? 'danger' : 'info'} mb-3">${escapeHtml(status.title)}</div>
+        ${haOperationWarning(haStatus)}
         <div class="row g-3">
           <div class="col-md-3"><div class="subheader">Alias</div><div>${escapeHtml(db.alias)}</div></div>
           <div class="col-md-3"><div class="subheader">Tipo</div><div>${badge(db.type)}</div></div>
@@ -599,7 +607,12 @@ function bindFirebirdActions(refresh) {
 }
 
 async function databases() {
-  const [dbs, diagnosticData, firebirdInfo] = await Promise.all([api('/api/databases'), api('/api/preflight'), api('/api/services/firebird')]);
+  const [dbs, diagnosticData, firebirdInfo, haStatus] = await Promise.all([
+    api('/api/databases'),
+    api('/api/preflight'),
+    api('/api/services/firebird'),
+    api('/api/ha/status').catch(() => null)
+  ]);
   const firstDatabase = dbs.length === 0;
   const diagnosticById = new Map((diagnosticData.databases || []).map(db => [db.id, db]));
   content.innerHTML = `
@@ -626,7 +639,25 @@ async function databases() {
         <td title="${escapeHtml(status.title)}"><span class="status-dot bg-${status.className}"></span>${escapeHtml(status.text)}</td>
         <td>${badge(d.type)}</td>
         <td>${d.isPrimary ? 'Sim' : 'Nao'}</td>
-        <td><input class="form-check-input" type="checkbox" data-backup-enabled="${d.id}" ${d.backupEnabled ? 'checked' : ''}> <input class="form-control form-control-sm d-inline-block ms-1" type="number" min="1" value="${d.backupFrequencyMinutes}" data-backup-frequency="${d.id}" style="width:76px"> <input class="form-control form-control-sm d-inline-block ms-1" type="number" min="1" value="${d.retentionDays}" data-backup-retention="${d.id}" style="width:76px"></td>
+        <td>
+          <div class="d-flex flex-wrap align-items-end gap-2">
+            <input class="form-check-input m-0" type="checkbox" title="Ativar backup automatico" data-backup-enabled="${d.id}" ${d.backupEnabled ? 'checked' : ''}>
+            <label class="d-inline-flex flex-column gap-1 small text-muted mb-0">
+              <span>Intervalo do backup</span>
+              <span class="d-inline-flex align-items-center gap-1">
+              <input class="form-control form-control-sm" type="number" min="1" value="${d.backupFrequencyMinutes || 20}" data-backup-frequency="${d.id}" aria-label="Intervalo do backup automatico em minutos" style="width:72px">
+              min
+              </span>
+            </label>
+            <label class="d-inline-flex flex-column gap-1 small text-muted mb-0">
+              <span>Retencao</span>
+              <span class="d-inline-flex align-items-center gap-1">
+              <input class="form-control form-control-sm" type="number" min="1" value="${d.retentionDays || 7}" data-backup-retention="${d.id}" aria-label="Dias de retencao dos backups" style="width:72px">
+              dias
+              </span>
+            </label>
+          </div>
+        </td>
         <td><button class="btn btn-sm btn-outline-primary" data-details="${d.id}">Detalhes</button> <button class="btn btn-sm btn-outline-warning" data-save-backup="${d.id}">Salvar backup</button></td>
       </tr>`;
     }).join('')}</tbody></table></div></div>`;
@@ -644,7 +675,7 @@ async function databases() {
   document.querySelectorAll('[data-details]').forEach(b => b.onclick = () => {
     const db = dbs.find(item => item.id === b.dataset.details);
     if (!db) return;
-    databaseDetailsSlot.innerHTML = databaseDetailsPanel(db, diagnosticById.get(db.id));
+    databaseDetailsSlot.innerHTML = databaseDetailsPanel(db, diagnosticById.get(db.id), haStatus);
     databaseDetailsSlot.scrollIntoView({ behavior: 'smooth', block: 'start' });
     const bindCopy = root => root.querySelectorAll('[data-copy]').forEach(copy => copy.onclick = async () => {
       await navigator.clipboard.writeText(copy.dataset.copy);
@@ -707,7 +738,7 @@ async function databases() {
     databaseDetailsSlot.querySelectorAll('[data-detail-maintenance]').forEach(btn => btn.onclick = async () => {
       const ok = await appDialog({
         title: 'Confirmar manutencao automatica',
-        message: 'A manutencao automatica vai colocar o banco em modo manutencao, criar copia de seguranca, gerar GBK, restaurar e substituir o arquivo original pelo restaurado validado.\n\nExecute com usuarios fora do sistema. Deseja continuar?',
+        message: 'A manutencao automatica vai colocar o banco em modo manutencao, criar copia de seguranca, gerar GBK, restaurar e substituir o arquivo original pelo restaurado validado.\n\nEm HA primary, suspenda o failover no standby pelo TronSoftOS antes de continuar.\n\nExecute com usuarios fora do sistema. Deseja continuar?',
         confirmText: 'Executar manutencao',
         cancelText: 'Cancelar',
         variant: 'danger'
@@ -716,6 +747,7 @@ async function databases() {
       try {
         btn.disabled = true;
         btn.textContent = 'Manutencao...';
+        detailConnectionSlot.innerHTML = `<div class="alert alert-warning mb-3">Manutencao do banco em andamento. Se este ambiente estiver em HA, mantenha o failover suspenso no standby ate concluir e validar o banco.</div>`;
         const out = await api(`/api/databases/${btn.dataset.detailMaintenance}/auto-maintenance`, { method: 'POST' });
         await appAlert('Manutencao concluida', `Backup: ${out.backupPath}\nCopia anterior: ${out.safetyCopyPath}\nLog: ${out.logPath}`, 'success');
         databases();
@@ -728,7 +760,7 @@ async function databases() {
   document.querySelectorAll('[data-save-backup]').forEach(b => b.onclick = async () => {
     const id = b.dataset.saveBackup;
     const enabled = document.querySelector(`[data-backup-enabled="${id}"]`).checked;
-    const frequency = Number(document.querySelector(`[data-backup-frequency="${id}"]`).value || 60);
+    const frequency = Number(document.querySelector(`[data-backup-frequency="${id}"]`).value || 20);
     const retention = Number(document.querySelector(`[data-backup-retention="${id}"]`).value || 7);
     await api(`/api/databases/${id}/backup-settings`, { method:'PATCH', body: JSON.stringify({ backupEnabled: enabled, backupFrequencyMinutes: frequency, retentionDays: retention }) });
     b.textContent = 'Salvo';
