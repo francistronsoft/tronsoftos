@@ -1116,18 +1116,26 @@ function normalizePairingContent(content) {
     normalized.TRONSOFTOS_SSH_PUBLIC_KEY = sshPublicKey;
   }
   if (env.HA_VIP_CIDR || env.HA_VIP || env.HA_ROUTER_ID || env.HA_AUTH_PASS) {
-    const vipCidr = String(env.HA_VIP_CIDR || '').trim();
-    const vip = String(env.HA_VIP || (vipCidr ? vipCidr.split('/')[0] : '')).trim();
+    const rawVipCidr = String(env.HA_VIP_CIDR || '').trim();
+    const rawVip = String(env.HA_VIP || '').trim();
+    const vipCidr = /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/.test(rawVipCidr)
+      ? rawVipCidr
+      : /^(\d{1,3}\.){3}\d{1,3}$/.test(rawVip)
+        ? `${rawVip}/24`
+        : '';
+    const vip = String(rawVip || (vipCidr ? vipCidr.split('/')[0] : '')).trim();
     const routerId = String(env.HA_ROUTER_ID || '').trim();
     const authPass = String(env.HA_AUTH_PASS || '').trim();
-    if (!/^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/.test(vipCidr)) throw new Error('HA_VIP_CIDR invalido no arquivo de pareamento');
-    if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(vip)) throw new Error('HA_VIP invalido no arquivo de pareamento');
-    if (!/^\d{1,3}$/.test(routerId) || Number(routerId) < 1 || Number(routerId) > 255) throw new Error('HA_ROUTER_ID invalido no arquivo de pareamento');
-    if (!/^[A-Za-z0-9_.:-]{6,32}$/.test(authPass)) throw new Error('HA_AUTH_PASS invalido no arquivo de pareamento');
-    normalized.HA_VIP = vip;
-    normalized.HA_VIP_CIDR = vipCidr;
-    normalized.HA_ROUTER_ID = routerId;
-    normalized.HA_AUTH_PASS = authPass;
+    const keepalivedComplete = vipCidr && vip && routerId && authPass;
+    if (keepalivedComplete) {
+      if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(vip)) throw new Error('HA_VIP invalido no arquivo de pareamento');
+      if (!/^\d{1,3}$/.test(routerId) || Number(routerId) < 1 || Number(routerId) > 255) throw new Error('HA_ROUTER_ID invalido no arquivo de pareamento');
+      if (!/^[A-Za-z0-9_.:-]{6,32}$/.test(authPass)) throw new Error('HA_AUTH_PASS invalido no arquivo de pareamento');
+      normalized.HA_VIP = vip;
+      normalized.HA_VIP_CIDR = vipCidr;
+      normalized.HA_ROUTER_ID = routerId;
+      normalized.HA_AUTH_PASS = authPass;
+    }
   }
   const optionalKeys = ['TRONSOFTOS_SSH_PUBLIC_KEY', 'HA_VIP', 'HA_VIP_CIDR', 'HA_ROUTER_ID', 'HA_AUTH_PASS'].filter(key => normalized[key]);
   const keys = [...required, ...optionalKeys];
@@ -1147,7 +1155,7 @@ function exportPairingContent() {
     FIREBIRD_PASSWORD: base.FIREBIRD_PASSWORD || process.env.FIREBIRD_PASSWORD || '',
     TRONSOFTOS_SSH_PUBLIC_KEY: base.TRONSOFTOS_SSH_PUBLIC_KEY || process.env.TRONSOFTOS_SSH_PUBLIC_KEY || '',
     HA_VIP: process.env.HA_VIP || base.HA_VIP || '',
-    HA_VIP_CIDR: process.env.HA_VIP_CIDR || base.HA_VIP_CIDR || (process.env.HA_VIP ? `${process.env.HA_VIP}/24` : ''),
+    HA_VIP_CIDR: process.env.HA_VIP_CIDR || base.HA_VIP_CIDR || ((process.env.HA_VIP || base.HA_VIP) ? `${process.env.HA_VIP || base.HA_VIP}/24` : ''),
     HA_ROUTER_ID: process.env.HA_ROUTER_ID || base.HA_ROUTER_ID || '',
     HA_AUTH_PASS: process.env.HA_AUTH_PASS || base.HA_AUTH_PASS || ''
   };
