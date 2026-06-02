@@ -12,6 +12,9 @@ CATALOG_DIR="${TRONFIRE_CATALOG_EXPORT_DIR:-${APP_DIR}/state/tronfire-catalog}"
 AUTO_RESTORE_STANDBY="${HA_SYNC_AUTO_RESTORE_STANDBY:-true}"
 STANDBY_TRONFIRE_URL="${HA_SYNC_STANDBY_TRONFIRE_URL:-http://127.0.0.1:${TRONFIRE_PANEL_PORT:-8081}}"
 INTERNAL_TOKEN="${TRONSOFTOS_INTERNAL_TOKEN:-}"
+if [ -z "$INTERNAL_TOKEN" ] && [ -f "${TRONSOFTOS_CLUSTER_SECRETS:-${APP_DIR}/state/cluster-secrets.env}" ]; then
+  INTERNAL_TOKEN="$(grep '^TRONSOFTOS_INTERNAL_TOKEN=' "${TRONSOFTOS_CLUSTER_SECRETS:-${APP_DIR}/state/cluster-secrets.env}" | tail -n1 | cut -d= -f2- || true)"
+fi
 LOG_DIR="${TRONSOFTOS_LOG_DIR:-${APP_DIR}/logs}/ha-sync"
 STAMP="$(date +%Y%m%d%H%M%S)"
 LOG_FILE="${LOG_DIR}/ha-sync-${STAMP}.log"

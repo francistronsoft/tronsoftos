@@ -88,6 +88,31 @@ install_docker() {
   docker compose version >/dev/null
 }
 
+env_escape() {
+  printf '%s' "$1" | sed 's/[\/&]/\\&/g'
+}
+
+set_env_value() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  local escaped
+  escaped="$(env_escape "$value")"
+  [ -f "$file" ] || return 0
+  if grep -q "^$key=" "$file"; then
+    sed -i "s/^$key=.*/$key=$escaped/" "$file"
+  else
+    printf '\n%s=%s\n' "$key" "$value" >> "$file"
+  fi
+}
+
+env_value() {
+  local file="$1"
+  local key="$2"
+  [ -f "$file" ] || return 0
+  grep "^$key=" "$file" | tail -n1 | cut -d= -f2-
+}
+
 if [ "$(id -u)" -ne 0 ]; then
   echo "Execute como root: sudo ./install.sh" >&2
   exit 77
@@ -160,6 +185,13 @@ prepare_frontend
 echo "Preparando TronFire..."
 if [ ! -f "$APP_DIR/apps/tronfire/.env" ]; then
   cp "$APP_DIR/apps/tronfire/.env.example" "$APP_DIR/apps/tronfire/.env"
+fi
+set_env_value "$APP_DIR/apps/tronfire/.env" "APP_ROOT" "$APP_DIR/apps/tronfire"
+set_env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_STATE_DIR" "$APP_DIR/state"
+set_env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_CLUSTER_LOCK" "$APP_DIR/state/cluster-lock.json"
+set_env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_CLUSTER_SECRETS" "$APP_DIR/state/cluster-secrets.env"
+if [ -f "$APP_DIR/state/cluster-secrets.env" ] && [ -z "$(env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_INTERNAL_TOKEN")" ]; then
+  set_env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_INTERNAL_TOKEN" "$(env_value "$APP_DIR/state/cluster-secrets.env" "TRONSOFTOS_INTERNAL_TOKEN")"
 fi
 cd "$APP_DIR/apps/tronfire"
 bash scripts/install-assets.sh

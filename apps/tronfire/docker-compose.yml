@@ -87,6 +87,7 @@ services:
       TRONFIRE_NODE_ROLE: ${TRONFIRE_NODE_ROLE:-primary}
       TRONSOFTOS_NODE_NAME: ${TRONSOFTOS_NODE_NAME:-}
       TRONSOFTOS_CLUSTER_LOCK: ${TRONSOFTOS_CLUSTER_LOCK:-/opt/tronsoftos/state/cluster-lock.json}
+      TRONSOFTOS_CLUSTER_SECRETS: ${TRONSOFTOS_CLUSTER_SECRETS:-/opt/tronsoftos/state/cluster-secrets.env}
       TRONSOFTOS_INTERNAL_TOKEN: ${TRONSOFTOS_INTERNAL_TOKEN:-}
       TRONFIRE_FIREBIRD_PORT: ${TRONFIRE_FIREBIRD_PORT:-3050}
       TRONFIRE_LAN_HOST: ${TRONFIRE_LAN_HOST:-}
@@ -95,7 +96,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${STORAGE_ROOT}/firebird:/firebird
-      - ${TRONSOFTOS_STATE_DIR:-/opt/tronsoftos/state}:/opt/tronsoftos/state
+      - ${TRONSOFTOS_STATE_DIR:-/opt/tronsoftos/state}:${TRONSOFTOS_STATE_DIR:-/opt/tronsoftos/state}
       - ${STORAGE_ROOT}/config-backups:/config-backups
       - ${STORAGE_ROOT}/update-backups:/update-backups
 
@@ -122,10 +123,11 @@ services:
       TRONFIRE_DEPLOYMENT_MODE: ${TRONFIRE_DEPLOYMENT_MODE:-simple}
       TRONFIRE_NODE_ROLE: ${TRONFIRE_NODE_ROLE:-primary}
       TRONSOFTOS_NODE_NAME: ${TRONSOFTOS_NODE_NAME:-}
+      TRONSOFTOS_CLUSTER_SECRETS: ${TRONSOFTOS_CLUSTER_SECRETS:-/opt/tronsoftos/state/cluster-secrets.env}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ${STORAGE_ROOT}/firebird:/firebird
-      - ${TRONSOFTOS_STATE_DIR:-/opt/tronsoftos/state}:/opt/tronsoftos/state
+      - ${TRONSOFTOS_STATE_DIR:-/opt/tronsoftos/state}:${TRONSOFTOS_STATE_DIR:-/opt/tronsoftos/state}
       - ${STORAGE_ROOT}/config-backups:/config-backups
       - ${STORAGE_ROOT}/update-backups:/update-backups
 

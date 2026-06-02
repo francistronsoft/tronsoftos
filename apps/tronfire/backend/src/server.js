@@ -147,7 +147,7 @@ function parseEnvFile(filePath) {
 }
 
 function internalTokenValue() {
-  return process.env.TRONSOFTOS_INTERNAL_TOKEN || parseEnvFile(clusterSecretsPath).TRONSOFTOS_INTERNAL_TOKEN || '';
+  return parseEnvFile(clusterSecretsPath).TRONSOFTOS_INTERNAL_TOKEN || process.env.TRONSOFTOS_INTERNAL_TOKEN || '';
 }
 
 function assertInternalTronsoftos(req) {
