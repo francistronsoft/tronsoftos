@@ -946,6 +946,31 @@ function ClusterView({ dashboard }) {
               {pairingImportMutation.data?.paths?.authorizedKeys ? (
                 <div className="mt-1 truncate font-mono text-xs">{pairingImportMutation.data.paths.authorizedKeys}</div>
               ) : null}
+              {pairingImportMutation.data?.keepalived ? (
+                <div className="mt-3 flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    disabled={vipMutation.isPending}
+                    onClick={() => vipMutation.mutate({
+                      interfaceName: vipValues.interfaceName,
+                      vipCidr: pairingImportMutation.data.keepalived.vipCidr,
+                      routerId: pairingImportMutation.data.keepalived.routerId,
+                      authPass: '',
+                      nodeState: values.nodeRole === 'primary' ? 'MASTER' : 'BACKUP',
+                      priority: values.nodeRole === 'primary' ? 150 : 100
+                    })}
+                    className="inline-flex items-center justify-center gap-2 rounded-md bg-green-700 px-3 py-2 text-sm font-medium text-white hover:bg-green-800 disabled:opacity-50"
+                  >
+                    <Network className="h-4 w-4" />
+                    Aplicar VIP importado neste no
+                  </button>
+                  <span className="text-xs text-green-800">
+                    Usa {pairingImportMutation.data.keepalived.vipCidr}, interface {vipValues.interfaceName} e prioridade {values.nodeRole === 'primary' ? 150 : 100}.
+                  </span>
+                </div>
+              ) : null}
+              {vipMutation.isSuccess ? <div className="mt-2 text-sm font-medium">VIP aplicado. Reinicie TronSoftOS para recarregar as variaveis do no.</div> : null}
+              {vipMutation.isError ? <div className="mt-2 text-sm text-red-700">{vipMutation.error.message}</div> : null}
             </div>
           ) : null}
           {pairingImportMutation.isError ? (

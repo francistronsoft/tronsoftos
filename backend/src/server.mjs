@@ -1878,6 +1878,11 @@ async function importPairingFile(body) {
   return {
     ok: true,
     importedKeys: Object.keys(pairing.values),
+    keepalived: pairing.values.HA_VIP_CIDR && pairing.values.HA_ROUTER_ID && pairing.values.HA_AUTH_PASS ? {
+      vipCidr: pairing.values.HA_VIP_CIDR,
+      routerId: Number(pairing.values.HA_ROUTER_ID),
+      authPassImported: true
+    } : null,
     sshKeyImported: result.sshKeyImported === true,
     paths: {
       clusterSecrets: result.clusterSecrets || clusterSecretsPath,
