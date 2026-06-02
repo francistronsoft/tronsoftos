@@ -1084,6 +1084,10 @@ function parseEnvFile(filePath) {
   }
 }
 
+function internalTokenValue() {
+  return process.env.TRONSOFTOS_INTERNAL_TOKEN || parseEnvFile(clusterSecretsPath).TRONSOFTOS_INTERNAL_TOKEN || '';
+}
+
 function parseEnvText(text) {
   return String(text || '')
     .split(/\r?\n/)
@@ -2137,9 +2141,12 @@ function startHaSync() {
     stderr: ''
   };
   actionJobs.set(id, job);
+  const internalToken = internalTokenValue();
+  if (!internalToken) throw new Error('TRONSOFTOS_INTERNAL_TOKEN nao configurado para restore automatico no standby');
   const env = {
     ...process.env,
     TRONSOFTOS_APP_DIR: appRoot,
+    TRONSOFTOS_INTERNAL_TOKEN: internalToken,
     HA_SYNC_STANDBY_HOST: settings.standbyHost,
     HA_SYNC_SSH_USER: settings.sshUser || 'tronsoftos',
     HA_SYNC_SSH_PORT: String(settings.sshPort || 22),
