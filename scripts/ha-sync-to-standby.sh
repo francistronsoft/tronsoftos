@@ -67,8 +67,8 @@ done < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name '*.manifest.json')
 for alias in "${!latest_backup_by_alias[@]}"; do
   printf '%s|%s|%s\n' \
     "$alias" \
-    "${REMOTE_BACKUP_DIR%/}/$(basename "${latest_backup_by_alias[$alias]}")" \
-    "${REMOTE_BACKUP_DIR%/}/$(basename "${latest_manifest_by_alias[$alias]}")" \
+    "/firebird/backups/$(basename "${latest_backup_by_alias[$alias]}")" \
+    "/firebird/backups/$(basename "${latest_manifest_by_alias[$alias]}")" \
     >> "$RESTORE_LIST"
 done
 
@@ -112,7 +112,7 @@ if [ "$AUTO_RESTORE_STANDBY" = "true" ]; then
       body="{\"databaseAlias\":\"$(json_escape "$alias")\",\"backupPath\":\"$(json_escape "$remote_backup")\",\"manifestPath\":\"$(json_escape "$remote_manifest")\",\"logToken\":\"ha_sync_${STAMP}\"}"
       echo "[ha-sync] restore standby ${alias}: ${remote_backup}"
       ssh ${SSH_BASE_OPTS} "${SSH_USER}@${STANDBY_HOST}" \
-        "curl -fsS -X POST '${STANDBY_TRONFIRE_URL%/}/api/ha/standby/restore' -H 'content-type: application/json' -H 'x-tronsoftos-token: $INTERNAL_TOKEN' --data-binary '$body'"
+        "response=\$(curl -sS -w '\n%{http_code}' -X POST '${STANDBY_TRONFIRE_URL%/}/api/ha/standby/restore' -H 'content-type: application/json' -H 'x-tronsoftos-token: $INTERNAL_TOKEN' --data-binary '$body'); status=\$(printf '%s' \"\$response\" | tail -n1); payload=\$(printf '%s' \"\$response\" | sed '\$d'); printf '%s\n' \"\$payload\"; case \"\$status\" in 2*) exit 0 ;; *) exit 22 ;; esac"
     done < "$RESTORE_LIST"
   else
     echo "[ha-sync] nenhum backup validado para restaurar no standby"

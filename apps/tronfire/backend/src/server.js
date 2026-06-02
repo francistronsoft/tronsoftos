@@ -247,6 +247,20 @@ function isReceivedBackupPath(filePath) {
   return value.startsWith('/firebird/backups/') && /\.(gbk|fbk|gbk\.gz|fbk\.gz)$/i.test(value);
 }
 
+function normalizeReceivedBackupPath(filePath) {
+  const value = String(filePath || '').trim();
+  const storagePrefix = `${storageRoot.replace(/\/+$/, '')}/firebird/backups/`;
+  if (value.startsWith(storagePrefix)) return `/firebird/backups/${value.slice(storagePrefix.length)}`;
+  return value;
+}
+
+function normalizeReceivedManifestPath(filePath) {
+  const value = String(filePath || '').trim();
+  const storagePrefix = `${storageRoot.replace(/\/+$/, '')}/firebird/backups/`;
+  if (value.startsWith(storagePrefix)) return `/firebird/backups/${value.slice(storagePrefix.length)}`;
+  return value;
+}
+
 function normalizeBackupCleanupOptions(query = {}) {
   const olderThanDays = Math.max(Number(query.olderThanDays || 7), 0);
   const keepLastPerDatabase = Math.max(Number(query.keepLastPerDatabase || 1), 0);
@@ -1295,9 +1309,10 @@ app.post('/api/ha/standby/restore', async (req, reply) => {
     return reply.code(409).send({ error: 'Restore standby permitido apenas em no HA standby/recovery' });
   }
   const body = req.body || {};
-  const sourcePath = String(body.backupPath || '').trim();
+  const sourcePath = normalizeReceivedBackupPath(body.backupPath);
   if (!isReceivedBackupPath(sourcePath)) return reply.code(400).send({ error: 'backupPath invalido' });
-  const manifest = body.manifestPath ? readBackupManifest(body.manifestPath) : null;
+  const manifestPath = body.manifestPath ? normalizeReceivedManifestPath(body.manifestPath) : '';
+  const manifest = manifestPath ? readBackupManifest(manifestPath) : null;
   if (!manifest?.validation?.ok) return reply.code(400).send({ error: 'backup sem validacao de restore aprovada' });
   const alias = normalizeAlias(body.databaseAlias || manifest?.databaseAlias || path.basename(sourcePath).split('_').slice(0, -1).join('_'));
   const db = await prisma.managedDatabase.findUnique({ where: { alias } });
@@ -1345,7 +1360,7 @@ app.post('/api/ha/standby/restore', async (req, reply) => {
         lastStandbyBackupSha256: sha
       }
     });
-    await audit(req, 'HA_STANDBY_RESTORED', { entityType: 'database', entityId: db.id, details: { sourcePath, manifestPath: body.manifestPath || null, standbyPath, logPath } });
+    await audit(req, 'HA_STANDBY_RESTORED', { entityType: 'database', entityId: db.id, details: { sourcePath, manifestPath: manifestPath || null, standbyPath, logPath } });
     return { ok: true, database: updated, standbyPath, logPath };
   } catch (err) {
     const error = shellErrorText(err);
