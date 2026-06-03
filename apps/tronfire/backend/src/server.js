@@ -119,6 +119,16 @@ function isPrimaryNode() {
   return nodeRole === 'primary';
 }
 
+function standbyReadPathForDatabase(db) {
+  if (!isHaMode() || !['standby', 'recovery'].includes(nodeRole)) return '';
+  if (!['READY', 'RESTORING'].includes(String(db.standbyStatus || '').toUpperCase())) return '';
+  return db.standbyPath || standbyPathForAlias(db.alias);
+}
+
+function effectiveDatabasePath(db) {
+  return standbyReadPathForDatabase(db) || db.filePath;
+}
+
 function assertPrimaryWritable() {
   if (isHaMode() && !isPrimaryNode()) {
     const error = new Error(`Operacao bloqueada: no TronFire em modo ${nodeRole}`);
@@ -315,7 +325,7 @@ async function syncFirebirdAliases() {
     ''
   ];
   for (const db of dbs) {
-    lines.push(`${db.alias} = ${db.filePath}`);
+    lines.push(`${db.alias} = ${effectiveDatabasePath(db)}`);
   }
   const content = `${lines.join('\n')}\n`;
   if (firebirdExecMode !== 'container') {
@@ -336,14 +346,21 @@ function firebirdHost(req) {
 function connectionInfoForDatabase(db, req) {
   const host = firebirdHost(req);
   const port = String(firebirdPort);
-  const path = db.filePath;
+  const path = effectiveDatabasePath(db);
+  const usingStandbyPath = path !== db.filePath;
   return {
     databaseId: db.id,
     name: db.name,
     alias: db.alias,
+    nodeRole,
+    deploymentMode,
     host,
     port,
     path,
+    productionPath: db.filePath,
+    standbyPath: db.standbyPath || standbyPathForAlias(db.alias),
+    usingStandbyPath,
+    pathRole: usingStandbyPath ? 'standby_read_only' : 'production',
     user: 'SYSDBA',
     passwordSource: 'FIREBIRD_PASSWORD',
     aliasConnection: `${host}/${port}:${db.alias}`,
@@ -931,8 +948,9 @@ app.patch('/api/databases/:id/backup-settings', { preHandler: requireOperator },
 
 app.post('/api/databases/:id/validate', { preHandler: requireOperator }, async (req) => {
   const db = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: req.params.id } });
+  const targetPath = effectiveDatabasePath(db);
   try {
-    await dockerExec(['sh','-lc',`test -f '${db.filePath}' && ${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat -h '${db.filePath}' >/tmp/tronfire_gstat.txt 2>&1`], { timeout: 120000 });
+    await dockerExec(['sh','-lc',`test -f ${shQuote(targetPath)} && ${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h ${shQuote(targetPath)} >/tmp/tronfire_gstat.txt 2>&1`], { timeout: 120000 });
     const updated = await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ONLINE', lastCheckAt: new Date() } });
     await audit(req, 'DATABASE_VALIDATED', { entityType: 'database', entityId: db.id });
     return updated;
@@ -1330,6 +1348,7 @@ app.post('/api/ha/standby/restore', async (req, reply) => {
       `src=${shQuote(sourcePath)}`,
       `temp_dest=${shQuote(tempRestorePath)}`,
       `standby=${shQuote(standbyPath)}`,
+      `standby_conn=${shQuote(firebirdDbConnect(standbyPath))}`,
       `log=${shQuote(logPath)}`,
       `expected_sha=${shQuote(manifest?.backupSha256 || '')}`,
       'fail() { code="$1"; shift; echo "$*"; test -f "$log" && cat "$log"; exit "$code"; }',
@@ -1346,6 +1365,7 @@ app.post('/api/ha/standby/restore', async (req, reply) => {
       `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$temp_dest" >> "$log" 2>&1 || fail 67 "Falha ao validar standby restaurado com gstat"`,
       'mv -f "$temp_dest" "$standby" || fail 68 "Nao foi possivel substituir banco standby: $standby"',
       'chmod 0666 "$standby" || fail 69 "Nao foi possivel ajustar permissao do standby final"',
+      `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gfix`)} -mode read_only -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} "$standby_conn" >> "$log" 2>&1 || true`,
       `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$standby" >> "$log" 2>&1 || fail 70 "Falha ao validar standby final com gstat"`
     ].join('; ');
     await dockerExec(['sh', '-lc', cmd], { timeout: 1000 * 60 * 60 * 4 });
@@ -1360,6 +1380,7 @@ app.post('/api/ha/standby/restore', async (req, reply) => {
         lastStandbyBackupSha256: sha
       }
     });
+    await syncFirebirdAliases();
     await audit(req, 'HA_STANDBY_RESTORED', { entityType: 'database', entityId: db.id, details: { sourcePath, manifestPath: manifestPath || null, standbyPath, logPath } });
     return { ok: true, database: updated, standbyPath, logPath };
   } catch (err) {
@@ -1426,6 +1447,7 @@ app.post('/api/ha/standby/promote', async (req, reply) => {
     const cmd = [
       'set -e',
       `prod=${shQuote(db.filePath)}`,
+      `prod_conn=${shQuote(firebirdDbConnect(db.filePath))}`,
       `standby=${shQuote(db.standbyPath)}`,
       `backup_current=${shQuote(backupCurrent)}`,
       `log=${shQuote(logPath)}`,
@@ -1434,7 +1456,8 @@ app.post('/api/ha/standby/promote', async (req, reply) => {
       'if [ -f "$prod" ]; then mv "$prod" "$backup_current"; fi',
       'mv "$standby" "$prod"',
       'chmod 0666 "$prod"',
-      `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$prod" > "$log" 2>&1`
+      `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gfix`)} -mode read_write -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} "$prod_conn" >> "$log" 2>&1 || true`,
+      `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$prod" >> "$log" 2>&1`
     ].join('; ');
     await dockerExec(['sh', '-lc', cmd], { timeout: 1000 * 60 * 20 });
     await prisma.managedDatabase.update({

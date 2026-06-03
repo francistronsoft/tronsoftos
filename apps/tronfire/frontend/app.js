@@ -491,11 +491,13 @@ function connectionPanel(info) {
     <div class="card mb-3" id="connectionPanel">
       <div class="card-header"><h3 class="card-title">Conexao - ${escapeHtml(info.name)}</h3></div>
       <div class="card-body">
+        ${info.usingStandbyPath ? `<div class="alert alert-info mb-3">Este no esta em ${escapeHtml(info.nodeRole)}. A conexao abaixo aponta para o banco restaurado do standby em modo somente leitura. O caminho de producao sera usado apos a promocao.</div>` : ''}
         <div class="row g-3">
           <div class="col-md-3"><div class="subheader">Servidor</div><div>${escapeHtml(info.host)}</div></div>
           <div class="col-md-2"><div class="subheader">Porta global</div><div>${escapeHtml(info.port)}</div></div>
           <div class="col-md-4"><div class="subheader">Banco</div><code>${escapeHtml(info.path)}</code></div>
           <div class="col-md-3"><div class="subheader">Usuario</div><div>${escapeHtml(info.user)}</div></div>
+          ${info.usingStandbyPath ? `<div class="col-md-6"><div class="subheader">Caminho de producao apos promocao</div><code>${escapeHtml(info.productionPath)}</code></div>` : ''}
         </div>
         <div class="mt-3">
           <label class="form-label">String por alias</label>
@@ -525,6 +527,8 @@ function connectionPanel(info) {
 
 function databaseDetailsPanel(db, diagnostic, haStatus) {
   const status = databaseStatusView(db, diagnostic);
+  const diagnosticPath = diagnostic?.path || db.filePath;
+  const usingStandbyPath = diagnostic?.pathRole === 'standby_read_only' || diagnosticPath !== db.filePath;
   return `
     <div class="card mb-3" id="databaseDetailsPanel">
       <div class="card-header d-flex align-items-center justify-content-between">
@@ -533,13 +537,17 @@ function databaseDetailsPanel(db, diagnostic, haStatus) {
       </div>
       <div class="card-body">
         <div class="alert alert-${status.className === 'success' ? 'success' : status.className === 'danger' ? 'danger' : 'info'} mb-3">${escapeHtml(status.title)}</div>
+        ${usingStandbyPath ? `<div class="alert alert-info mb-3">Este standby esta exibindo os dados do arquivo restaurado em <code>${escapeHtml(diagnosticPath)}</code>. O arquivo de producao <code>${escapeHtml(db.filePath)}</code> so sera substituido na promocao.</div>` : ''}
         ${haOperationWarning(haStatus)}
         <div class="row g-3">
           <div class="col-md-3"><div class="subheader">Alias</div><div>${escapeHtml(db.alias)}</div></div>
           <div class="col-md-3"><div class="subheader">Tipo</div><div>${badge(db.type)}</div></div>
           <div class="col-md-3"><div class="subheader">Versao</div><div>${escapeHtml(diagnostic?.version || 'Nao informado')}</div></div>
           <div class="col-md-3"><div class="subheader">Empresa Sintegra</div><div>${escapeHtml(diagnostic?.licensedUnit || 'Nao informado')}</div></div>
-          <div class="col-md-6"><div class="subheader">Caminho</div><code>${escapeHtml(db.filePath)}</code></div>
+          <div class="col-md-6"><div class="subheader">Caminho consultado</div><code>${escapeHtml(diagnosticPath)}</code></div>
+          ${usingStandbyPath ? `<div class="col-md-6"><div class="subheader">Caminho de producao</div><code>${escapeHtml(db.filePath)}</code></div>` : ''}
+          ${db.standbyPath ? `<div class="col-md-6"><div class="subheader">Caminho standby</div><code>${escapeHtml(db.standbyPath)}</code></div>` : ''}
+          ${db.standbyStatus ? `<div class="col-md-3"><div class="subheader">Status standby</div><div>${escapeHtml(db.standbyStatus)}</div></div>` : ''}
           <div class="col-md-3"><div class="subheader">Ultima checagem</div><div>${db.lastCheckAt ? new Date(db.lastCheckAt).toLocaleString() : '-'}</div></div>
           <div class="col-md-3"><div class="subheader">Ultimo backup</div><div>${db.lastBackupAt ? new Date(db.lastBackupAt).toLocaleString() : '-'}</div></div>
           <div class="col-md-3"><div class="subheader">Backup automatico</div><div>${db.backupEnabled ? 'Ativo' : 'Inativo'}</div></div>

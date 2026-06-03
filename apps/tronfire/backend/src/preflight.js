@@ -4,6 +4,8 @@ import { prisma } from './prisma.js';
 const FIREBIRD_BIN = process.env.FIREBIRD_BIN || '/usr/local/firebird/bin';
 const FIREBIRD_EXEC_MODE = String(process.env.FIREBIRD_EXEC_MODE || 'container').toLowerCase();
 const FIREBIRD_HOST = process.env.FIREBIRD_HOST || 'host.docker.internal';
+const DEPLOYMENT_MODE = String(process.env.TRONFIRE_DEPLOYMENT_MODE || 'simple').toLowerCase();
+const NODE_ROLE = String(process.env.TRONFIRE_NODE_ROLE || 'primary').toLowerCase();
 const dirs = ['/firebird/data','/firebird/backups','/firebird/uploads','/firebird/templates','/firebird/restore-work','/firebird/quarantine','/firebird/logs'];
 const bins = ['gbak','gfix','gstat','isql'];
 
@@ -16,11 +18,24 @@ function parseIsqlValue(stdout) {
   return value || null;
 }
 
+function standbyPathForAlias(alias) {
+  return `/firebird/standby/${String(alias || '').trim().toLowerCase()}_standby.fdb`;
+}
+
+function effectiveDatabasePath(db) {
+  if (DEPLOYMENT_MODE === 'ha' && ['standby', 'recovery'].includes(NODE_ROLE) && ['READY', 'RESTORING'].includes(String(db.standbyStatus || '').toUpperCase())) {
+    return db.standbyPath || standbyPathForAlias(db.alias);
+  }
+  return db.filePath;
+}
+
 async function queryDatabaseValue(db, sql) {
   const script = `set heading off;\n${sql}\nquit;\n`;
+  const databasePath = effectiveDatabasePath(db);
+  const useDirectPath = databasePath !== db.filePath || FIREBIRD_EXEC_MODE === 'host' || FIREBIRD_EXEC_MODE === 'direct';
   const connect = FIREBIRD_EXEC_MODE === 'host' || FIREBIRD_EXEC_MODE === 'direct'
-    ? `${FIREBIRD_HOST}:${db.filePath}`
-    : `localhost:${db.alias || db.filePath}`;
+    ? `${FIREBIRD_HOST}:${databasePath}`
+    : useDirectPath ? `localhost:${databasePath}` : `localhost:${db.alias || databasePath}`;
   const cmd = `printf %s ${shQuote(script)} | ${shQuote(`${FIREBIRD_BIN}/isql`)} -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} ${shQuote(connect)}`;
   const { stdout } = await firebirdExec(['sh', '-lc', cmd], { timeout: 120000 });
   return parseIsqlValue(stdout);
@@ -40,6 +55,8 @@ async function databaseDiagnostics() {
         name: db.name,
         alias: db.alias,
         ok: true,
+        path: effectiveDatabasePath(db),
+        pathRole: effectiveDatabasePath(db) === db.filePath ? 'production' : 'standby_read_only',
         version: version || 'Nao informado',
         licensedUnit: licensedUnit || 'Nao informado'
       });
@@ -49,6 +66,8 @@ async function databaseDiagnostics() {
         name: db.name,
         alias: db.alias,
         ok: false,
+        path: effectiveDatabasePath(db),
+        pathRole: effectiveDatabasePath(db) === db.filePath ? 'production' : 'standby_read_only',
         version: 'Erro',
         licensedUnit: 'Erro',
         error: err.message
