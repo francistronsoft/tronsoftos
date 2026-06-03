@@ -85,6 +85,9 @@ apply_pairing() {
   if [ -n "${HA_AUTH_PASS:-}" ]; then
     set_env_value "$tronsoftos_env" "HA_AUTH_PASS" "$HA_AUTH_PASS"
   fi
+  if [ -n "${HA_PRIMARY_HEALTH_URL:-}" ]; then
+    set_env_value "$tronsoftos_env" "HA_PRIMARY_HEALTH_URL" "$HA_PRIMARY_HEALTH_URL"
+  fi
 
   set_env_value "$tronfire_env" "SESSION_SECRET" "$SESSION_SECRET"
   set_env_value "$tronfire_env" "TRONSOFTOS_INTERNAL_TOKEN" "$TRONSOFTOS_INTERNAL_TOKEN"
@@ -354,6 +357,30 @@ local_keepalived() {
   printf '{"ok":true,"service":"keepalived","action":"%s","status":"%s"}\n' "$(json_escape "$action")" "$(json_escape "$status")"
 }
 
+set_node_role() {
+  local app_dir="${1:-}"
+  local role="${2:-}"
+  local tronsoftos_env="/etc/tronsoftos/tronsoftos.env"
+  local tronfire_env="$app_dir/apps/tronfire/.env"
+
+  valid_app_dir "$app_dir" || fail "Diretorio da aplicacao invalido"
+  [[ "$role" =~ ^(primary|standby|recovery)$ ]] || fail "Papel invalido"
+
+  set_env_value "$tronsoftos_env" "TRONSOFTOS_NODE_ROLE" "$role"
+  set_env_value "$tronfire_env" "TRONFIRE_NODE_ROLE" "$role"
+
+  if [ "$role" = "primary" ]; then
+    set_env_value "$tronsoftos_env" "HA_NODE_ROLE" "MASTER"
+    set_env_value "$tronsoftos_env" "HA_PRIORITY" "150"
+  elif [ "$role" = "standby" ]; then
+    set_env_value "$tronsoftos_env" "HA_NODE_ROLE" "BACKUP"
+    set_env_value "$tronsoftos_env" "HA_PRIORITY" "100"
+  fi
+
+  printf '{"ok":true,"role":"%s","tronsoftosEnv":"%s","tronfireEnv":"%s"}\n' \
+    "$(json_escape "$role")" "$(json_escape "$tronsoftos_env")" "$(json_escape "$tronfire_env")"
+}
+
 host_power() {
   local action="${1:-}"
   [[ "$action" =~ ^(reboot|poweroff)$ ]] || fail "Acao de energia invalida"
@@ -385,6 +412,10 @@ case "$action" in
   local-keepalived)
     shift
     local_keepalived "$@"
+    ;;
+  set-node-role)
+    shift
+    set_node_role "$@"
     ;;
   host-power)
     shift

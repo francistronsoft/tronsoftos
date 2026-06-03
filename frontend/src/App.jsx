@@ -328,6 +328,25 @@ function Topology({ dashboard }) {
 function DashboardView({ dashboard }) {
   const onlineApps = dashboard.apps.filter(app => app.status === 'online').length;
   const alerts = dashboard.alerts || [];
+  const isStandbyNode = ['standby', 'recovery'].includes(dashboard.cluster.nodeRole);
+  const sync = dashboard.cluster.sync || {};
+  const standbyDbSummary = sync.tronfireStandby?.databaseCount
+    ? `${sync.tronfireStandby.readyCount || 0}/${sync.tronfireStandby.databaseCount}`
+    : '-';
+  const syncReceiverDetail = sync.tronfireStandby?.latestValidatedAt
+    ? `restore ${formatDateTime(sync.tronfireStandby.latestValidatedAt)}`
+    : sync.receiver?.latestBackup?.modifiedAt
+      ? `backup ${formatDateTime(sync.receiver.latestBackup.modifiedAt)}`
+      : 'aguardando primary';
+  const readyCount = Number(sync.tronfireStandby?.readyCount || 0);
+  const databaseCount = Number(sync.tronfireStandby?.databaseCount || 0);
+  const databaseProgress = databaseCount ? Math.round((readyCount / databaseCount) * 70) : 0;
+  const promotionProgress = Math.min(100, databaseProgress + (sync.standbyReady ? 20 : 0) + (dashboard.cluster.guard?.canPromote ? 10 : 0));
+  const promotionState = dashboard.cluster.guard?.canPromote
+    ? 'promocao autorizada'
+    : sync.standbyReady
+      ? 'pronto, aguardando autorizacao'
+      : 'sincronizando standby';
   return (
     <div className="space-y-5">
       <div className="grid gap-4 lg:grid-cols-5">
@@ -337,10 +356,39 @@ function DashboardView({ dashboard }) {
         <Stat label="Alertas" value={alerts.length} detail={alerts[0]?.message || 'sem alertas ativos'} icon={AlertTriangle} tone={alerts.length ? 'amber' : 'green'} />
         <Stat label="Hora servidor" value={formatDateTime(dashboard.generatedAt)} detail="gerado pelo backend" icon={FileClock} tone="slate" />
       </div>
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="grid gap-4 lg:grid-cols-3">
         <Stat label="Versao local" value={dashboard.build?.version || dashboard.cluster.build?.version || '-'} detail={`commit ${dashboard.build?.commit || dashboard.cluster.build?.commit || 'unknown'}`} icon={GitBranch} tone="slate" />
-        <Stat label="Versao standby" value={dashboard.cluster.standbyHealth?.version || '-'} detail={dashboard.cluster.standbyHealth?.ok ? `commit ${dashboard.cluster.standbyHealth.commit || 'unknown'}` : dashboard.cluster.standbyHealth?.error || 'nao consultado'} icon={GitBranch} tone={dashboard.cluster.standbyHealth?.ok ? ((dashboard.cluster.standbyHealth.commit && dashboard.cluster.build?.commit && dashboard.cluster.standbyHealth.commit !== dashboard.cluster.build.commit) ? 'amber' : 'green') : 'slate'} />
+        {isStandbyNode ? (
+          <Stat label="Versao deste standby" value={dashboard.build?.version || dashboard.cluster.build?.version || '-'} detail={`commit ${dashboard.build?.commit || dashboard.cluster.build?.commit || 'unknown'}`} icon={GitBranch} tone="green" />
+        ) : (
+          <Stat label="Versao standby" value={dashboard.cluster.standbyHealth?.version || '-'} detail={dashboard.cluster.standbyHealth?.ok ? `commit ${dashboard.cluster.standbyHealth.commit || 'unknown'}` : dashboard.cluster.standbyHealth?.error || 'nao consultado'} icon={GitBranch} tone={dashboard.cluster.standbyHealth?.ok ? ((dashboard.cluster.standbyHealth.commit && dashboard.cluster.build?.commit && dashboard.cluster.standbyHealth.commit !== dashboard.cluster.build.commit) ? 'amber' : 'green') : 'slate'} />
+        )}
+        {isStandbyNode ? (
+          <Stat label="Sync recebido" value={sync.standbyReady ? 'operando' : standbyDbSummary} detail={syncReceiverDetail} icon={RefreshCw} tone={sync.standbyReady ? 'green' : 'amber'} />
+        ) : (
+          <Stat label="Standby restaurado" value={standbyDbSummary} detail={sync.tronfireStandby?.latestValidatedAt ? `restore ${formatDateTime(sync.tronfireStandby.latestValidatedAt)}` : 'nao validado'} icon={ShieldCheck} tone={sync.standbyReady ? 'green' : 'amber'} />
+        )}
       </div>
+      {isStandbyNode ? (
+        <Card title="Preparacao para promocao" icon={ShieldCheck} action={<StatusPill value={sync.standbyReady ? 'READY' : 'standby'} />}>
+          <div className="grid gap-4 md:grid-cols-[1fr_220px] md:items-center">
+            <div>
+              <div className="text-sm font-semibold text-slate-900">{promotionState}</div>
+              <div className="mt-1 text-sm text-slate-500">
+                Bancos prontos {standbyDbSummary}. A promocao pode ser automatica pelo watchdog ou manual pelo tecnico.
+              </div>
+              <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
+                <div className="h-full rounded-full bg-sky-600" style={{ width: `${promotionProgress}%` }} />
+              </div>
+            </div>
+            <div className="grid gap-2 text-sm">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-2"><span className="text-slate-500">Restore</span><span className="font-medium">{readyCount}/{databaseCount || '-'}</span></div>
+              <div className="flex items-center justify-between border-b border-slate-100 pb-2"><span className="text-slate-500">Defasagem</span><span className="font-medium">{sync.standbyLagMinutes === null || sync.standbyLagMinutes === undefined ? '-' : `${sync.standbyLagMinutes} min`}</span></div>
+              <div className="flex items-center justify-between"><span className="text-slate-500">Promocao</span><span className="font-medium">{dashboard.cluster.guard?.canPromote ? 'liberada' : 'aguardando'}</span></div>
+            </div>
+          </div>
+        </Card>
+      ) : null}
       <div className="grid gap-5 xl:grid-cols-[1.3fr_0.7fr]">
         <Card title="Topologia" icon={GitBranch}><Topology dashboard={dashboard} /></Card>
         <Card title="Saude" icon={Gauge}>
@@ -539,6 +587,14 @@ function ClusterView({ dashboard }) {
     last_valid_standby: lock.last_valid_standby || '',
     reason: lock.reason || ''
   };
+  const failover = cluster.failover || {};
+  const [failoverForm, setFailoverForm] = useState(null);
+  const failoverValues = failoverForm || {
+    enabled: failover.enabled !== false,
+    timeoutSeconds: failover.timeoutSeconds || 60,
+    checkIntervalSeconds: failover.checkIntervalSeconds || 5,
+    primaryHealthUrl: failover.primaryHealthUrl || ''
+  };
   const syncValues = syncForm || {
     enabled: true,
     standbyHost: sync.standbyHost || '',
@@ -595,6 +651,7 @@ function ClusterView({ dashboard }) {
       });
       queryClient.invalidateQueries({ queryKey: ['cluster-lock'] });
       queryClient.invalidateQueries({ queryKey: ['cluster-guard'] });
+      queryClient.invalidateQueries({ queryKey: ['node-identity'] });
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
       queryClient.invalidateQueries({ queryKey: ['events'] });
     }
@@ -673,6 +730,21 @@ function ClusterView({ dashboard }) {
     enabled: !!syncJobId,
     refetchInterval: query => query.state.data?.status === 'running' ? 1200 : false
   });
+  const failoverMutation = useMutation({
+    mutationFn: payload => fetch('/api/cluster/failover', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).then(async response => {
+      if (!response.ok) throw new Error((await response.json()).error || `HTTP ${response.status}`);
+      return response.json();
+    }),
+    onSuccess: data => {
+      setFailoverForm(data);
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    }
+  });
   const haLogsQuery = useQuery({
     queryKey: ['ha-sync-logs', selectedHaLog],
     queryFn: () => api(`/api/cluster/sync/logs${selectedHaLog ? `?file=${encodeURIComponent(selectedHaLog)}` : ''}`),
@@ -689,6 +761,7 @@ function ClusterView({ dashboard }) {
   });
   const setValue = (key, value) => setForm(previous => ({ ...(previous || values), [key]: value }));
   const setLockValue = (key, value) => setLockForm(previous => ({ ...(previous || lockValues), [key]: value }));
+  const setFailoverValue = (key, value) => setFailoverForm(previous => ({ ...(previous || failoverValues), [key]: value }));
   const setSyncValue = (key, value) => setSyncForm(previous => ({ ...(previous || syncValues), [key]: value }));
   const setVipValue = (key, value) => setVipForm(previous => ({ ...(previous || vipValues), [key]: value }));
   const canManageSync = values.deploymentMode !== 'ha' || guard.canServeProduction === true || values.nodeRole === 'primary';
@@ -1083,6 +1156,37 @@ function ClusterView({ dashboard }) {
 
       {clusterTab === 'promotion' ? (
         <div className="grid gap-5 xl:grid-cols-2">
+      <Card title="Failover automatico" icon={RefreshCw} action={<StatusPill value={failoverValues.enabled ? 'automatico' : 'manual'} />}>
+        <form
+          className="grid gap-3"
+          onSubmit={event => {
+            event.preventDefault();
+            failoverMutation.mutate(failoverValues);
+          }}
+        >
+          <Checkbox label="Promover standby automaticamente quando o primary cair" checked={failoverValues.enabled} onChange={value => setFailoverValue('enabled', value)} />
+          <Field label="Health real do primary" value={failoverValues.primaryHealthUrl} onChange={value => setFailoverValue('primaryHealthUrl', value)} placeholder="http://192.168.1.10:8080/health" />
+          <div className="grid gap-3 md:grid-cols-2">
+            <Field label="Tempo para assumir" type="number" value={failoverValues.timeoutSeconds} onChange={value => setFailoverValue('timeoutSeconds', Number(value || 60))} placeholder="60" />
+            <Field label="Intervalo de checagem" type="number" value={failoverValues.checkIntervalSeconds} onChange={value => setFailoverValue('checkIntervalSeconds', Number(value || 5))} placeholder="5" />
+          </div>
+          <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+            {failover.primaryDownSince
+              ? `Primary indisponivel ha ${failover.elapsedSeconds || 0}s. ${failover.enabled ? `Promocao automatica em ${failover.remainingSeconds ?? 0}s se o standby estiver READY.` : 'Modo manual: nenhuma promocao automatica sera executada.'}`
+              : failover.watchdogActive
+                ? 'Watchdog ativo no standby. Aguardando queda do primary.'
+                : 'Watchdog ativo somente em no standby HA.'}
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <button disabled={failoverMutation.isPending} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
+              <Save className="h-4 w-4" />
+              Salvar failover
+            </button>
+            {failoverMutation.isSuccess ? <StatusPill value="online" /> : null}
+            {failoverMutation.isError ? <span className="text-sm text-red-700">{failoverMutation.error.message}</span> : null}
+          </div>
+        </form>
+      </Card>
       <Card title="Controle de promocao" icon={ShieldCheck} action={<StatusPill value={lockValues.allow_promotion ? 'warning' : 'disabled'} />}>
         <form
           className="grid gap-3 md:grid-cols-2"
@@ -1138,7 +1242,7 @@ function ClusterView({ dashboard }) {
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <button type="button" disabled={activateMutation.isPending || (!guard.canPromote && values.deploymentMode === 'ha' && values.nodeRole === 'standby')} onClick={() => activateMutation.mutate(lockValues.reason || 'ativacao manual confirmada no TronSoftOS')} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
             <ShieldCheck className="h-4 w-4" />
-            Marcar este no como ativo
+            Promover e ativar este no
           </button>
           <button type="button" disabled={recoveryMutation.isPending} onClick={() => recoveryMutation.mutate(lockValues.reason || 'nó retornou e sera ressincronizado antes de voltar ao cluster')} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
             <XCircle className="h-4 w-4" />

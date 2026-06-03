@@ -26,6 +26,7 @@ const smtpSettingsPath = process.env.TRONSOFTOS_SMTP_SETTINGS || path.join(state
 const cloudflareSettingsPath = process.env.TRONSOFTOS_CLOUDFLARE_SETTINGS || path.join(stateDir, 'cloudflare-settings.json');
 const rcloneSettingsPath = process.env.TRONSOFTOS_RCLONE_SETTINGS || path.join(stateDir, 'rclone-settings.json');
 const haSyncSettingsPath = process.env.TRONSOFTOS_HA_SYNC_SETTINGS || path.join(stateDir, 'ha-sync-settings.json');
+const haFailoverSettingsPath = process.env.TRONSOFTOS_HA_FAILOVER_SETTINGS || path.join(stateDir, 'ha-failover-settings.json');
 const maintenanceStatePath = process.env.TRONSOFTOS_MAINTENANCE_STATE || path.join(stateDir, 'maintenance-state.json');
 const googleCredentialsPath = process.env.TRONSOFTOS_GOOGLE_CREDENTIALS || path.join(stateDir, 'google-drive-credentials.json');
 const googleOauthDir = process.env.TRONSOFTOS_GOOGLE_OAUTH_DIR || path.join(stateDir, 'google-oauth');
@@ -36,7 +37,10 @@ const maxActionLogLength = 1024 * 128;
 const dockerConfigDir = process.env.TRONSOFTOS_DOCKER_CONFIG || path.join(stateDir, 'docker-config');
 let rcloneQuotaCache = { key: null, checkedAt: 0, value: null };
 let haSyncSchedulerTimer = null;
+let haFailoverWatchdogTimer = null;
 let lastAutoHaSyncStartedAt = 0;
+let primaryDownSince = 0;
+let autoFailoverInProgress = false;
 const smtpAlertSentAt = new Map();
 
 function json(reply, status, body) {
@@ -155,6 +159,18 @@ function writeNodeIdentity(body) {
   return identity;
 }
 
+async function setNodeRoleEnv(role) {
+  const out = await privilegedRun('/usr/local/sbin/tronsoftos-network', [
+    'set-node-role',
+    appRoot,
+    role
+  ], { timeout: 60_000, maxBuffer: 1024 * 1024 });
+  const result = parseJsonLines(out.stdout).at(-1) || { ok: true, role };
+  process.env.TRONSOFTOS_NODE_ROLE = role;
+  process.env.TRONFIRE_NODE_ROLE = role;
+  return { ...result, stderr: out.stderr };
+}
+
 function defaultClusterLock() {
   const identity = nodeIdentity();
   return {
@@ -254,7 +270,7 @@ function clusterGuard() {
   };
 }
 
-function activateLocalNode(body = {}) {
+async function activateLocalNode(body = {}) {
   const identity = nodeIdentity();
   const lock = clusterLock();
   const reason = String(body.reason || lock.reason || '').trim();
@@ -267,16 +283,35 @@ function activateLocalNode(body = {}) {
     }
   }
   if (!reason) throw new Error('informe o motivo/confirmacao para ativar este nó');
+  let tronfirePromotion = null;
+  let roleEnv = null;
+  let tronfireRestart = null;
+  let nextIdentity = identity;
+  if (identity.deploymentMode === 'ha' && identity.nodeRole === 'standby') {
+    tronfirePromotion = await promoteLocalTronfireStandby();
+    roleEnv = await setNodeRoleEnv('primary');
+    nextIdentity = writeNodeIdentity({ ...identity, nodeRole: 'primary' });
+    tronfireRestart = await restartTronfireBackend();
+  } else if (identity.deploymentMode === 'ha' && identity.nodeRole === 'primary') {
+    roleEnv = await setNodeRoleEnv('primary');
+  }
   const nextLock = writeClusterLock({
     ...lock,
-    cluster: identity.clusterId,
-    active_node: identity.nodeName,
-    this_node: identity.nodeName,
+    cluster: nextIdentity.clusterId,
+    active_node: nextIdentity.nodeName,
+    this_node: nextIdentity.nodeName,
     allow_promotion: false,
     reason
   });
-  appendEvent('CLUSTER_LOCAL_NODE_ACTIVATED', { cluster: identity.clusterId, nodeName: identity.nodeName, nodeRole: identity.nodeRole, reason });
-  return { lock: nextLock, guard: clusterGuard() };
+  appendEvent('CLUSTER_LOCAL_NODE_ACTIVATED', {
+    cluster: nextIdentity.clusterId,
+    nodeName: nextIdentity.nodeName,
+    nodeRole: nextIdentity.nodeRole,
+    reason,
+    tronfirePromotion: !!tronfirePromotion,
+    tronfireRestart
+  });
+  return { identity: nextIdentity, lock: nextLock, guard: clusterGuard(), tronfirePromotion, roleEnv, tronfireRestart };
 }
 
 function putLocalNodeInRecovery(body = {}) {
@@ -340,6 +375,47 @@ function publicHaSyncSettings(settings = rawHaSyncSettings()) {
     backupDir: settings.backupDir || '/opt/tronfire-storage/firebird/backups',
     catalogDir: settings.catalogDir || path.join(stateDir, 'tronfire-catalog')
   };
+}
+
+function defaultPrimaryHealthUrl() {
+  const fromEnv = process.env.HA_FAILOVER_PRIMARY_HEALTH_URL || process.env.HA_PRIMARY_HEALTH_URL || '';
+  if (fromEnv) return fromEnv;
+  const host = process.env.HA_PRIMARY_HOST || process.env.PRIMARY_HOST || '';
+  return host ? (/^https?:\/\//i.test(host) ? `${host.replace(/\/+$/, '')}/health` : `http://${host}:${port}/health`) : '';
+}
+
+function rawHaFailoverSettings() {
+  return {
+    enabled: true,
+    timeoutSeconds: Number(process.env.HA_FAILOVER_TIMEOUT_SECONDS || 60),
+    checkIntervalSeconds: Number(process.env.HA_FAILOVER_CHECK_INTERVAL_SECONDS || 5),
+    primaryHealthUrl: defaultPrimaryHealthUrl(),
+    ...readJson(haFailoverSettingsPath, {})
+  };
+}
+
+function publicHaFailoverSettings(settings = rawHaFailoverSettings()) {
+  return {
+    enabled: settings.enabled !== false,
+    timeoutSeconds: Math.max(Number(settings.timeoutSeconds || 60), 10),
+    checkIntervalSeconds: Math.max(Number(settings.checkIntervalSeconds || 5), 2),
+    primaryHealthUrl: String(settings.primaryHealthUrl || '').trim()
+  };
+}
+
+function writeHaFailoverSettings(body = {}) {
+  ensureStateDir();
+  const next = {
+    enabled: body.enabled !== false,
+    timeoutSeconds: Math.max(Number(body.timeoutSeconds || 60), 10),
+    checkIntervalSeconds: Math.max(Number(body.checkIntervalSeconds || 5), 2),
+    primaryHealthUrl: String(body.primaryHealthUrl || '').trim()
+  };
+  if (next.enabled && !next.primaryHealthUrl) throw new Error('URL de health do primary nao informada');
+  fs.writeFileSync(haFailoverSettingsPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+  appendEvent('HA_FAILOVER_SETTINGS_UPDATED', next);
+  restartHaFailoverWatchdog();
+  return publicHaFailoverSettings(next);
 }
 
 function haSyncStatus() {
@@ -1140,6 +1216,33 @@ function internalTokenValue() {
   return process.env.TRONSOFTOS_INTERNAL_TOKEN || parseEnvFile(clusterSecretsPath).TRONSOFTOS_INTERNAL_TOKEN || '';
 }
 
+async function promoteLocalTronfireStandby() {
+  const token = internalTokenValue();
+  if (!token) throw new Error('TRONSOFTOS_INTERNAL_TOKEN nao configurado para promover o TronFire');
+  const target = tronfireProxyTarget();
+  const response = await fetch(new URL('/api/ha/standby/promote', target), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-tronsoftos-token': token },
+    body: JSON.stringify({ confirmation: 'PROMOTE_STANDBY' })
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || `TronFire HTTP ${response.status}`);
+  return payload;
+}
+
+async function restartTronfireBackend() {
+  try {
+    const { stdout, stderr } = await run('docker', ['compose', 'restart', 'backend'], {
+      cwd: path.join(appRoot, 'apps/tronfire'),
+      timeout: 120_000,
+      maxBuffer: 1024 * 1024 * 2
+    });
+    return { ok: true, stdout, stderr };
+  } catch (err) {
+    return { ok: false, error: err.message, stdout: err.stdout || '', stderr: err.stderr || '' };
+  }
+}
+
 function parseEnvText(text) {
   return String(text || '')
     .split(/\r?\n/)
@@ -1193,7 +1296,12 @@ function normalizePairingContent(content) {
       normalized.HA_AUTH_PASS = authPass;
     }
   }
-  const optionalKeys = ['TRONSOFTOS_SSH_PUBLIC_KEY', 'HA_VIP', 'HA_VIP_CIDR', 'HA_ROUTER_ID', 'HA_AUTH_PASS'].filter(key => normalized[key]);
+  const primaryHealthUrl = String(env.HA_PRIMARY_HEALTH_URL || '').trim();
+  if (primaryHealthUrl) {
+    if (!/^https?:\/\/[A-Za-z0-9_.:-]+\/health$/.test(primaryHealthUrl)) throw new Error('HA_PRIMARY_HEALTH_URL invalida');
+    normalized.HA_PRIMARY_HEALTH_URL = primaryHealthUrl;
+  }
+  const optionalKeys = ['TRONSOFTOS_SSH_PUBLIC_KEY', 'HA_VIP', 'HA_VIP_CIDR', 'HA_ROUTER_ID', 'HA_AUTH_PASS', 'HA_PRIMARY_HEALTH_URL'].filter(key => normalized[key]);
   const keys = [...required, ...optionalKeys];
   return {
     values: normalized,
@@ -1203,6 +1311,8 @@ function normalizePairingContent(content) {
 
 function exportPairingContent() {
   const base = fs.existsSync(clusterSecretsPath) ? parseEnvText(fs.readFileSync(clusterSecretsPath, 'utf8')) : {};
+  const primaryHost = String(process.env.HOST_STATIC_IP_ADDRESS_CIDR || process.env.TRONFIRE_LAN_HOST || '').split('/')[0] || '';
+  const primaryHealthUrl = process.env.HA_PRIMARY_HEALTH_URL || (primaryHost ? `http://${primaryHost}:${port}/health` : process.env.TRONSOFTOS_HEALTH_URL || '');
   const current = {
     ...base,
     SESSION_SECRET: base.SESSION_SECRET || process.env.SESSION_SECRET || '',
@@ -1213,7 +1323,8 @@ function exportPairingContent() {
     HA_VIP: process.env.HA_VIP || base.HA_VIP || '',
     HA_VIP_CIDR: process.env.HA_VIP_CIDR || base.HA_VIP_CIDR || ((process.env.HA_VIP || base.HA_VIP) ? `${process.env.HA_VIP || base.HA_VIP}/24` : ''),
     HA_ROUTER_ID: process.env.HA_ROUTER_ID || base.HA_ROUTER_ID || '',
-    HA_AUTH_PASS: process.env.HA_AUTH_PASS || base.HA_AUTH_PASS || ''
+    HA_AUTH_PASS: process.env.HA_AUTH_PASS || base.HA_AUTH_PASS || '',
+    HA_PRIMARY_HEALTH_URL: primaryHealthUrl
   };
   return normalizePairingContent(Object.entries(current)
     .filter(([, value]) => String(value || '').trim())
@@ -1339,6 +1450,74 @@ async function tronfireHaStatus() {
   }
 }
 
+function summarizeTronfireHaStatus(payload) {
+  const databases = Array.isArray(payload?.databases) ? payload.databases : [];
+  const activeDatabases = databases.filter(db => db.standbyRequiredForPromotion !== false);
+  const readyDatabases = activeDatabases.filter(db => String(db.standbyStatus || '').toUpperCase() === 'READY');
+  const latestBackupAt = activeDatabases
+    .map(db => db.lastStandbyBackupAt)
+    .filter(Boolean)
+    .sort((a, b) => new Date(b) - new Date(a))[0] || null;
+  const latestValidatedAt = activeDatabases
+    .map(db => db.lastStandbyValidatedAt)
+    .filter(Boolean)
+    .sort((a, b) => new Date(b) - new Date(a))[0] || null;
+  return {
+    ok: true,
+    deploymentMode: payload?.deploymentMode || null,
+    nodeRole: payload?.nodeRole || null,
+    databaseCount: activeDatabases.length,
+    readyCount: readyDatabases.length,
+    allReady: activeDatabases.length > 0 && readyDatabases.length === activeDatabases.length,
+    latestBackupAt,
+    latestValidatedAt,
+    databases: activeDatabases.map(db => ({
+      alias: db.alias,
+      name: db.name,
+      standbyStatus: db.standbyStatus,
+      lastStandbyBackupAt: db.lastStandbyBackupAt,
+      lastStandbyValidatedAt: db.lastStandbyValidatedAt
+    }))
+  };
+}
+
+function haFailoverStatus() {
+  const settings = publicHaFailoverSettings();
+  const identity = nodeIdentity();
+  const guard = clusterGuard();
+  const elapsedSeconds = primaryDownSince ? Math.max(0, Math.floor((Date.now() - primaryDownSince) / 1000)) : 0;
+  const remainingSeconds = primaryDownSince ? Math.max(0, settings.timeoutSeconds - elapsedSeconds) : null;
+  return {
+    ...settings,
+    mode: identity.deploymentMode,
+    nodeRole: identity.nodeRole,
+    watchdogActive: identity.deploymentMode === 'ha' && identity.nodeRole === 'standby' && !!settings.primaryHealthUrl,
+    primaryDownSince: primaryDownSince ? new Date(primaryDownSince).toISOString() : null,
+    elapsedSeconds,
+    remainingSeconds,
+    inProgress: autoFailoverInProgress,
+    canPromote: guard.canPromote,
+    guardStatus: guard.status,
+    guardReason: guard.reason
+  };
+}
+
+async function remoteTronfireHaStatus(host) {
+  const targetHost = String(host || '').trim();
+  if (!targetHost) return null;
+  const base = /^https?:\/\//i.test(targetHost) ? targetHost : `http://${targetHost}:${port}`;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3500);
+    const response = await fetch(new URL('/tronfire/api/ha/status', base), { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!response.ok) return { ok: false, url: base, status: response.status };
+    return { ...summarizeTronfireHaStatus(await response.json()), url: base };
+  } catch (err) {
+    return { ok: false, url: base, error: err.message };
+  }
+}
+
 async function remoteTronsoftosHealth(host) {
   const targetHost = String(host || '').trim();
   if (!targetHost) return null;
@@ -1452,7 +1631,8 @@ function clusterStatus() {
       nodeState: process.env.HA_NODE_ROLE || null,
       priority: process.env.HA_PRIORITY || null
     },
-    sync: haSyncStatus()
+    sync: haSyncStatus(),
+    failover: haFailoverStatus()
   };
 }
 
@@ -1904,7 +2084,7 @@ async function importPairingFile(body) {
   const result = parseJsonLines(out.stdout).at(-1) || { ok: true };
 
   process.env.TRONSOFTOS_INTERNAL_TOKEN = pairing.values.TRONSOFTOS_INTERNAL_TOKEN;
-  for (const key of ['HA_VIP', 'HA_VIP_CIDR', 'HA_ROUTER_ID', 'HA_AUTH_PASS']) {
+  for (const key of ['HA_VIP', 'HA_VIP_CIDR', 'HA_ROUTER_ID', 'HA_AUTH_PASS', 'HA_PRIMARY_HEALTH_URL']) {
     if (pairing.values[key]) process.env[key] = pairing.values[key];
   }
   appendEvent('CLUSTER_PAIRING_IMPORTED', {
@@ -1952,14 +2132,18 @@ function exportPairingFile(reply) {
 }
 
 async function dashboard() {
-  const [apps, tronfireHa] = await Promise.all([appsStatus(), tronfireHaStatus()]);
+  const [apps, localTronfireHa] = await Promise.all([appsStatus(), tronfireHaStatus()]);
   const cluster = clusterStatus();
+  const identity = cluster.identity || nodeIdentity();
   if (cluster.mode === 'ha' && cluster.sync?.standbyHost) {
     cluster.standbyHealth = await remoteTronsoftosHealth(cluster.sync.standbyHost);
   }
+  const tronfireHa = cluster.mode === 'ha' && identity.nodeRole === 'primary' && cluster.sync?.standbyHost
+    ? await remoteTronfireHaStatus(cluster.sync.standbyHost)
+    : localTronfireHa;
   if (tronfireHa && cluster.sync) {
     cluster.sync.tronfireStandby = tronfireHa;
-    const requiredReady = tronfireHa.allReady === true;
+    const requiredReady = tronfireHa.ok !== false && tronfireHa.allReady === true;
     const latestRestoredBackupAt = tronfireHa.latestBackupAt ? new Date(tronfireHa.latestBackupAt).getTime() : 0;
     const latestReceivedBackupAt = cluster.sync.receiver?.latestBackup?.modifiedAt ? new Date(cluster.sync.receiver.latestBackup.modifiedAt).getTime() : 0;
     const latestBackupAtMs = latestRestoredBackupAt || latestReceivedBackupAt;
@@ -1967,6 +2151,7 @@ async function dashboard() {
     cluster.sync.standbyLagMinutes = lagMinutes;
     cluster.sync.standbyReady = requiredReady && lagMinutes !== null && lagMinutes <= Number(cluster.sync.intervalMinutes || 10) * 2;
     cluster.sync.promotionReady = cluster.sync.standbyReady && cluster.sync.status !== 'failed';
+    cluster.sync.receiverReady = ['standby', 'recovery'].includes(identity.nodeRole) && cluster.sync.standbyReady;
   }
   const backups = await backupStatus();
   const alerts = [];
@@ -1974,6 +2159,14 @@ async function dashboard() {
   if (buildsDiffer(cluster.build, cluster.standbyHealth)) alerts.push({ severity: 'warning', message: `Nós HA em versões diferentes: local ${cluster.build.commit || cluster.build.version}, standby ${cluster.standbyHealth.commit || cluster.standbyHealth.version}` });
   if (cluster.mode === 'ha' && !cluster.lock) alerts.push({ severity: 'warning', message: 'Cluster HA sem cluster-lock' });
   if (cluster.sync?.status === 'failed') alerts.push({ severity: 'critical', message: 'Sync HA falhou na ultima execucao' });
+  if (cluster.failover?.primaryDownSince) {
+    alerts.push({
+      severity: cluster.failover.enabled ? 'critical' : 'warning',
+      message: cluster.failover.enabled
+        ? `Primary indisponivel: failover automatico em ${cluster.failover.remainingSeconds ?? 0}s`
+        : 'Primary indisponivel: failover em modo manual'
+    });
+  }
   if (cluster.sync?.enabled && cluster.sync?.standbyLagMinutes !== null && cluster.sync.standbyLagMinutes > Number(cluster.sync.intervalMinutes || 10) * 2) {
     alerts.push({ severity: 'warning', message: `Standby atrasado: ${cluster.sync.standbyLagMinutes} min sem backup recebido` });
   }
@@ -2289,6 +2482,85 @@ function startHaSyncScheduler() {
   if (typeof haSyncSchedulerTimer.unref === 'function') haSyncSchedulerTimer.unref();
 }
 
+async function primaryHealthOk(url) {
+  if (!url) return false;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2500);
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function maybeAutoFailover() {
+  const identity = nodeIdentity();
+  const settings = publicHaFailoverSettings();
+  if (identity.deploymentMode !== 'ha' || identity.nodeRole !== 'standby' || !settings.primaryHealthUrl) {
+    primaryDownSince = 0;
+    return;
+  }
+
+  if (await primaryHealthOk(settings.primaryHealthUrl)) {
+    if (primaryDownSince) appendEvent('HA_FAILOVER_PRIMARY_RECOVERED', { primaryHealthUrl: settings.primaryHealthUrl });
+    primaryDownSince = 0;
+    return;
+  }
+
+  if (!primaryDownSince) {
+    primaryDownSince = Date.now();
+    appendEvent('HA_FAILOVER_PRIMARY_DOWN_DETECTED', { primaryHealthUrl: settings.primaryHealthUrl, timeoutSeconds: settings.timeoutSeconds });
+    return;
+  }
+
+  const elapsedSeconds = Math.floor((Date.now() - primaryDownSince) / 1000);
+  if (elapsedSeconds < settings.timeoutSeconds || autoFailoverInProgress) return;
+  if (!settings.enabled) return;
+
+  const localTronfireHa = await tronfireHaStatus();
+  if (!localTronfireHa?.allReady) {
+    appendEvent('HA_FAILOVER_AUTO_BLOCKED', { reason: 'standby nao esta READY', elapsedSeconds, tronfireHa: localTronfireHa });
+    return;
+  }
+
+  try {
+    autoFailoverInProgress = true;
+    const currentLock = clusterLock();
+    const lock = writeClusterLock({
+      ...currentLock,
+      cluster: identity.clusterId,
+      active_node: String(currentLock.active_node || 'primary-offline'),
+      this_node: identity.nodeName,
+      allow_promotion: true,
+      reason: `failover automatico: primary indisponivel por ${elapsedSeconds}s`
+    });
+    appendEvent('HA_FAILOVER_AUTO_PROMOTING', { elapsedSeconds, lock });
+    await activateLocalNode({ reason: `failover automatico: primary indisponivel por ${elapsedSeconds}s` });
+    primaryDownSince = 0;
+    appendEvent('HA_FAILOVER_AUTO_PROMOTED', { elapsedSeconds });
+  } catch (err) {
+    appendEvent('HA_FAILOVER_AUTO_FAILED', { error: err.message, elapsedSeconds });
+  } finally {
+    autoFailoverInProgress = false;
+  }
+}
+
+function startHaFailoverWatchdog() {
+  if (haFailoverWatchdogTimer) return;
+  haFailoverWatchdogTimer = setInterval(() => {
+    maybeAutoFailover().catch(err => appendEvent('HA_FAILOVER_WATCHDOG_ERROR', { error: err.message }));
+  }, Math.max(publicHaFailoverSettings().checkIntervalSeconds, 2) * 1000);
+  if (typeof haFailoverWatchdogTimer.unref === 'function') haFailoverWatchdogTimer.unref();
+}
+
+function restartHaFailoverWatchdog() {
+  if (haFailoverWatchdogTimer) clearInterval(haFailoverWatchdogTimer);
+  haFailoverWatchdogTimer = null;
+  startHaFailoverWatchdog();
+}
+
 function startCommandJob({ app, action, command, args, env = process.env, cwd = appRoot, eventPrefix = 'MAINTENANCE' }) {
   const id = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
   const job = {
@@ -2600,13 +2872,15 @@ async function handleApi(req, reply, url) {
   if (req.method === 'GET' && url.pathname === '/api/cluster/lock') return json(reply, 200, clusterLock());
   if (req.method === 'PATCH' && url.pathname === '/api/cluster/lock') return json(reply, 200, writeClusterLock(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/cluster/promotion/block') return json(reply, 200, blockClusterPromotion((await readBody(req).catch(() => ({}))).reason));
-  if (req.method === 'POST' && url.pathname === '/api/cluster/activate-local') return json(reply, 200, activateLocalNode(await readBody(req).catch(() => ({}))));
+  if (req.method === 'POST' && url.pathname === '/api/cluster/activate-local') return json(reply, 200, await activateLocalNode(await readBody(req).catch(() => ({}))));
   if (req.method === 'POST' && url.pathname === '/api/cluster/recovery-local') return json(reply, 200, putLocalNodeInRecovery(await readBody(req).catch(() => ({}))));
   if (req.method === 'GET' && url.pathname === '/api/cluster/network-impact') return json(reply, 200, await clusterNetworkImpact(url.searchParams.get('proposed') || ''));
   if (req.method === 'GET' && url.pathname === '/api/cluster/sync') return json(reply, 200, publicHaSyncSettings());
   if (req.method === 'GET' && url.pathname === '/api/cluster/sync/logs') return json(reply, 200, haSyncLogs(url.searchParams.get('file') || ''));
   if (req.method === 'PATCH' && url.pathname === '/api/cluster/sync') return json(reply, 200, writeHaSyncSettings(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/cluster/sync/run') return json(reply, 202, { ok: true, job: startHaSync() });
+  if (req.method === 'GET' && url.pathname === '/api/cluster/failover') return json(reply, 200, haFailoverStatus());
+  if (req.method === 'PATCH' && url.pathname === '/api/cluster/failover') return json(reply, 200, writeHaFailoverSettings(await readBody(req)));
   if (req.method === 'GET' && url.pathname === '/api/node-identity') return json(reply, 200, nodeIdentity());
   if (req.method === 'PATCH' && url.pathname === '/api/node-identity') return json(reply, 200, writeNodeIdentity(await readBody(req)));
   if (req.method === 'GET' && url.pathname === '/api/backups') return json(reply, 200, await backupStatus());
@@ -2676,6 +2950,7 @@ const server = http.createServer(async (req, reply) => {
 server.listen(port, '0.0.0.0', () => {
   ensureStateDir();
   startHaSyncScheduler();
+  startHaFailoverWatchdog();
   appendEvent('TRONSOFTOS_STARTED', { port });
   console.log(`TronSoftOS listening on 0.0.0.0:${port}`);
 });
