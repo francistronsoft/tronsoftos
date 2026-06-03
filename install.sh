@@ -113,6 +113,25 @@ env_value() {
   grep "^$key=" "$file" | tail -n1 | cut -d= -f2-
 }
 
+run_with_retry() {
+  local label="$1"
+  shift
+  local attempt
+  local max_attempts="${INSTALL_RETRY_ATTEMPTS:-4}"
+  for attempt in $(seq 1 "$max_attempts"); do
+    echo "$label (tentativa $attempt/$max_attempts)..."
+    if "$@"; then
+      return 0
+    fi
+    if [ "$attempt" -lt "$max_attempts" ]; then
+      echo "Aviso: $label falhou. Nova tentativa em $((attempt * 20))s..." >&2
+      sleep $((attempt * 20))
+    fi
+  done
+  echo "Falha em $label apos $max_attempts tentativas." >&2
+  return 1
+}
+
 if [ "$(id -u)" -ne 0 ]; then
   echo "Execute como root: sudo ./install.sh" >&2
   exit 77
@@ -239,11 +258,11 @@ systemctl enable --now tronsoftos-rclone-backup.timer
 echo "Subindo TronFire e aplicando migrations..."
 cd "$APP_DIR/apps/tronfire"
 if [ "${FIREBIRD_EXEC_MODE:-container}" = "host" ]; then
-  docker compose -f docker-compose.yml -f docker-compose.host-firebird.yml up -d --build
+  run_with_retry "Subindo TronFire" docker compose -f docker-compose.yml -f docker-compose.host-firebird.yml up -d --build
   docker compose -f docker-compose.yml -f docker-compose.host-firebird.yml exec -T backend npx prisma migrate deploy
   docker compose -f docker-compose.yml -f docker-compose.host-firebird.yml exec -T backend node prisma/seed.js
 else
-  docker compose up -d --build
+  run_with_retry "Subindo TronFire" docker compose up -d --build
   docker compose exec -T backend npx prisma migrate deploy
   docker compose exec -T backend node prisma/seed.js
 fi
