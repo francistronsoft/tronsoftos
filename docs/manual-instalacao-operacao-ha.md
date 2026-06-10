@@ -61,6 +61,7 @@ Levante estes dados antes de iniciar:
 - Se havera modo HA ou instalacao simples.
 - Se o Firebird sera host. O padrao atual e Firebird no host Debian.
 - Dados do rclone, se backup externo ja for configurado.
+- Alias do primeiro banco de producao: obrigatoriamente `erp_tronsoft`.
 
 ## Instalacao no Debian
 
@@ -115,6 +116,8 @@ http://VIP:8080
 ```
 
 ## Configuracao Inicial HA
+
+Antes de iniciar os testes de backup e sincronismo, cadastre o banco principal do cliente no TronFire. Em uma instalacao de producao limpa, o primeiro banco marcado como `Producao` deve usar obrigatoriamente o alias `erp_tronsoft`. Bancos de homologacao ou legado podem ser criados antes com outros aliases, mas o primeiro banco produtivo permanece reservado para `erp_tronsoft`.
 
 ### 1. Validar IP fixo
 

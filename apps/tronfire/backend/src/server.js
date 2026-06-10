@@ -33,6 +33,7 @@ const clusterSecretsPath = process.env.TRONSOFTOS_CLUSTER_SECRETS || path.join(p
 const firebirdExecMode = String(process.env.FIREBIRD_EXEC_MODE || 'container').toLowerCase();
 const tronsoftosApiUrl = String(process.env.TRONSOFTOS_API_URL || 'http://host.docker.internal:8080').replace(/\/+$/, '');
 const firebirdInternalHost = process.env.FIREBIRD_HOST || 'host.docker.internal';
+const defaultProductionAlias = 'erp_tronsoft';
 
 await app.register(cors, { origin: true, credentials: true });
 await app.register(cookie, { secret: process.env.SESSION_SECRET || 'dev-secret-change-me' });
@@ -78,6 +79,10 @@ function normalizeName(name) {
   const value = String(name || '').trim();
   if (!value) throw new Error('Nome do banco nao informado');
   return value;
+}
+
+function isProductionDatabaseRequest(body = {}) {
+  return body.isPrimary === true || String(body.type || '').toUpperCase() === 'PRODUCAO';
 }
 
 function databasePathForAlias(alias) {
@@ -881,8 +886,20 @@ app.post('/api/databases', { preHandler: requireOperator }, async (req, reply) =
   assertPrimaryWritable();
   const body = req.body || {};
   const name = normalizeName(body.name);
-  const databaseCount = await prisma.managedDatabase.count();
-  const alias = normalizeAlias(databaseCount === 0 ? 'ERP_TRONSOFT' : body.alias);
+  const isProduction = isProductionDatabaseRequest(body);
+  const productionCount = await prisma.managedDatabase.count({
+    where: {
+      OR: [
+        { isPrimary: true },
+        { type: 'PRODUCAO' }
+      ]
+    }
+  });
+  const requestedAlias = normalizeAlias(body.alias || (isProduction && productionCount === 0 ? defaultProductionAlias : ''));
+  if (isProduction && productionCount === 0 && requestedAlias !== defaultProductionAlias) {
+    return reply.code(400).send({ error: `O primeiro banco de producao deve usar obrigatoriamente o alias ${defaultProductionAlias}` });
+  }
+  const alias = isProduction && productionCount === 0 ? defaultProductionAlias : requestedAlias;
   const filePath = databasePathForAlias(alias);
   const existing = await prisma.managedDatabase.findFirst({
     where: { OR: [{ alias }, { filePath }] }
@@ -924,6 +941,19 @@ app.post('/api/databases/sync-aliases', { preHandler: requireAdmin }, async () =
 app.post('/api/databases/:id/mark-primary', { preHandler: requireAdmin }, async (req) => {
   assertPrimaryWritable();
   const id = req.params.id;
+  const target = await prisma.managedDatabase.findUniqueOrThrow({ where: { id } });
+  const productionCount = await prisma.managedDatabase.count({
+    where: {
+      id: { not: id },
+      OR: [
+        { isPrimary: true },
+        { type: 'PRODUCAO' }
+      ]
+    }
+  });
+  if (productionCount === 0 && target.alias !== defaultProductionAlias) {
+    throw new Error(`O primeiro banco de producao deve usar obrigatoriamente o alias ${defaultProductionAlias}`);
+  }
   await prisma.managedDatabase.updateMany({ where: { isPrimary: true }, data: { isPrimary: false, type: 'LEGADO_CONSULTA', accessMode: 'READ_ONLY' } });
   const db = await prisma.managedDatabase.update({ where: { id }, data: { isPrimary: true, type: 'PRODUCAO', accessMode: 'READ_WRITE', backupEnabled: true } });
   await audit(req, 'DATABASE_MARKED_PRIMARY', { entityType: 'database', entityId: id });

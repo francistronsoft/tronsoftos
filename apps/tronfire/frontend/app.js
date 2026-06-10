@@ -621,7 +621,7 @@ async function databases() {
     api('/api/services/firebird'),
     api('/api/ha/status').catch(() => null)
   ]);
-  const firstDatabase = dbs.length === 0;
+  const hasProductionDatabase = dbs.some(db => db.isPrimary || db.type === 'PRODUCAO');
   const diagnosticById = new Map((diagnosticData.databases || []).map(db => [db.id, db]));
   content.innerHTML = `
     <div class="page-header"><h2 class="page-title">Bancos</h2></div>
@@ -632,9 +632,10 @@ async function databases() {
       <h3>Criar banco</h3>
       <div class="row g-2">
         <div class="col-md"><input id="dbName" class="form-control" placeholder="Nome do cliente"></div>
-        <div class="col-md"><input id="dbAlias" class="form-control" placeholder="ERP_TRONSOFT" value="${firstDatabase ? 'ERP_TRONSOFT' : ''}" ${firstDatabase ? 'readonly' : ''}></div>
+        <div class="col-md"><input id="dbAlias" class="form-control" placeholder="erp_tronsoft" value="${hasProductionDatabase ? '' : 'ERP_TRONSOFT'}" ${hasProductionDatabase ? '' : 'readonly'}></div>
         <div class="col-md"><select id="dbType" class="form-select"><option value="PRODUCAO">Producao</option><option value="LEGADO_CONSULTA">Legado/Consulta</option><option value="HOMOLOGACAO">Homologacao</option></select></div>
         <div class="col-auto"><button id="btnAddDb" class="btn btn-primary">Criar</button></div>
+        <div class="col-12"><div class="form-text">O primeiro banco de producao usa obrigatoriamente o alias erp_tronsoft.</div></div>
         <div class="col-12"><div id="dbError" class="text-danger small mt-2"></div></div>
       </div>
     </div></div>
@@ -670,10 +671,24 @@ async function databases() {
       </tr>`;
     }).join('')}</tbody></table></div></div>`;
 
+  const syncAliasLock = () => {
+    const firstProduction = !hasProductionDatabase && dbType.value === 'PRODUCAO';
+    dbAlias.readOnly = firstProduction;
+    if (firstProduction) {
+      dbAlias.value = 'ERP_TRONSOFT';
+    } else if (dbAlias.value === 'ERP_TRONSOFT') {
+      dbAlias.value = '';
+    }
+  };
+  dbType.onchange = syncAliasLock;
+  syncAliasLock();
+
   btnAddDb.onclick = async () => {
     try {
       dbError.textContent = '';
-      await api('/api/databases', { method:'POST', body: JSON.stringify({ name: dbName.value, alias: firstDatabase ? 'ERP_TRONSOFT' : dbAlias.value, type: dbType.value, isPrimary: dbType.value === 'PRODUCAO', accessMode: dbType.value === 'LEGADO_CONSULTA' ? 'READ_ONLY':'READ_WRITE', backupEnabled: dbType.value === 'PRODUCAO' }) });
+      const isProduction = dbType.value === 'PRODUCAO';
+      const alias = !hasProductionDatabase && isProduction ? 'ERP_TRONSOFT' : dbAlias.value;
+      await api('/api/databases', { method:'POST', body: JSON.stringify({ name: dbName.value, alias, type: dbType.value, isPrimary: isProduction, accessMode: dbType.value === 'LEGADO_CONSULTA' ? 'READ_ONLY':'READ_WRITE', backupEnabled: isProduction }) });
       databases();
     } catch (err) {
       dbError.textContent = err.message;
