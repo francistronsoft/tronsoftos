@@ -249,7 +249,7 @@ DEFAULT_DNS="$(detect_dns_servers)"
 line
 echo "Rede do servidor"
 echo "Informe o IP real deste Debian. Este IP deve existir na placa de rede do host."
-echo "A configuracao de IP fixo sera feita depois no painel do TronSoftOS."
+echo "Em HA, fixe o IP real do host antes de liberar o cliente em producao."
 line
 
 SERVER_IP="$DEFAULT_SERVER_IP"
@@ -260,6 +260,17 @@ STATIC_IP_GATEWAY="$DEFAULT_GATEWAY"
 STATIC_IP_DNS="${DEFAULT_DNS:-1.1.1.1 8.8.8.8}"
 STATIC_IP_APPLY_NOW="false"
 SERVER_IP="$(ask "IP atual deste servidor na rede do cliente" "$DEFAULT_SERVER_IP")"
+if [ "$DEPLOYMENT_MODE" = "ha" ] || yes_no "Deseja gravar IP fixo do host agora? (s/n)" "n"; then
+  STATIC_IP_ENABLED="true"
+  STATIC_IP_INTERFACE="$(ask "Interface do IP fixo" "${STATIC_IP_INTERFACE:-eth0}")"
+  STATIC_IP_ADDRESS_CIDR="$(ask "IP fixo/mascara CIDR deste host" "${STATIC_IP_ADDRESS_CIDR:-$SERVER_IP/24}")"
+  STATIC_IP_GATEWAY="$(ask "Gateway" "$STATIC_IP_GATEWAY")"
+  STATIC_IP_DNS="$(ask "DNS (separe por espaco)" "$STATIC_IP_DNS")"
+  SERVER_IP="$(ipv4_without_cidr "$STATIC_IP_ADDRESS_CIDR")"
+  if yes_no "Aplicar IP fixo agora? Pode derrubar a sessao SSH se o IP mudar. (s/n)" "n"; then
+    STATIC_IP_APPLY_NOW="true"
+  fi
+fi
 
 FIREBIRD_MODE="host"
 echo "Firebird 2.5.9 sera instalado/usado no host Debian."
@@ -284,16 +295,22 @@ echo "Cloudflare sera configurado depois no painel do TronSoftOS."
 
 HA_INTERFACE=""
 HA_VIP=""
+HA_VIP_CIDR=""
+HA_ROUTER_ID="51"
+HA_AUTH_PASS=""
 HA_PRIORITY="$([ "$NODE_ROLE" = "primary" ] && echo 150 || echo 100)"
 if [ "$DEPLOYMENT_MODE" = "ha" ]; then
   line
   echo "VIP do HA"
-  echo "O VIP sera configurado depois no painel do TronSoftOS."
   echo "Regra: IP livre na mesma sub-rede/VLAN dos dois nos HA: $(same_ipv4_prefix_hint "${STATIC_IP_ADDRESS_CIDR:-$SERVER_IP}")"
   echo "Nao use o IP real do primary nem do standby como VIP."
   line
   HA_INTERFACE="${STATIC_IP_INTERFACE:-$DEFAULT_IFACE}"
-  HA_VIP=""
+  HA_INTERFACE="$(ask "Interface do VIP/Keepalived" "$HA_INTERFACE")"
+  HA_VIP_CIDR="$(ask "VIP/CIDR do cluster" "${SERVER_IP%.*}.150/24")"
+  HA_VIP="$(ipv4_without_cidr "$HA_VIP_CIDR")"
+  HA_ROUTER_ID="$(ask "Router ID VRRP" "51")"
+  HA_AUTH_PASS="$(ask "Senha VRRP" "vip123")"
   echo "Prioridade Keepalived definida automaticamente: $HA_PRIORITY"
 fi
 
@@ -323,8 +340,9 @@ HOST_STATIC_IP_DNS="$STATIC_IP_DNS"
 
 HA_INTERFACE=$HA_INTERFACE
 HA_VIP=$HA_VIP
-HA_ROUTER_ID=51
-HA_AUTH_PASS=
+HA_VIP_CIDR=$HA_VIP_CIDR
+HA_ROUTER_ID=$HA_ROUTER_ID
+HA_AUTH_PASS=$HA_AUTH_PASS
 HA_NODE_ROLE=$([ "$NODE_ROLE" = "primary" ] && echo MASTER || echo BACKUP)
 HA_PRIORITY=$HA_PRIORITY
 
@@ -334,10 +352,11 @@ FIREBIRD_BACKUP_DIR=/opt/tronfire-storage/firebird/backups
 FIREBIRD_SYNC_MODE=backups
 FIREBIRD_DB_PATTERN=*.fdb
 FIREBIRD_RSYNC_TARGET=
-FIREBIRD_RSYNC_SSH_USER=tronsoftos
+FIREBIRD_RSYNC_SSH_USER=tronsoft
 FIREBIRD_RSYNC_SSH_PORT=22
-HA_SYNC_SSH_USER=tronsoftos
+HA_SYNC_SSH_USER=tronsoft
 HA_SYNC_SSH_PORT=22
+HA_SYNC_REMOTE_CATALOG_DIR=/tmp/tronfire-catalog
 
 TRONFIRE_POSTGRES_CONTAINER=tronfire_postgres
 TRONFIRE_POSTGRES_DB=tronfire
@@ -459,10 +478,19 @@ SESSION_SECRET=$SESSION_SECRET
 TRONSOFTOS_INTERNAL_TOKEN=$INTERNAL_TOKEN
 POSTGRES_PASSWORD=$POSTGRES_PASSWORD
 FIREBIRD_PASSWORD=$FIREBIRD_PASSWORD
+HA_SYNC_SSH_USER=tronsoft
 EOF
 
 if [ -f "$SSH_PUBLIC_KEY_PATH" ]; then
   printf "TRONSOFTOS_SSH_PUBLIC_KEY='%s'\n" "$(cat "$SSH_PUBLIC_KEY_PATH")" >> "$CLUSTER_SECRETS"
+fi
+if [ -n "$HA_VIP" ]; then
+  {
+    printf 'HA_VIP=%s\n' "$HA_VIP"
+    printf 'HA_VIP_CIDR=%s\n' "$HA_VIP_CIDR"
+    printf 'HA_ROUTER_ID=%s\n' "$HA_ROUTER_ID"
+    printf 'HA_AUTH_PASS=%s\n' "$HA_AUTH_PASS"
+  } >> "$CLUSTER_SECRETS"
 fi
 
 cat > "$NODE_IDENTITY" <<EOF
@@ -576,6 +604,14 @@ echo "- $TRONCOMANDA_ENV"
 echo "- $MANAGED_APPS"
 echo "- $CLUSTER_SECRETS"
 echo "- $NODE_IDENTITY"
+if [ "$STATIC_IP_ENABLED" = "true" ]; then
+  echo "- IP fixo: $STATIC_IP_ADDRESS_CIDR em $STATIC_IP_INTERFACE"
+  if [ "$STATIC_IP_APPLY_NOW" = "true" ]; then
+    configure_static_ip "$STATIC_IP_INTERFACE" "$STATIC_IP_ADDRESS_CIDR" "$STATIC_IP_GATEWAY" "$STATIC_IP_DNS" "true" || true
+  else
+    echo "  Aplicacao do IP fixo ficara disponivel pelo painel TronSoftOS."
+  fi
+fi
 line
 echo "Proximos comandos sugeridos:"
 if [ "$FIREBIRD_MODE" = "host" ]; then

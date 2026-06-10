@@ -7,8 +7,8 @@ set -euo pipefail
 : "${FIREBIRD_DB_PATTERN:=*.fdb}"
 : "${FIREBIRD_RSYNC_TARGET:?missing FIREBIRD_RSYNC_TARGET}"
 
-APP_DIR="${TRONSOFTOS_APP_DIR:-/opt/tronos}"
-RSYNC_SSH_USER="${FIREBIRD_RSYNC_SSH_USER:-tronsoftos}"
+APP_DIR="${TRONSOFTOS_APP_DIR:-/opt/tronsoftos}"
+RSYNC_SSH_USER="${FIREBIRD_RSYNC_SSH_USER:-tronsoft}"
 RSYNC_SSH_PORT="${FIREBIRD_RSYNC_SSH_PORT:-22}"
 KNOWN_HOSTS="${TRONSOFTOS_SSH_KNOWN_HOSTS:-${APP_DIR}/state/known_hosts}"
 IDENTITY_FILE="${TRONSOFTOS_SSH_IDENTITY_FILE:-${APP_DIR}/state/ssh/id_ed25519}"
@@ -27,7 +27,7 @@ if [[ "${FIREBIRD_STOP_DURING_SYNC:-false}" == "true" ]]; then
 fi
 
 if [[ "$FIREBIRD_SYNC_MODE" == "database-files" ]]; then
-  rsync -aHAX --numeric-ids --delete \
+  rsync -aHAX --no-owner --no-group --delete \
     -e "$SSH_OPTS" \
     --include="$FIREBIRD_DB_PATTERN" \
     --include='*/' \
@@ -35,7 +35,7 @@ if [[ "$FIREBIRD_SYNC_MODE" == "database-files" ]]; then
     "${FIREBIRD_DATA_DIR%/}/" \
     "${RSYNC_SSH_USER}@${FIREBIRD_RSYNC_TARGET}"
 else
-  rsync -aHAX --numeric-ids \
+  rsync -aHAX --no-owner --no-group \
     -e "$SSH_OPTS" \
     --include='*.gbk' \
     --include='*.fbk' \

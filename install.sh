@@ -113,6 +113,29 @@ env_value() {
   grep "^$key=" "$file" | tail -n1 | cut -d= -f2-
 }
 
+ensure_ha_sync_ssh_user() {
+  local ssh_user="$1"
+  local app_dir="$2"
+  [ -n "$ssh_user" ] || return 0
+  if ! id "$ssh_user" >/dev/null 2>&1; then
+    echo "Aviso: usuario SSH HA '$ssh_user' nao existe neste host; ajuste antes de usar Sync HA." >&2
+    return 0
+  fi
+  usermod -aG docker "$ssh_user" || true
+  if [ "$ssh_user" != "$USER_NAME" ] && [ -r "$app_dir/state/ssh/id_ed25519.pub" ]; then
+    local home_dir ssh_dir authorized_keys
+    home_dir="$(getent passwd "$ssh_user" | cut -d: -f6)"
+    if [ -n "$home_dir" ] && [ -d "$home_dir" ]; then
+      ssh_dir="$home_dir/.ssh"
+      authorized_keys="$ssh_dir/authorized_keys"
+      install -d -m 0700 -o "$ssh_user" -g "$ssh_user" "$ssh_dir"
+      touch "$authorized_keys"
+      chown "$ssh_user:$ssh_user" "$authorized_keys"
+      chmod 0600 "$authorized_keys"
+    fi
+  fi
+}
+
 run_with_retry() {
   local label="$1"
   shift
@@ -199,6 +222,9 @@ if [ "${TRONSOFTOS_SKIP_WIZARD:-false}" != "true" ]; then
   TRONSOFTOS_APP_DIR="$APP_DIR" bash "$APP_DIR/scripts/configure-wizard.sh"
 fi
 
+HA_SYNC_SSH_USER_VALUE="$(env_value "$ENV_FILE" "HA_SYNC_SSH_USER")"
+ensure_ha_sync_ssh_user "${HA_SYNC_SSH_USER_VALUE:-tronsoft}" "$APP_DIR"
+
 prepare_frontend
 
 echo "Preparando TronFire..."
@@ -240,6 +266,18 @@ chown "$USER_NAME:$GROUP_NAME" "$APP_DIR/state/events.jsonl"
 chmod 700 "$APP_DIR/state"
 chmod 600 "$APP_DIR/state/events.jsonl"
 chmod +x "$APP_DIR/scripts/"*.sh "$APP_DIR/infra/keepalived/check-tronsoftos.sh"
+
+if [ "$(env_value "$ENV_FILE" "TRONSOFTOS_DEPLOYMENT_MODE")" = "ha" ] && [ -n "$(env_value "$ENV_FILE" "HA_VIP_CIDR")" ]; then
+  echo "Aplicando VIP/Keepalived conforme configuracao do instalador..."
+  /usr/local/sbin/tronsoftos-network apply-vip \
+    "$APP_DIR" \
+    "$(env_value "$ENV_FILE" "HA_INTERFACE")" \
+    "$(env_value "$ENV_FILE" "HA_VIP_CIDR")" \
+    "$(env_value "$ENV_FILE" "HA_ROUTER_ID")" \
+    "$(env_value "$ENV_FILE" "HA_AUTH_PASS")" \
+    "$(env_value "$ENV_FILE" "HA_NODE_ROLE")" \
+    "$(env_value "$ENV_FILE" "HA_PRIORITY")" || echo "Aviso: nao foi possivel aplicar VIP durante a instalacao; ajuste pelo painel TronSoftOS." >&2
+fi
 
 systemctl daemon-reload
 

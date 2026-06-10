@@ -54,8 +54,10 @@ apply_pairing() {
   local tronfire_env="$app_dir/apps/tronfire/.env"
   local troncomanda_env="$app_dir/apps/troncomanda/.env"
   local cluster_secrets="$app_dir/state/cluster-secrets.env"
-  local ssh_dir="$app_dir/.ssh"
-  local authorized_keys="$ssh_dir/authorized_keys"
+  local ssh_user="${HA_SYNC_SSH_USER:-}"
+  local ssh_home=""
+  local ssh_dir=""
+  local authorized_keys=""
   local ssh_key_imported=false
 
   valid_app_dir "$app_dir" || fail "Diretorio da aplicacao invalido"
@@ -69,10 +71,15 @@ apply_pairing() {
   [ -n "${TRONSOFTOS_INTERNAL_TOKEN:-}" ] || fail "TRONSOFTOS_INTERNAL_TOKEN ausente no pareamento"
   [ -n "${POSTGRES_PASSWORD:-}" ] || fail "POSTGRES_PASSWORD ausente no pareamento"
   [ -n "${FIREBIRD_PASSWORD:-}" ] || fail "FIREBIRD_PASSWORD ausente no pareamento"
+  ssh_user="${HA_SYNC_SSH_USER:-$ssh_user}"
 
   install -m 0600 "$source_file" "$cluster_secrets"
+  chown tronsoftos:tronsoftos "$cluster_secrets" 2>/dev/null || true
 
   set_env_value "$tronsoftos_env" "TRONSOFTOS_INTERNAL_TOKEN" "$TRONSOFTOS_INTERNAL_TOKEN"
+  if [ -n "${HA_SYNC_SSH_USER:-}" ]; then
+    set_env_value "$tronsoftos_env" "HA_SYNC_SSH_USER" "$HA_SYNC_SSH_USER"
+  fi
   if [ -n "${HA_VIP:-}" ]; then
     set_env_value "$tronsoftos_env" "HA_VIP" "$HA_VIP"
   fi
@@ -99,19 +106,30 @@ apply_pairing() {
 
   if [ -n "${TRONSOFTOS_SSH_PUBLIC_KEY:-}" ]; then
     [[ "$TRONSOFTOS_SSH_PUBLIC_KEY" =~ ^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521))[[:space:]][A-Za-z0-9+/=]+([[:space:]][A-Za-z0-9_.@:-]+)?$ ]] || fail "Chave publica SSH invalida"
+    ssh_user="${ssh_user:-$(grep '^HA_SYNC_SSH_USER=' "$tronsoftos_env" 2>/dev/null | tail -n1 | cut -d= -f2-)}"
+    ssh_user="${ssh_user:-tronsoft}"
+    if ! id "$ssh_user" >/dev/null 2>&1; then
+      fail "Usuario SSH HA nao existe: $ssh_user"
+    fi
+    ssh_home="$(getent passwd "$ssh_user" | cut -d: -f6)"
+    [ -n "$ssh_home" ] && [ -d "$ssh_home" ] || fail "Home do usuario SSH HA nao encontrado: $ssh_user"
+    ssh_dir="$ssh_home/.ssh"
+    authorized_keys="$ssh_dir/authorized_keys"
     mkdir -p "$ssh_dir"
     touch "$authorized_keys"
     if ! grep -Fxq "$TRONSOFTOS_SSH_PUBLIC_KEY" "$authorized_keys"; then
       printf '%s\n' "$TRONSOFTOS_SSH_PUBLIC_KEY" >> "$authorized_keys"
     fi
-    chown -R tronsoftos:tronsoftos "$ssh_dir" "$app_dir/state" 2>/dev/null || true
+    chown -R "$ssh_user:$ssh_user" "$ssh_dir" 2>/dev/null || true
+    chown -R tronsoftos:tronsoftos "$app_dir/state" 2>/dev/null || true
     chmod 700 "$ssh_dir"
     chmod 600 "$authorized_keys"
+    usermod -aG docker "$ssh_user" 2>/dev/null || true
     ssh_key_imported=true
   fi
 
-  printf '{"ok":true,"clusterSecrets":"%s","tronsoftosEnv":"%s","tronfireEnv":"%s","troncomandaEnvUpdated":%s,"sshKeyImported":%s,"authorizedKeys":"%s"}\n' \
-    "$(json_escape "$cluster_secrets")" "$(json_escape "$tronsoftos_env")" "$(json_escape "$tronfire_env")" "$([ -f "$troncomanda_env" ] && echo true || echo false)" "$ssh_key_imported" "$(json_escape "$authorized_keys")"
+  printf '{"ok":true,"clusterSecrets":"%s","tronsoftosEnv":"%s","tronfireEnv":"%s","troncomandaEnvUpdated":%s,"sshKeyImported":%s,"sshUser":"%s","authorizedKeys":"%s"}\n' \
+    "$(json_escape "$cluster_secrets")" "$(json_escape "$tronsoftos_env")" "$(json_escape "$tronfire_env")" "$([ -f "$troncomanda_env" ] && echo true || echo false)" "$ssh_key_imported" "$(json_escape "${ssh_user:-}")" "$(json_escape "$authorized_keys")"
 }
 
 sync_ip_envs() {

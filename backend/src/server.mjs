@@ -352,10 +352,10 @@ function rawHaSyncSettings() {
     autoEnabled: true,
     intervalMinutes: 10,
     standbyHost: process.env.HA_SYNC_STANDBY_HOST || '',
-    sshUser: process.env.HA_SYNC_SSH_USER || 'tronsoftos',
+    sshUser: process.env.HA_SYNC_SSH_USER || 'tronsoft',
     sshPort: Number(process.env.HA_SYNC_SSH_PORT || 22),
     remoteBackupDir: process.env.HA_SYNC_REMOTE_BACKUP_DIR || '/opt/tronfire-storage/firebird/backups',
-    remoteCatalogDir: process.env.HA_SYNC_REMOTE_CATALOG_DIR || '/opt/tronos/state/tronfire-catalog',
+    remoteCatalogDir: process.env.HA_SYNC_REMOTE_CATALOG_DIR || '/tmp/tronfire-catalog',
     backupDir: process.env.FIREBIRD_BACKUP_DIR || '/opt/tronfire-storage/firebird/backups',
     catalogDir: process.env.TRONFIRE_CATALOG_EXPORT_DIR || path.join(stateDir, 'tronfire-catalog'),
     ...readJson(haSyncSettingsPath, {})
@@ -364,14 +364,14 @@ function rawHaSyncSettings() {
 
 function publicHaSyncSettings(settings = rawHaSyncSettings()) {
   return {
-    enabled: true,
-    autoEnabled: true,
+    enabled: settings.enabled !== false,
+    autoEnabled: settings.autoEnabled !== false,
     intervalMinutes: Number(settings.intervalMinutes || 10),
     standbyHost: settings.standbyHost || '',
-    sshUser: settings.sshUser || 'tronsoftos',
+    sshUser: settings.sshUser || 'tronsoft',
     sshPort: Number(settings.sshPort || 22),
     remoteBackupDir: settings.remoteBackupDir || '/opt/tronfire-storage/firebird/backups',
-    remoteCatalogDir: settings.remoteCatalogDir || '/opt/tronos/state/tronfire-catalog',
+    remoteCatalogDir: settings.remoteCatalogDir || '/tmp/tronfire-catalog',
     backupDir: settings.backupDir || '/opt/tronfire-storage/firebird/backups',
     catalogDir: settings.catalogDir || path.join(stateDir, 'tronfire-catalog')
   };
@@ -425,7 +425,8 @@ function haSyncStatus() {
   const receiverCatalogPath = settings.catalogDir || path.join(stateDir, 'tronfire-catalog');
   const receiverBackupPath = settings.backupDir || '/opt/tronfire-storage/firebird/backups';
   const latestCatalog = latestFileInfo(receiverCatalogPath, /\.(dump)$/i);
-  const latestBackup = latestFileInfo(receiverBackupPath, /\.(gbk|fbk|gbk\.gz|fbk\.gz|manifest\.json)$/i);
+  const latestBackup = latestFileInfo(receiverBackupPath, /\.(gbk|fbk|gbk\.gz|fbk\.gz)$/i);
+  const latestValidatedBackup = latestFileInfo(receiverBackupPath, /\.(manifest\.json)$/i);
   const lastExitCode = lastEvent?.details?.exitCode;
   const intervalMinutes = Number(settings.intervalMinutes || 10);
   const lastSyncAtMs = lastEvent?.createdAt ? new Date(lastEvent.createdAt).getTime() : 0;
@@ -434,9 +435,9 @@ function haSyncStatus() {
     : settings.enabled && settings.autoEnabled
       ? new Date().toISOString()
       : null;
-  const lastBackupAtMs = latestBackup?.modifiedAt ? new Date(latestBackup.modifiedAt).getTime() : 0;
+  const lastBackupAtMs = latestValidatedBackup?.modifiedAt ? new Date(latestValidatedBackup.modifiedAt).getTime() : 0;
   const standbyLagMinutes = lastBackupAtMs ? Math.max(0, Math.round((Date.now() - lastBackupAtMs) / 60000)) : null;
-  const standbyReady = !!latestCatalog && !!latestBackup && (standbyLagMinutes === null || standbyLagMinutes <= intervalMinutes * 2);
+  const standbyReady = !!latestCatalog && !!latestValidatedBackup && (standbyLagMinutes === null || standbyLagMinutes <= intervalMinutes * 2);
   let status = 'disabled';
   if (runningJob) status = 'running';
   else if (settings.enabled && !settings.standbyHost) status = 'warning';
@@ -462,7 +463,8 @@ function haSyncStatus() {
       catalogDir: receiverCatalogPath,
       backupDir: receiverBackupPath,
       latestCatalog,
-      latestBackup
+      latestBackup,
+      latestValidatedBackup
     }
   };
 }
@@ -486,14 +488,14 @@ function latestFileInfo(dirPath, pattern) {
 function normalizeHaSyncSettings(body) {
   const current = rawHaSyncSettings();
   const next = {
-    enabled: true,
-    autoEnabled: true,
+    enabled: body.enabled !== undefined ? body.enabled !== false : current.enabled !== false,
+    autoEnabled: body.autoEnabled !== undefined ? body.autoEnabled !== false : current.autoEnabled !== false,
     intervalMinutes: Number(body.intervalMinutes || current.intervalMinutes || 10),
     standbyHost: String(body.standbyHost || '').trim(),
-    sshUser: String(body.sshUser || current.sshUser || 'tronsoftos').trim(),
+    sshUser: String(body.sshUser || current.sshUser || 'tronsoft').trim(),
     sshPort: Number(body.sshPort || current.sshPort || 22),
     remoteBackupDir: String(body.remoteBackupDir || current.remoteBackupDir || '/opt/tronfire-storage/firebird/backups').trim(),
-    remoteCatalogDir: String(body.remoteCatalogDir || current.remoteCatalogDir || '/opt/tronos/state/tronfire-catalog').trim(),
+    remoteCatalogDir: String(body.remoteCatalogDir || current.remoteCatalogDir || '/tmp/tronfire-catalog').trim(),
     backupDir: String(body.backupDir || current.backupDir || '/opt/tronfire-storage/firebird/backups').trim(),
     catalogDir: String(body.catalogDir || current.catalogDir || path.join(stateDir, 'tronfire-catalog')).trim()
   };
@@ -1590,16 +1592,21 @@ async function validateFirebirdPassword() {
 
 async function appsStatus() {
   const config = managedConfig();
+  const tronfireEnv = parseEnvFile(path.join(appRoot, 'apps/tronfire/.env'));
   const apps = [];
   for (const app of config.apps || []) {
+    const appContainers = app.name === 'tronfire' && String(tronfireEnv.FIREBIRD_EXEC_MODE || process.env.FIREBIRD_EXEC_MODE || '').toLowerCase() === 'host'
+      ? (app.containers || []).filter(name => name !== 'tronfire_firebird25')
+      : (app.containers || []);
     const [containers, health] = await Promise.all([
-      containerStatus(app.containers || []),
+      containerStatus(appContainers),
       fetchHealth(app.healthUrl)
     ]);
     const running = containers.filter(item => item.status === 'running').length;
     const disabledAndStopped = app.enabled === false && running === 0;
     apps.push({
       ...publicApp(app),
+      containersExpected: appContainers,
       containers,
       health,
       status: disabledAndStopped ? 'disabled' : health.ok ? 'online' : running > 0 ? 'degraded' : 'offline'
@@ -2145,7 +2152,7 @@ async function dashboard() {
     cluster.sync.tronfireStandby = tronfireHa;
     const requiredReady = tronfireHa.ok !== false && tronfireHa.allReady === true;
     const latestRestoredBackupAt = tronfireHa.latestBackupAt ? new Date(tronfireHa.latestBackupAt).getTime() : 0;
-    const latestReceivedBackupAt = cluster.sync.receiver?.latestBackup?.modifiedAt ? new Date(cluster.sync.receiver.latestBackup.modifiedAt).getTime() : 0;
+    const latestReceivedBackupAt = cluster.sync.receiver?.latestValidatedBackup?.modifiedAt ? new Date(cluster.sync.receiver.latestValidatedBackup.modifiedAt).getTime() : 0;
     const latestBackupAtMs = latestRestoredBackupAt || latestReceivedBackupAt;
     const lagMinutes = latestBackupAtMs ? Math.max(0, Math.round((Date.now() - latestBackupAtMs) / 60000)) : null;
     cluster.sync.standbyLagMinutes = lagMinutes;
@@ -2168,16 +2175,16 @@ async function dashboard() {
     });
   }
   if (cluster.sync?.enabled && cluster.sync?.standbyLagMinutes !== null && cluster.sync.standbyLagMinutes > Number(cluster.sync.intervalMinutes || 10) * 2) {
-    alerts.push({ severity: 'warning', message: `Standby atrasado: ${cluster.sync.standbyLagMinutes} min sem backup recebido` });
+    alerts.push({ severity: 'warning', message: `Standby atrasado: ${cluster.sync.standbyLagMinutes} min sem backup validado/restauravel` });
   }
   if (cluster.sync?.enabled) {
     const intervalMinutes = Number(cluster.sync.intervalMinutes || 10);
-    const latestBackupAt = cluster.sync.receiver?.latestBackup?.modifiedAt ? new Date(cluster.sync.receiver.latestBackup.modifiedAt).getTime() : 0;
+    const latestBackupAt = cluster.sync.receiver?.latestValidatedBackup?.modifiedAt ? new Date(cluster.sync.receiver.latestValidatedBackup.modifiedAt).getTime() : 0;
     const backupAgeMinutes = latestBackupAt ? Math.round((Date.now() - latestBackupAt) / 60000) : null;
     if (backupAgeMinutes === null) {
       alerts.push({ severity: 'warning', message: 'Sync HA sem backup validado disponivel' });
     } else if (backupAgeMinutes > intervalMinutes * 2) {
-      alerts.push({ severity: 'warning', message: `Backup validado atrasado: ${backupAgeMinutes} min desde o ultimo arquivo` });
+      alerts.push({ severity: 'warning', message: `Backup validado atrasado: ${backupAgeMinutes} min desde o ultimo manifesto aprovado` });
     }
   }
   if (!backups.rclone.remote) alerts.push({ severity: 'warning', message: 'Remote rclone nao configurado' });
@@ -2427,10 +2434,10 @@ function startHaSync() {
     TRONSOFTOS_APP_DIR: appRoot,
     TRONSOFTOS_INTERNAL_TOKEN: internalToken,
     HA_SYNC_STANDBY_HOST: settings.standbyHost,
-    HA_SYNC_SSH_USER: settings.sshUser || 'tronsoftos',
+    HA_SYNC_SSH_USER: settings.sshUser || 'tronsoft',
     HA_SYNC_SSH_PORT: String(settings.sshPort || 22),
     HA_SYNC_REMOTE_BACKUP_DIR: settings.remoteBackupDir || '/opt/tronfire-storage/firebird/backups',
-    HA_SYNC_REMOTE_CATALOG_DIR: settings.remoteCatalogDir || '/opt/tronos/state/tronfire-catalog',
+    HA_SYNC_REMOTE_CATALOG_DIR: settings.remoteCatalogDir || '/tmp/tronfire-catalog',
     FIREBIRD_BACKUP_DIR: settings.backupDir || '/opt/tronfire-storage/firebird/backups',
     TRONFIRE_CATALOG_EXPORT_DIR: settings.catalogDir || path.join(stateDir, 'tronfire-catalog')
   };
@@ -2667,7 +2674,7 @@ function startStandbyKeepalived(action, body = {}) {
   requireConfirmation(body, action === 'stop' ? 'SUSPENDER STANDBY' : 'REATIVAR STANDBY');
   const settings = rawHaSyncSettings();
   if (!settings.standbyHost) throw new Error('host standby nao configurado no Sync HA');
-  const sshUser = settings.sshUser || 'tronsoftos';
+  const sshUser = settings.sshUser || 'tronsoft';
   const sshPort = String(settings.sshPort || 22);
   const remoteCommand = `sudo -n systemctl ${action} keepalived.service`;
   const knownHosts = path.join(stateDir, 'known_hosts');
@@ -2717,7 +2724,7 @@ function startHostPower(action, body = {}) {
   const settings = rawHaSyncSettings();
   const cmd = privilegedCommandArgs('/usr/local/sbin/tronsoftos-network', ['host-power', action]);
   if ((identity.nodeRole || 'primary') === 'primary' && settings.standbyHost) {
-    const sshUser = settings.sshUser || 'tronsoftos';
+    const sshUser = settings.sshUser || 'tronsoft';
     const sshPort = String(settings.sshPort || 22);
     const knownHosts = path.join(stateDir, 'known_hosts');
     const identityFile = path.join(stateDir, 'ssh/id_ed25519');

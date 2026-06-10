@@ -116,7 +116,7 @@ No standby:
 ```bash
 sudo bash scripts/ha-smoke-test.sh
 ls -lah /opt/tronfire-storage/firebird/backups
-ls -lah /opt/tronos/state/tronfire-catalog 2>/dev/null || true
+ls -lah /tmp/tronfire-catalog 2>/dev/null || true
 ```
 
 Resultado esperado:
@@ -124,6 +124,47 @@ Resultado esperado:
 - Backups e manifestos recentes chegam no standby.
 - Catalogo do TronFire chega no standby quando configurado.
 - Nenhum arquivo `.fdb` de producao e sobrescrito por sync direto.
+- O restore automatico no standby deixa os bancos obrigatorios em `READY`.
+
+## Fase 3.1: Sync Contínuo De Rotina
+
+Depois do primeiro sync manual, aguarde pelo menos um intervalo automatico configurado e valide novamente no standby:
+
+```bash
+ls -lah /opt/tronfire-storage/firebird/backups
+ls -lah /opt/tronfire-storage/firebird/standby
+```
+
+Resultado esperado:
+
+- Um novo ciclo de backup/sync aparece sem intervenção manual.
+- O standby continua com backup validado e restaurado.
+- O painel mostra o proximo sync e a defasagem dentro do limite esperado.
+- Se o backup mais atual do alias ja estiver `READY` no standby com o mesmo SHA, o ciclo deve pular o restore completo e apenas revalidar o standby.
+
+Evidencia de laboratorio em 2026-06-10:
+
+- Ativo: `192.168.1.163`.
+- Standby/recovery: `192.168.1.162`.
+- VIP: `192.168.1.150` no ativo.
+- Ciclo automatico: `ha-sync-20260610101657.log`.
+- Resultado: `HA_SYNC_AUTO_TRIGGERED` seguido de `HA_SYNC_FINISHED`.
+- O backup `backup-teste` com SHA `6fb6117dfa066b0f6993a8d7b7490f82f15b29707274e56ee872ab5b91703a02` foi ignorado para restore completo porque ja estava `READY` antes do import do catalogo.
+- Tempo do ciclo com skip: cerca de 3 segundos.
+- No standby, nenhum `gbak` ficou em execucao apos o ciclo automatico.
+
+Trecho esperado do log:
+
+```text
+[ha-sync] candidato restore backup-teste: backupSha256=6fb6117dfa066b0f6993a8d7b7490f82f15b29707274e56ee872ab5b91703a02
+[ha-sync] restore standby backup-teste ignorado: backup 6fb6117dfa066b0f6993a8d7b7490f82f15b29707274e56ee872ab5b91703a02 ja estava READY antes do import do catalogo
+[ha-sync] concluido
+```
+
+Observacao operacional:
+
+- Em bases grandes, o restore completo pode levar muitos minutos. No laboratorio, o `backup-teste` levou cerca de 14 a 15 minutos por restore completo.
+- O ciclo automatico continuo deve manter o standby pronto antes da queda, mas nao deve restaurar novamente o mesmo backup validado.
 
 ## Fase 4: Failover Planejado
 
@@ -203,6 +244,18 @@ Resultado esperado:
 - Antigo primary nao reassume sozinho.
 - Cluster continua com apenas um ativo.
 - No recuperado volta como standby apos ressincronizacao.
+
+Evidencia de laboratorio em 2026-06-10:
+
+- Failback controlado executado do ativo `192.168.1.163` para `192.168.1.162`.
+- O `192.168.1.162` foi preparado como `standby` com `allow_promotion=true`.
+- O `192.168.1.163` teve `tronsoftos` e `keepalived` parados antes da promocao.
+- `POST /api/cluster/activate-local` no `192.168.1.162` promoveu o no para `primary`.
+- VIP `192.168.1.150` apareceu no `192.168.1.162`.
+- TronFire no `192.168.1.162` foi recriado com `TRONFIRE_NODE_ROLE=primary`.
+- Banco `backup-teste` ficou `PROMOTED` no TronFire.
+- Antigo ativo `192.168.1.163` ficou em `recovery`, com `keepalived` inativo e sem VIP.
+- API via VIP respondeu com `nodeRole=primary`, `activeNode=primary-116` e `canServeProduction=true`.
 
 ## Criterios De Aprovacao
 

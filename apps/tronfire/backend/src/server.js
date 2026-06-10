@@ -1255,7 +1255,7 @@ app.post('/api/restores/from-upload', { preHandler: requireOperator }, async (re
       'test -f "$src" || fail 60 "Arquivo de origem nao encontrado: $src"',
       'rm -f "$temp_dest" || fail 61 "Nao foi possivel remover restore temporario anterior: $temp_dest"',
       'restore_src="$src"',
-      'case "$src" in *.gz) restore_src="/tmp/tronfire_restore_${RANDOM}.gbk"; gzip -dc "$src" > "$restore_src" || fail 62 "Falha ao descompactar backup: $src" ;; esac',
+      `case "$src" in *.gz) restore_src=${shQuote(`/tmp/tronfire_restore_${targetDb.alias}_${stamp}.gbk`)}; gzip -dc "$src" > "$restore_src" || fail 62 "Falha ao descompactar backup: $src" ;; esac`,
       `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gbak`)} -c -v -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} "$restore_src" ${shQuote(firebirdCreateTarget(tempRestorePath))} > "$log" 2>&1 || fail 66 "Falha no gbak restore"`,
       'if [ "$restore_src" != "$src" ]; then rm -f "$restore_src" || true; fi',
       'test -f "$temp_dest" || fail 63 "Restore terminou, mas o arquivo temporario nao foi encontrado: $temp_dest"',
@@ -1335,11 +1335,20 @@ app.post('/api/ha/standby/restore', async (req, reply) => {
   const alias = normalizeAlias(body.databaseAlias || manifest?.databaseAlias || path.basename(sourcePath).split('_').slice(0, -1).join('_'));
   const db = await prisma.managedDatabase.findUnique({ where: { alias } });
   if (!db) return reply.code(404).send({ error: `Banco nao cadastrado para alias ${alias}` });
+  const lockHandle = await acquireDatabaseOperationLock(req, db, 'HA_STANDBY_RESTORE', reply);
+  if (reply.sent) return;
 
   const stamp = safeLogToken(body.logToken);
   const standbyPath = db.standbyPath || standbyPathForAlias(db.alias);
   const tempRestorePath = `/firebird/restore-work/${db.alias}_standby_restore_${stamp}.fdb`;
   const logPath = `/firebird/logs/standby_restore_${db.alias}_${stamp}.log`;
+  const previousStandby = {
+    standbyPath: db.standbyPath,
+    standbyStatus: db.standbyStatus,
+    lastStandbyBackupAt: db.lastStandbyBackupAt,
+    lastStandbyValidatedAt: db.lastStandbyValidatedAt,
+    lastStandbyBackupSha256: db.lastStandbyBackupSha256
+  };
 
   try {
     await prisma.managedDatabase.update({ where: { id: db.id }, data: { standbyStatus: 'RESTORING' } });
@@ -1357,7 +1366,7 @@ app.post('/api/ha/standby/restore', async (req, reply) => {
       'if [ -n "$expected_sha" ]; then actual_sha="$(sha256sum "$src" | awk \'{print $1}\')"; [ "$actual_sha" = "$expected_sha" ] || fail 71 "SHA256 do backup recebido nao confere"; fi',
       'rm -f "$temp_dest" || fail 62 "Nao foi possivel remover restore standby temporario anterior: $temp_dest"',
       'restore_src="$src"',
-      'case "$src" in *.gz) restore_src="/tmp/tronfire_standby_restore_${RANDOM}.gbk"; gzip -dc "$src" > "$restore_src" || fail 63 "Falha ao descompactar backup standby: $src" ;; esac',
+      `case "$src" in *.gz) restore_src=${shQuote(`/tmp/tronfire_standby_restore_${db.alias}_${stamp}.gbk`)}; gzip -dc "$src" > "$restore_src" || fail 63 "Falha ao descompactar backup standby: $src" ;; esac`,
       `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gbak`)} -c -v -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} "$restore_src" ${shQuote(firebirdCreateTarget(tempRestorePath))} > "$log" 2>&1 || fail 66 "Falha no gbak restore standby"`,
       'if [ "$restore_src" != "$src" ]; then rm -f "$restore_src" || true; fi',
       'test -f "$temp_dest" || fail 64 "Restore standby terminou, mas arquivo temporario nao foi encontrado: $temp_dest"',
@@ -1385,9 +1394,15 @@ app.post('/api/ha/standby/restore', async (req, reply) => {
     return { ok: true, database: updated, standbyPath, logPath };
   } catch (err) {
     const error = shellErrorText(err);
-    await prisma.managedDatabase.update({ where: { id: db.id }, data: { standbyStatus: 'INVALID' } });
+    const failureData = previousStandby.standbyStatus === 'READY'
+      ? previousStandby
+      : { standbyStatus: 'INVALID' };
+    await prisma.managedDatabase.update({ where: { id: db.id }, data: failureData });
+    await createAlertOnce(`HA_STANDBY_RESTORE_FAILED_${db.alias}`, 'CRITICAL', `Restore HA do standby falhou: ${db.name}`);
     await audit(req, 'HA_STANDBY_RESTORE_FAILED', { entityType: 'database', entityId: db.id, details: { sourcePath, standbyPath, logPath, error } });
     return reply.code(500).send({ error, logPath });
+  } finally {
+    await lockHandle.release();
   }
 });
 
@@ -1398,6 +1413,8 @@ app.post('/api/ha/standby/validate', async (req, reply) => {
   if (!db) return reply.code(404).send({ error: `Banco nao cadastrado para alias ${alias}` });
   const standbyPath = db.standbyPath || standbyPathForAlias(db.alias);
   const logPath = `/firebird/logs/standby_validate_${db.alias}_${timestamp14()}.log`;
+  const backupSha256 = req.body?.backupSha256 ? String(req.body.backupSha256) : '';
+  const backupFinishedAt = req.body?.backupFinishedAt ? new Date(req.body.backupFinishedAt) : null;
   try {
     const cmd = [
       'set -e',
@@ -1407,7 +1424,10 @@ app.post('/api/ha/standby/validate', async (req, reply) => {
       `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$db" > "$log" 2>&1`
     ].join('; ');
     await dockerExec(['sh', '-lc', cmd], { timeout: 120000 });
-    const updated = await prisma.managedDatabase.update({ where: { id: db.id }, data: { standbyStatus: 'READY', lastStandbyValidatedAt: new Date() } });
+    const data = { standbyStatus: 'READY', lastStandbyValidatedAt: new Date() };
+    if (backupSha256) data.lastStandbyBackupSha256 = backupSha256;
+    if (backupFinishedAt && !Number.isNaN(backupFinishedAt.getTime())) data.lastStandbyBackupAt = backupFinishedAt;
+    const updated = await prisma.managedDatabase.update({ where: { id: db.id }, data });
     await audit(req, 'HA_STANDBY_VALIDATED', { entityType: 'database', entityId: db.id, details: { standbyPath, logPath } });
     return { ok: true, database: updated, standbyPath, logPath };
   } catch (err) {

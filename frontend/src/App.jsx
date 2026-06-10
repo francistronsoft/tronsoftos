@@ -193,9 +193,9 @@ function diagnosticIcon(status) {
   return <XCircle className="h-4 w-4 text-red-600" />;
 }
 
-function Card({ title, icon: Icon, children, action }) {
+function Card({ title, icon: Icon, children, action, className = '' }) {
   return (
-    <section className="rounded-lg border border-slate-200 bg-white shadow-soft">
+    <section className={`rounded-lg border border-slate-200 bg-white shadow-soft ${className}`}>
       <header className="flex min-h-12 items-center justify-between border-b border-slate-100 px-4 py-3">
         <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
           {Icon ? <Icon className="h-4 w-4 text-slate-500" /> : null}
@@ -343,10 +343,15 @@ function DashboardView({ dashboard }) {
   const databaseProgress = databaseCount ? Math.round((readyCount / databaseCount) * 70) : 0;
   const promotionProgress = Math.min(100, databaseProgress + (sync.standbyReady ? 20 : 0) + (dashboard.cluster.guard?.canPromote ? 10 : 0));
   const promotionState = dashboard.cluster.guard?.canPromote
-    ? 'promocao autorizada'
+    ? 'promocao autorizada, aguardando acionamento'
     : sync.standbyReady
-      ? 'pronto, aguardando autorizacao'
-      : 'sincronizando standby';
+      ? 'standby pronto, promocao ainda nao executada'
+      : 'standby em sincronizacao';
+  const promotionDetail = dashboard.cluster.guard?.canServeProduction
+    ? 'Este no ja esta servindo producao.'
+    : dashboard.cluster.guard?.canPromote
+      ? 'A promocao esta liberada, mas so ocorre se o watchdog detectar queda do primary ou se o tecnico acionar manualmente.'
+      : 'Ainda nao houve promocao. O standby continua recebendo/validando backups e aguardando autorizacao.';
   return (
     <div className="space-y-5">
       <div className="grid gap-4 lg:grid-cols-5">
@@ -375,7 +380,7 @@ function DashboardView({ dashboard }) {
             <div>
               <div className="text-sm font-semibold text-slate-900">{promotionState}</div>
               <div className="mt-1 text-sm text-slate-500">
-                Bancos prontos {standbyDbSummary}. A promocao pode ser automatica pelo watchdog ou manual pelo tecnico.
+                Bancos prontos {standbyDbSummary}. {promotionDetail}
               </div>
               <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-100">
                 <div className="h-full rounded-full bg-sky-600" style={{ width: `${promotionProgress}%` }} />
@@ -384,7 +389,7 @@ function DashboardView({ dashboard }) {
             <div className="grid gap-2 text-sm">
               <div className="flex items-center justify-between border-b border-slate-100 pb-2"><span className="text-slate-500">Restore</span><span className="font-medium">{readyCount}/{databaseCount || '-'}</span></div>
               <div className="flex items-center justify-between border-b border-slate-100 pb-2"><span className="text-slate-500">Defasagem</span><span className="font-medium">{sync.standbyLagMinutes === null || sync.standbyLagMinutes === undefined ? '-' : `${sync.standbyLagMinutes} min`}</span></div>
-              <div className="flex items-center justify-between"><span className="text-slate-500">Promocao</span><span className="font-medium">{dashboard.cluster.guard?.canPromote ? 'liberada' : 'aguardando'}</span></div>
+              <div className="flex items-center justify-between"><span className="text-slate-500">Promocao</span><span className="font-medium">{dashboard.cluster.guard?.canServeProduction ? 'executada' : dashboard.cluster.guard?.canPromote ? 'liberada' : 'nao executada'}</span></div>
             </div>
           </div>
         </Card>
@@ -598,14 +603,14 @@ function ClusterView({ dashboard }) {
   const syncValues = syncForm || {
     enabled: true,
     standbyHost: sync.standbyHost || '',
-    sshUser: sync.sshUser || 'tronsoftos',
+    sshUser: sync.sshUser || 'tronsoft',
     sshPort: sync.sshPort || 22,
     autoEnabled: true,
     intervalMinutes: sync.intervalMinutes || 10,
     remoteBackupDir: sync.remoteBackupDir || '/opt/tronfire-storage/firebird/backups',
-    remoteCatalogDir: sync.remoteCatalogDir || '/opt/tronos/state/tronfire-catalog',
+    remoteCatalogDir: sync.remoteCatalogDir || '/tmp/tronfire-catalog',
     backupDir: sync.backupDir || '/opt/tronfire-storage/firebird/backups',
-    catalogDir: sync.catalogDir || '/opt/tronos/state/tronfire-catalog'
+    catalogDir: sync.catalogDir || '/opt/tronsoftos/state/tronfire-catalog'
   };
   const vipValues = vipForm || {
     interfaceName: cluster.keepalived?.interface || networkImpact.current?.interface || 'eth0',
@@ -786,8 +791,8 @@ function ClusterView({ dashboard }) {
   const clusterTabs = [
     { id: 'overview', label: 'Visao geral', icon: Activity },
     { id: 'identity', label: 'Identidade', icon: ShieldCheck },
-    { id: 'pairing', label: 'Pareamento', icon: UploadCloud },
     { id: 'vip', label: 'VIP', icon: Network },
+    { id: 'pairing', label: 'Pareamento', icon: UploadCloud },
     ...(canManageSync ? [{ id: 'sync', label: 'Sync', icon: RefreshCw }] : []),
     { id: 'logs', label: 'Logs HA', icon: Terminal },
     { id: 'promotion', label: 'Promocao', icon: GitBranch }
@@ -834,14 +839,14 @@ function ClusterView({ dashboard }) {
                   ['Modo', 'recebe dados do primary'],
                   ['Catalogo recebido', syncStatus.receiver?.latestCatalog?.modifiedAt ? formatDateTime(syncStatus.receiver.latestCatalog.modifiedAt) : 'aguardando'],
                   ['Backup recebido', syncStatus.receiver?.latestBackup?.modifiedAt ? formatDateTime(syncStatus.receiver.latestBackup.modifiedAt) : 'aguardando'],
-                  ['Diretorio catalogo', syncStatus.receiver?.catalogDir || '/opt/tronos/state/tronfire-catalog'],
+                  ['Diretorio catalogo', syncStatus.receiver?.catalogDir || '/opt/tronsoftos/state/tronfire-catalog'],
                   ['Diretorio backups', syncStatus.receiver?.backupDir || '/opt/tronfire-storage/firebird/backups']
                 ] : [
                   ['Status', syncStatus.status || (syncStatus.enabled ? 'enabled' : 'disabled')],
                   ['Automatico', syncStatus.autoEnabled ? 'habilitado' : 'desativado'],
                   ['Intervalo', syncStatus.intervalMinutes ? `${syncStatus.intervalMinutes} min` : '-'],
                   ['Standby', syncStatus.standbyHost || 'nao configurado'],
-                  ['Usuario SSH', syncStatus.sshUser || 'tronsoftos'],
+                  ['Usuario SSH', syncStatus.sshUser || 'tronsoft'],
                   ['Ultimo sync', syncStatus.lastEvent?.createdAt ? formatDateTime(syncStatus.lastEvent.createdAt) : '-'],
                   ['Proximo sync', syncStatus.nextRunAt ? formatDateTime(syncStatus.nextRunAt) : '-'],
                   ['Defasagem', standbyLag === null ? '-' : `${standbyLag} min`],
@@ -859,7 +864,7 @@ function ClusterView({ dashboard }) {
                 </div>
               ) : syncStatus.status === 'failed' ? (
                 <div className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                  Ultima sincronizacao falhou. Verifique se o pareamento foi importado no standby e se o SSH para {syncStatus.sshUser || 'tronsoftos'}@{syncStatus.standbyHost || 'standby'} esta autorizado.
+                  Ultima sincronizacao falhou. Verifique se o pareamento foi importado no standby e se o SSH para {syncStatus.sshUser || 'tronsoft'}@{syncStatus.standbyHost || 'standby'} esta autorizado.
                 </div>
               ) : syncStatus.status === 'success' ? (
                 <div className="mt-4 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">
@@ -1270,7 +1275,7 @@ function ClusterView({ dashboard }) {
               <div>
                 <div className="text-sm font-medium text-slate-950">Sincronizacao automatica ativa</div>
                 <div className="mt-1 text-xs text-slate-500">
-                  O primary envia backups validados, catalogo e restore do standby conforme o intervalo configurado.
+                  O primary envia continuamente backups validados, catalogo e restore do standby conforme o intervalo configurado.
                 </div>
               </div>
               <label className="block">
@@ -1290,16 +1295,16 @@ function ClusterView({ dashboard }) {
               </label>
             </div>
             <div className="mt-2 text-xs text-slate-500">
-              O automatico roda somente no primary/ativo e nao inicia outro sync se ja houver um job em execucao.
+              O automatico roda somente no primary/ativo e nao inicia outro sync se ja houver um job em execucao. Esse ciclo continuo mantem o standby pronto para failover.
             </div>
           </div>
           <Field label="Host/IP standby" value={syncValues.standbyHost} onChange={value => setSyncValue('standbyHost', value)} placeholder="192.168.1.153" />
-          <Field label="Usuario SSH" value={syncValues.sshUser} onChange={value => setSyncValue('sshUser', value)} placeholder="tronsoftos" />
+          <Field label="Usuario SSH" value={syncValues.sshUser} onChange={value => setSyncValue('sshUser', value)} placeholder="tronsoft" />
           <Field label="Porta SSH" type="number" value={syncValues.sshPort} onChange={value => setSyncValue('sshPort', Number(value || 22))} placeholder="22" />
           <Field label="Backups locais" value={syncValues.backupDir} onChange={value => setSyncValue('backupDir', value)} placeholder="/opt/tronfire-storage/firebird/backups" />
           <Field label="Destino backups standby" value={syncValues.remoteBackupDir} onChange={value => setSyncValue('remoteBackupDir', value)} placeholder="/opt/tronfire-storage/firebird/backups" />
-          <Field label="Catalogo local" value={syncValues.catalogDir} onChange={value => setSyncValue('catalogDir', value)} placeholder="/opt/tronos/state/tronfire-catalog" />
-          <Field label="Destino catalogo standby" value={syncValues.remoteCatalogDir} onChange={value => setSyncValue('remoteCatalogDir', value)} placeholder="/opt/tronos/state/tronfire-catalog" />
+          <Field label="Catalogo local" value={syncValues.catalogDir} onChange={value => setSyncValue('catalogDir', value)} placeholder="/opt/tronsoftos/state/tronfire-catalog" />
+          <Field label="Destino catalogo standby" value={syncValues.remoteCatalogDir} onChange={value => setSyncValue('remoteCatalogDir', value)} placeholder="/tmp/tronfire-catalog" />
           <div className="md:col-span-2 flex flex-wrap items-center gap-3">
             <button disabled={syncMutation.isPending} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
               <Save className="h-4 w-4" />
@@ -1331,21 +1336,17 @@ function ClusterView({ dashboard }) {
 function BackupsView({ dashboard }) {
   const queryClient = useQueryClient();
   const rcloneQuery = useQuery({ queryKey: ['rclone-settings'], queryFn: () => api('/api/backups/rclone') });
-  const googleCredentialsQuery = useQuery({ queryKey: ['google-drive-credentials'], queryFn: () => api('/api/backups/google/credentials') });
   const files = dashboard.backups.recentFiles || [];
   const rclone = rcloneQuery.data || dashboard.backups.rclone || {};
   const remoteBackupsQuery = useQuery({ queryKey: ['rclone-remote-backups'], queryFn: () => api('/api/backups/rclone/remote-files'), enabled: !!(rclone.remote && rclone.configConfigured), staleTime: 30000 });
-  const googleCredentials = googleCredentialsQuery.data || {};
   const quota = dashboard.backups.quota;
   const remoteFiles = remoteBackupsQuery.data?.files || [];
   const [downloadJobId, setDownloadJobId] = useState(null);
   const [form, setForm] = useState(null);
-  const [oauth, setOauth] = useState({ clientId: '', clientSecret: '', redirectUri: '' });
-  const [token, setToken] = useState('');
   const values = form || {
     enabled: rclone.enabled || false,
     bin: rclone.bin || '/usr/bin/rclone',
-    config: rclone.config || '/opt/tronos/config/rclone/rclone.conf',
+    config: rclone.config || '/opt/tronsoftos/config/rclone/rclone.conf',
     remote: rclone.remote || 'gdrive',
     path: rclone.path || 'tronsoftos/backups',
     uploadOnlyRole: rclone.uploadOnlyRole || 'primary',
@@ -1382,44 +1383,11 @@ function BackupsView({ dashboard }) {
     enabled: !!downloadJobId,
     refetchInterval: query => query.state.data?.status === 'running' ? 1200 : false
   });
-  const googleMutation = useMutation({
-    mutationFn: payload => postApi('/api/backups/google/start', payload),
-    onSuccess: data => {
-      window.open(data.authUrl, '_blank', 'noopener,noreferrer');
-      queryClient.invalidateQueries({ queryKey: ['events'] });
-    }
-  });
-  const credentialsMutation = useMutation({
-    mutationFn: content => postApi('/api/backups/google/credentials', { content }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['google-drive-credentials'] });
-      queryClient.invalidateQueries({ queryKey: ['events'] });
-    }
-  });
-  const tokenMutation = useMutation({
-    mutationFn: payload => postApi('/api/backups/rclone/token', payload),
-    onSuccess: data => {
-      setForm({ ...data, configContent: '' });
-      setToken('');
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
-      queryClient.invalidateQueries({ queryKey: ['rclone-settings'] });
-      queryClient.invalidateQueries({ queryKey: ['events'] });
-    }
-  });
   const setValue = (key, value) => setForm(previous => ({ ...(previous || values), [key]: value }));
-  const setOauthValue = (key, value) => setOauth(previous => ({ ...previous, [key]: value }));
-  const importCredentialsFile = event => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => credentialsMutation.mutate(String(reader.result || ''));
-    reader.readAsText(file);
-    event.target.value = '';
-  };
 
   return (
     <div className="grid gap-5 xl:grid-cols-[1fr_1fr]">
-      <Card title="Google Drive / Rclone" icon={UploadCloud} action={<StatusPill value={rclone.configConfigured ? 'online' : 'warning'} />}>
+      <Card title="Google Drive / Rclone" icon={UploadCloud} action={<StatusPill value={rclone.configConfigured ? 'online' : 'warning'} />} className="xl:col-span-2">
         <div className={`mb-4 rounded-md border px-3 py-3 text-sm ${quota?.ok === false ? 'border-amber-200 bg-amber-50 text-amber-800' : quota?.percentUsed >= 90 ? 'border-red-200 bg-red-50 text-red-800' : 'border-slate-200 bg-slate-50 text-slate-700'}`}>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
@@ -1430,124 +1398,78 @@ function BackupsView({ dashboard }) {
           </div>
           {quota?.free ? <div className="mt-2 text-xs">Livre: {formatBytes(quota.free)}</div> : null}
         </div>
-        <div className="mb-4 rounded-md border border-slate-200 bg-slate-50 p-3">
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3">
-            <div>
-              <div className="text-sm font-semibold text-slate-900">Credenciais Google OAuth</div>
-              <div className="text-xs text-slate-500">{googleCredentials.configured ? `JSON importado: ${googleCredentials.clientId}` : 'Importe o client_secret.json do Google Cloud'}</div>
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1.25fr)_minmax(280px,0.75fr)]">
+          <form
+            className="grid gap-3 md:grid-cols-2"
+            onSubmit={event => {
+              event.preventDefault();
+              saveMutation.mutate(values);
+            }}
+          >
+            <div className="md:col-span-2">
+              <Checkbox label="Habilitar upload externo" checked={values.enabled} onChange={value => setValue('enabled', value)} />
             </div>
-            <label className="inline-flex cursor-pointer items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50">
-              <UploadCloud className="h-4 w-4" />
-              Importar JSON
-              <input type="file" accept="application/json,.json" className="hidden" onChange={importCredentialsFile} />
+            <Field label="Remote" value={values.remote} onChange={value => setValue('remote', value)} placeholder="gdrive" />
+            <Field label="Pasta destino" value={values.path} onChange={value => setValue('path', value)} placeholder="tronsoftos/cliente-x" />
+            <Field label="Binario rclone" value={values.bin} onChange={value => setValue('bin', value)} placeholder="/usr/bin/rclone" />
+            <Field label="Arquivo rclone.conf" value={values.config} onChange={value => setValue('config', value)} placeholder="/opt/tronsoftos/config/rclone/rclone.conf" />
+            <label className="block md:col-span-2">
+              <span className="text-xs font-medium uppercase text-slate-500">Upload permitido no papel</span>
+              <select value={values.uploadOnlyRole} onChange={event => setValue('uploadOnlyRole', event.target.value)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100">
+                <option value="primary">primary</option>
+                <option value="standby">standby</option>
+                <option value="recovery">recovery</option>
+                <option value="any">any</option>
+              </select>
             </label>
-          </div>
-          <div className="grid gap-3 md:grid-cols-2">
-            <Field label="Google Client ID" value={oauth.clientId} onChange={value => setOauthValue('clientId', value)} placeholder={googleCredentials.configured ? 'usando JSON importado' : 'client_id do OAuth'} />
-            <Field label="Google Client Secret" type="password" value={oauth.clientSecret} onChange={value => setOauthValue('clientSecret', value)} placeholder={googleCredentials.configured ? 'usando JSON importado' : 'client_secret do OAuth'} />
-            <Field label="URL de retorno" value={oauth.redirectUri} onChange={value => setOauthValue('redirectUri', value)} placeholder={`${window.location.origin}/api/backups/google/callback`} />
-            <div className="flex items-end">
-              <button
-                type="button"
-                disabled={googleMutation.isPending}
-                onClick={() => googleMutation.mutate({ ...values, ...oauth })}
-                className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-sky-600 px-3 py-2 text-sm font-medium text-white hover:bg-sky-700 disabled:opacity-50"
-              >
-                <Cloud className="h-4 w-4" />
-                Conectar Google Drive
+            <label className="block md:col-span-2">
+              <span className="text-xs font-medium uppercase text-slate-500">Conteudo do rclone.conf</span>
+              <textarea
+                value={values.configContent}
+                onChange={event => setValue('configContent', event.target.value)}
+                placeholder="[gdrive]\ntype = drive\n..."
+                className="mt-1 h-32 w-full rounded-md border border-slate-200 px-3 py-2 font-mono text-xs outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+              />
+            </label>
+            <div className="flex flex-wrap items-center gap-3 md:col-span-2">
+              <button disabled={saveMutation.isPending} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
+                <Save className="h-4 w-4" />
+                Salvar rclone
+              </button>
+              <button type="button" disabled={testMutation.isPending} onClick={() => testMutation.mutate()} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
+                <RefreshCw className="h-4 w-4" />
+                Testar conexao
+              </button>
+              <button type="button" disabled={uploadTestMutation.isPending} onClick={() => uploadTestMutation.mutate()} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
+                <UploadCloud className="h-4 w-4" />
+                Upload teste
               </button>
             </div>
-          </div>
-          {credentialsMutation.isSuccess ? <div className="mt-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Credenciais Google importadas.</div> : null}
-          {credentialsMutation.isError ? <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{credentialsMutation.error?.message}</div> : null}
-          {googleMutation.isSuccess ? <div className="mt-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Autorizacao aberta em nova aba.</div> : null}
-          {googleMutation.isError ? <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{googleMutation.error?.message}</div> : null}
+            <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800 md:col-span-2">
+              Em HA, mantenha upload permitido no papel primary. Quando o standby for promovido, ele passa a enviar os backups.
+            </div>
+            {saveMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">Configuracao salva.</div> : null}
+            {testMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">Conexao OK: {testMutation.data.target}</div> : null}
+            {uploadTestMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">Upload OK: {uploadTestMutation.data.target}</div> : null}
+            {saveMutation.isError || testMutation.isError || uploadTestMutation.isError ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 md:col-span-2">{saveMutation.error?.message || testMutation.error?.message || uploadTestMutation.error?.message}</div> : null}
+          </form>
+          <aside className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+            <div className="mb-2 font-semibold text-slate-900">Como gerar o rclone.conf</div>
+            <ol className="space-y-2 pl-5 text-sm leading-5 list-decimal">
+              <li>Baixe o rclone em <a className="font-medium text-sky-700 hover:underline" href="https://rclone.org/downloads/" target="_blank" rel="noreferrer">rclone.org/downloads</a>.</li>
+              <li>No Windows, extraia o ZIP em uma pasta simples, por exemplo <code className="rounded bg-white px-1 py-0.5 text-xs">C:\rclone</code>.</li>
+              <li>Abra o Prompt de Comando nessa pasta e execute <code className="rounded bg-white px-1 py-0.5 text-xs">rclone config</code>.</li>
+              <li>Crie um remote do tipo <code className="rounded bg-white px-1 py-0.5 text-xs">drive</code>, faça login com a conta Google e autorize o acesso.</li>
+              <li>Ao finalizar, abra o arquivo <code className="rounded bg-white px-1 py-0.5 text-xs">%APPDATA%\rclone\rclone.conf</code> e cole o conteudo no campo ao lado.</li>
+              <li>Salve, teste a conexao e rode um upload teste antes de habilitar em producao.</li>
+            </ol>
+            <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              Por enquanto a integracao usa o rclone.conf colado manualmente. A tela de OAuth/credenciais Google foi removida ate definirmos se ficara no rclone ou em um worker de autorizacao.
+            </div>
+          </aside>
         </div>
-        <div className="mb-4 rounded-md border border-amber-200 bg-amber-50 p-3">
-          <label className="block">
-            <span className="text-xs font-medium uppercase text-amber-700">Token OAuth gerado</span>
-            <textarea
-              value={token}
-              onChange={event => setToken(event.target.value)}
-              placeholder='{"access_token":"...","refresh_token":"...","expiry":"..."}'
-              className="mt-1 h-24 w-full rounded-md border border-amber-200 px-3 py-2 font-mono text-xs outline-none focus:border-amber-400 focus:ring-2 focus:ring-amber-100"
-            />
-          </label>
-          <div className="mt-3 rounded-md border border-amber-200 bg-white px-3 py-2">
-            <span className="text-xs font-medium uppercase text-amber-700">Comando para gerar token</span>
-            <code className="mt-1 block select-all rounded bg-slate-950 px-3 py-2 text-xs text-white">rclone authorize "drive"</code>
-          </div>
-          <div className="mt-3 flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              disabled={tokenMutation.isPending}
-              onClick={() => tokenMutation.mutate({ ...values, ...oauth, token })}
-              className="inline-flex items-center justify-center gap-2 rounded-md bg-amber-600 px-3 py-2 text-sm font-medium text-white hover:bg-amber-700 disabled:opacity-50"
-            >
-              <Save className="h-4 w-4" />
-              Adicionar token
-            </button>
-            <a className="text-sm font-medium text-amber-800 hover:underline" href="https://rclone.org/commands/rclone_authorize/" target="_blank" rel="noreferrer">Abrir documentacao do comando</a>
-          </div>
-          {tokenMutation.isSuccess ? <div className="mt-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Token salvo e rclone.conf gerado.</div> : null}
-          {tokenMutation.isError ? <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{tokenMutation.error?.message}</div> : null}
-        </div>
-        <form
-          className="grid gap-3 md:grid-cols-2"
-          onSubmit={event => {
-            event.preventDefault();
-            saveMutation.mutate(values);
-          }}
-        >
-          <div className="md:col-span-2">
-            <Checkbox label="Habilitar upload externo" checked={values.enabled} onChange={value => setValue('enabled', value)} />
-          </div>
-          <Field label="Remote" value={values.remote} onChange={value => setValue('remote', value)} placeholder="gdrive" />
-          <Field label="Pasta destino" value={values.path} onChange={value => setValue('path', value)} placeholder="tronsoftos/cliente-x" />
-          <Field label="Binario rclone" value={values.bin} onChange={value => setValue('bin', value)} placeholder="/usr/bin/rclone" />
-          <Field label="Arquivo rclone.conf" value={values.config} onChange={value => setValue('config', value)} placeholder="/opt/tronos/config/rclone/rclone.conf" />
-          <label className="block md:col-span-2">
-            <span className="text-xs font-medium uppercase text-slate-500">Upload permitido no papel</span>
-            <select value={values.uploadOnlyRole} onChange={event => setValue('uploadOnlyRole', event.target.value)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100">
-              <option value="primary">primary</option>
-              <option value="standby">standby</option>
-              <option value="recovery">recovery</option>
-              <option value="any">any</option>
-            </select>
-          </label>
-          <label className="block md:col-span-2">
-            <span className="text-xs font-medium uppercase text-slate-500">Conteudo do rclone.conf</span>
-            <textarea
-              value={values.configContent}
-              onChange={event => setValue('configContent', event.target.value)}
-              placeholder="[gdrive]\ntype = drive\n..."
-              className="mt-1 h-32 w-full rounded-md border border-slate-200 px-3 py-2 font-mono text-xs outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
-            />
-          </label>
-          <div className="flex flex-wrap items-center gap-3 md:col-span-2">
-            <button disabled={saveMutation.isPending} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
-              <Save className="h-4 w-4" />
-              Salvar rclone
-            </button>
-            <button type="button" disabled={testMutation.isPending} onClick={() => testMutation.mutate()} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
-              <RefreshCw className="h-4 w-4" />
-              Testar conexao
-            </button>
-            <button type="button" disabled={uploadTestMutation.isPending} onClick={() => uploadTestMutation.mutate()} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
-              <UploadCloud className="h-4 w-4" />
-              Upload teste
-            </button>
-          </div>
-          <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800 md:col-span-2">
-            Em HA, mantenha upload permitido no papel primary. Quando o standby for promovido, ele passa a enviar os backups.
-          </div>
-          {saveMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">Configuracao salva.</div> : null}
-          {testMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">Conexao OK: {testMutation.data.target}</div> : null}
-          {uploadTestMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">Upload OK: {uploadTestMutation.data.target}</div> : null}
-          {saveMutation.isError || testMutation.isError || uploadTestMutation.isError ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 md:col-span-2">{saveMutation.error?.message || testMutation.error?.message || uploadTestMutation.error?.message}</div> : null}
-        </form>
       </Card>
-      <Card title="Backups no Google Drive" icon={Cloud} action={<StatusPill value={remoteBackupsQuery.isError ? 'warning' : rclone.configConfigured ? 'online' : 'disabled'} />}>
+      <Card title="Backups no Google Drive" icon={Cloud} action={<StatusPill value={remoteBackupsQuery.isError ? 'warning' : rclone.configConfigured ? 'online' : 'disabled'} />} className="xl:col-span-2">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
           <div>
             <div className="font-medium text-slate-900">{remoteBackupsQuery.data?.target || 'remote nao configurado'}</div>
@@ -1817,7 +1739,7 @@ function MaintenanceView({ dashboard }) {
           <div className="mb-4 grid gap-3 text-sm">
             {[
               ['Host standby', sync.standbyHost || 'nao configurado'],
-              ['Usuario SSH', sync.sshUser || 'tronsoftos'],
+              ['Usuario SSH', sync.sshUser || 'tronsoft'],
               ['Porta SSH', sync.sshPort || 22],
               ['Uso', 'parar keepalived no standby antes de reiniciar o primary sem failover']
             ].map(([label, value]) => (

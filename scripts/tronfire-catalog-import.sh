@@ -11,9 +11,49 @@ if [ ! -f "$DUMP_FILE" ]; then
   exit 66
 fi
 
+docker exec -i "$POSTGRES_CONTAINER" psql \
+  -U "$POSTGRES_USER" \
+  -d "$POSTGRES_DB" \
+  -v ON_ERROR_STOP=1 <<'SQL' || true
+DROP TABLE IF EXISTS "_tronsoftos_ha_standby_state";
+CREATE TABLE "_tronsoftos_ha_standby_state" AS
+SELECT
+  id,
+  "standbyPath",
+  "standbyStatus",
+  "lastStandbyBackupAt",
+  "lastStandbyValidatedAt",
+  "lastStandbyBackupSha256"
+FROM "ManagedDatabase";
+SQL
+
 cat "$DUMP_FILE" | docker exec -i "$POSTGRES_CONTAINER" pg_restore \
   -U "$POSTGRES_USER" \
   -d "$POSTGRES_DB" \
   --clean \
   --if-exists \
   --no-owner
+
+docker exec -i "$POSTGRES_CONTAINER" psql \
+  -U "$POSTGRES_USER" \
+  -d "$POSTGRES_DB" \
+  -v ON_ERROR_STOP=1 <<'SQL'
+DO $$
+BEGIN
+  IF to_regclass('"_tronsoftos_ha_standby_state"') IS NOT NULL THEN
+    UPDATE "ManagedDatabase" db
+    SET
+      "standbyPath" = state."standbyPath",
+      "standbyStatus" = state."standbyStatus",
+      "lastStandbyBackupAt" = state."lastStandbyBackupAt",
+      "lastStandbyValidatedAt" = state."lastStandbyValidatedAt",
+      "lastStandbyBackupSha256" = state."lastStandbyBackupSha256"
+    FROM "_tronsoftos_ha_standby_state" state
+    WHERE db.id = state.id
+      AND state."standbyStatus" IS NOT NULL
+      AND state."standbyStatus" <> 'DISABLED';
+
+    DROP TABLE "_tronsoftos_ha_standby_state";
+  END IF;
+END $$;
+SQL

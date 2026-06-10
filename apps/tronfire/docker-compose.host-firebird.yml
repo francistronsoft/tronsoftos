@@ -12,10 +12,10 @@ services:
     environment:
       FIREBIRD_EXEC_MODE: host
       FIREBIRD_BIN: /usr/local/firebird/bin
+      FIREBIRD_LIB: /usr/local/firebird/lib
       TRONSOFTOS_API_URL: http://host.docker.internal:8080
     volumes:
-      - /usr/local/firebird:/usr/local/firebird:ro
-      - /usr/local/firebird:/opt/firebird:ro
+      - ${FIREBIRD_HOST_ROOT:-/usr/local/firebird}:/usr/local/firebird:ro
       - /opt/tronfire-storage/firebird:/firebird
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -29,10 +29,10 @@ services:
     environment:
       FIREBIRD_EXEC_MODE: host
       FIREBIRD_BIN: /usr/local/firebird/bin
+      FIREBIRD_LIB: /usr/local/firebird/lib
       TRONSOFTOS_API_URL: http://host.docker.internal:8080
     volumes:
-      - /usr/local/firebird:/usr/local/firebird:ro
-      - /usr/local/firebird:/opt/firebird:ro
+      - ${FIREBIRD_HOST_ROOT:-/usr/local/firebird}:/usr/local/firebird:ro
       - /opt/tronfire-storage/firebird:/firebird
       - /proc:/host/proc:ro
     extra_hosts:
