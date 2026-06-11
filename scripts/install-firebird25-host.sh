@@ -26,9 +26,37 @@ if ! gzip -t "$PACKAGE" >/dev/null 2>&1; then
   exit 68
 fi
 
-apt-get update
-apt-get install -y ca-certificates libstdc++6 libtommath1 procps net-tools bash xz-utils findutils perl
-apt-get install -y libncurses5 || apt-get install -y libncurses6 libtinfo6
+apt_get() {
+  local attempt
+  local max_attempts="${APT_LOCK_RETRY_ATTEMPTS:-36}"
+  local delay_seconds="${APT_LOCK_RETRY_DELAY:-10}"
+  local output
+  local rc
+
+  for attempt in $(seq 1 "$max_attempts"); do
+    output="$(DEBIAN_FRONTEND=noninteractive apt-get "$@" 2>&1)" && {
+      printf '%s\n' "$output"
+      return 0
+    }
+    rc=$?
+    printf '%s\n' "$output" >&2
+    if printf '%s\n' "$output" | grep -Eqi 'Could not get lock|Unable to acquire the dpkg frontend lock|lock-frontend|is another process using it|mantida pelo processo|outro processo'; then
+      if [ "$attempt" -lt "$max_attempts" ]; then
+        echo "Aguardando liberacao do apt/dpkg (${attempt}/${max_attempts})..." >&2
+        sleep "$delay_seconds"
+        continue
+      fi
+    fi
+    return "$rc"
+  done
+
+  echo "Timeout aguardando apt/dpkg liberar a trava." >&2
+  return 100
+}
+
+apt_get update
+apt_get install -y ca-certificates libstdc++6 libtommath1 procps net-tools bash xz-utils findutils perl
+apt_get install -y libncurses5 || apt_get install -y libncurses6 libtinfo6
 touch /etc/services /etc/inetd.conf
 
 firebird_host_ready() {

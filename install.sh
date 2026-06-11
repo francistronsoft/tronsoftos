@@ -60,32 +60,60 @@ install_docker() {
   fi
 
   echo "Removendo pacotes Docker conflitantes, se existirem..."
-  apt-get remove -y docker.io docker-doc docker-compose podman-docker containerd runc docker-buildx docker-buildx-plugin 2>/dev/null || true
+  apt_get remove -y docker.io docker-doc docker-compose podman-docker containerd runc docker-buildx docker-buildx-plugin 2>/dev/null || true
 
   if ! apt-cache show docker-compose-plugin >/dev/null 2>&1; then
     echo "Configurando repositorio oficial da Docker..."
-    apt-get install -y ca-certificates curl gnupg
+    apt_get install -y ca-certificates curl gnupg
     install -m 0755 -d /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
     chmod a+r /etc/apt/keyrings/docker.asc
     . /etc/os-release
     DOCKER_CODENAME="${VERSION_CODENAME:-trixie}"
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian ${DOCKER_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
-    apt-get update
+    apt_get update
   fi
 
   if apt-cache show docker-ce >/dev/null 2>&1; then
-    if ! apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin; then
-      apt-get -f install -y
-      apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+    if ! apt_get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin; then
+      apt_get -f install -y
+      apt_get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
     fi
-    apt-get install -y docker-buildx-plugin || echo "Aviso: docker-buildx-plugin nao foi instalado; seguindo com docker compose."
+    apt_get install -y docker-buildx-plugin || echo "Aviso: docker-buildx-plugin nao foi instalado; seguindo com docker compose."
   else
-    apt-get install -y docker.io docker-compose-plugin
+    apt_get install -y docker.io docker-compose-plugin
   fi
 
   docker version >/dev/null
   docker compose version >/dev/null
+}
+
+apt_get() {
+  local attempt
+  local max_attempts="${APT_LOCK_RETRY_ATTEMPTS:-36}"
+  local delay_seconds="${APT_LOCK_RETRY_DELAY:-10}"
+  local output
+  local rc
+
+  for attempt in $(seq 1 "$max_attempts"); do
+    output="$(DEBIAN_FRONTEND=noninteractive apt-get "$@" 2>&1)" && {
+      printf '%s\n' "$output"
+      return 0
+    }
+    rc=$?
+    printf '%s\n' "$output" >&2
+    if printf '%s\n' "$output" | grep -Eqi 'Could not get lock|Unable to acquire the dpkg frontend lock|lock-frontend|is another process using it|mantida pelo processo|outro processo'; then
+      if [ "$attempt" -lt "$max_attempts" ]; then
+        echo "Aguardando liberacao do apt/dpkg (${attempt}/${max_attempts})..." >&2
+        sleep "$delay_seconds"
+        continue
+      fi
+    fi
+    return "$rc"
+  done
+
+  echo "Timeout aguardando apt/dpkg liberar a trava." >&2
+  return 100
 }
 
 env_escape() {
@@ -161,8 +189,8 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 echo "Instalando pacotes base..."
-apt-get update
-apt-get install -y ca-certificates curl gnupg openssl rsync openssh-client openssh-server keepalived rclone nodejs npm sudo
+apt_get update
+apt_get install -y ca-certificates curl gnupg openssl rsync openssh-client openssh-server keepalived rclone nodejs npm sudo
 install_docker
 
 echo "Criando usuario e diretorios..."
