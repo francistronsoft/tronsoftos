@@ -221,7 +221,10 @@ function logPathFor(prefix, alias, token) {
 function renderVerboseBox(target, title, logPath) {
   target.innerHTML = `<div class="mt-3">
     <div class="d-flex align-items-center justify-content-between mb-2">
-      <strong>${escapeHtml(title)}</strong>
+      <div class="d-flex align-items-center gap-2">
+        <strong>${escapeHtml(title)}</strong>
+        <span class="badge bg-primary" data-log-status>em andamento</span>
+      </div>
       <code>${escapeHtml(logPath)}</code>
     </div>
     <pre class="log-preview mb-0">Aguardando inicio do log...</pre>
@@ -229,8 +232,34 @@ function renderVerboseBox(target, title, logPath) {
   return target.querySelector('.log-preview');
 }
 
+function setVerboseStatus(output, text, variant = 'primary') {
+  const status = output.closest('.mt-3')?.querySelector('[data-log-status]');
+  if (!status) return;
+  status.className = `badge bg-${variant}`;
+  status.textContent = text;
+}
+
+function appendVerbose(output, text) {
+  output.textContent = `${output.textContent}${text}`;
+  output.scrollTop = output.scrollHeight;
+}
+
+async function finishVerbose(logPath, output, finalText, variant = 'success') {
+  try {
+    const data = await api(`/api/logs/tail?path=${encodeURIComponent(logPath)}`);
+    if (data.exists) {
+      output.textContent = data.content || 'Log finalizado sem conteudo.';
+    }
+  } catch (_) {
+    // Mantem o ultimo conteudo do polling se o tail final nao responder.
+  }
+  appendVerbose(output, `\n\n${finalText}`);
+  setVerboseStatus(output, variant === 'success' ? 'concluido' : 'falhou', variant);
+}
+
 function startLogPolling(logPath, output) {
   let active = true;
+  setVerboseStatus(output, 'em andamento', 'primary');
   const tick = async () => {
     if (!active) return;
     try {
@@ -759,11 +788,11 @@ async function databases() {
         btn.textContent = 'Backup...';
         const out = await api(`/api/backups/${btn.dataset.detailBackup}/run`, { method:'POST', body: JSON.stringify({ logToken: token }) });
         stopPolling();
-        verbose.textContent = `${verbose.textContent}\n\nBackup concluido.\n${JSON.stringify(out, null, 2)}`;
+        await finishVerbose(logPath, verbose, `Backup concluido.\n${JSON.stringify(out, null, 2)}`);
         setTimeout(() => { databases(); }, 1200);
       } catch (err) {
         stopPolling();
-        verbose.textContent = `${verbose.textContent}\n\nErro no backup: ${err.message}`;
+        await finishVerbose(logPath, verbose, `Erro no backup: ${err.message}`, 'danger');
         btn.disabled = false;
         btn.textContent = 'Backup agora';
       }
@@ -883,14 +912,21 @@ async function uploads() {
         if (err.status === 401) {
           stopPolling();
           verbose.textContent = `Upload concluido, mas a sessao expirou antes de iniciar a restauracao.\n\nArquivo enviado: ${uploaded.path}\n\nEntre novamente no TronFire e use a opcao "Usar arquivo ja copiado no servidor" para restaurar este arquivo.`;
+          setVerboseStatus(verbose, 'sessao expirada', 'warning');
           btnGbk.disabled = false;
           btnCancelUpload.classList.add('hidden');
           return;
         }
-        throw err;
+        stopPolling();
+        await finishVerbose(logPath, verbose, `Erro no restore: ${err.message}`, 'danger');
+        await appAlert('Falha no restore', `${err.message}\nLog: ${err.payload?.logPath || logPath}`, 'danger');
+        btnGbk.disabled = false;
+        btnCancelUpload.classList.add('hidden');
+        return;
       }
       stopPolling();
-      verbose.textContent = `${verbose.textContent}\n\nRestore concluido.\n${JSON.stringify(restored, null, 2)}`;
+      await finishVerbose(logPath, verbose, `Restore concluido.\n${JSON.stringify(restored, null, 2)}`);
+      await appAlert('Restore concluido', `Banco substituido com sucesso.\nLog: ${restored.logPath || logPath}`, 'success');
       btnGbk.disabled = false;
     } catch (err) {
       gbkOut.textContent = err.message;
@@ -919,9 +955,16 @@ async function uploads() {
       const logPath = logPathFor('restore', selected.dataset.alias, token);
       const verbose = renderVerboseBox(serverRestoreOut, 'Restaurando e substituindo o banco escolhido...', logPath);
       const stopPolling = startLogPolling(logPath, verbose);
-      const restored = await api('/api/restores/from-upload', { method: 'POST', body: JSON.stringify({ uploadPath: serverUploadPath.value, databaseId: serverRestoreDb.value, logToken: token }) });
-      stopPolling();
-      verbose.textContent = `${verbose.textContent}\n\nRestore concluido.\n${JSON.stringify(restored, null, 2)}`;
+      try {
+        const restored = await api('/api/restores/from-upload', { method: 'POST', body: JSON.stringify({ uploadPath: serverUploadPath.value, databaseId: serverRestoreDb.value, logToken: token }) });
+        stopPolling();
+        await finishVerbose(logPath, verbose, `Restore concluido.\n${JSON.stringify(restored, null, 2)}`);
+        await appAlert('Restore concluido', `Banco substituido com sucesso.\nLog: ${restored.logPath || logPath}`, 'success');
+      } catch (err) {
+        stopPolling();
+        await finishVerbose(logPath, verbose, `Erro no restore: ${err.message}`, 'danger');
+        await appAlert('Falha no restore', `${err.message}\nLog: ${err.payload?.logPath || logPath}`, 'danger');
+      }
     } catch (err) {
       serverRestoreOut.textContent = err.message;
     } finally {
