@@ -59,6 +59,8 @@ apply_pairing() {
   local ssh_dir=""
   local authorized_keys=""
   local ssh_key_imported=false
+  local keepalived_applied=false
+  local keepalived_result="null"
 
   valid_app_dir "$app_dir" || fail "Diretorio da aplicacao invalido"
   [[ "$source_file" =~ ^/opt/[A-Za-z0-9._/-]+/state/pairing-import-[A-Za-z0-9._-]+\.env$ ]] || fail "Caminho de pareamento invalido"
@@ -128,8 +130,17 @@ apply_pairing() {
     ssh_key_imported=true
   fi
 
-  printf '{"ok":true,"clusterSecrets":"%s","tronsoftosEnv":"%s","tronfireEnv":"%s","troncomandaEnvUpdated":%s,"sshKeyImported":%s,"sshUser":"%s","authorizedKeys":"%s"}\n' \
-    "$(json_escape "$cluster_secrets")" "$(json_escape "$tronsoftos_env")" "$(json_escape "$tronfire_env")" "$([ -f "$troncomanda_env" ] && echo true || echo false)" "$ssh_key_imported" "$(json_escape "${ssh_user:-}")" "$(json_escape "$authorized_keys")"
+  local ha_interface ha_node_role ha_priority
+  ha_interface="$(grep '^HA_INTERFACE=' "$tronsoftos_env" 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
+  ha_node_role="$(grep '^HA_NODE_ROLE=' "$tronsoftos_env" 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
+  ha_priority="$(grep '^HA_PRIORITY=' "$tronsoftos_env" 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
+  if [ -n "${HA_VIP_CIDR:-}" ] && [ -n "${HA_ROUTER_ID:-}" ] && [ -n "${HA_AUTH_PASS:-}" ] && [ -n "$ha_interface" ]; then
+    keepalived_result="$(apply_vip "$app_dir" "$ha_interface" "$HA_VIP_CIDR" "$HA_ROUTER_ID" "$HA_AUTH_PASS" "${ha_node_role:-BACKUP}" "${ha_priority:-100}")"
+    keepalived_applied=true
+  fi
+
+  printf '{"ok":true,"clusterSecrets":"%s","tronsoftosEnv":"%s","tronfireEnv":"%s","troncomandaEnvUpdated":%s,"sshKeyImported":%s,"sshUser":"%s","authorizedKeys":"%s","keepalivedApplied":%s,"keepalived":%s}\n' \
+    "$(json_escape "$cluster_secrets")" "$(json_escape "$tronsoftos_env")" "$(json_escape "$tronfire_env")" "$([ -f "$troncomanda_env" ] && echo true || echo false)" "$ssh_key_imported" "$(json_escape "${ssh_user:-}")" "$(json_escape "$authorized_keys")" "$keepalived_applied" "$keepalived_result"
 }
 
 sync_ip_envs() {

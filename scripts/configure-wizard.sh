@@ -276,7 +276,8 @@ FIREBIRD_MODE="host"
 echo "Firebird 2.5.9 sera instalado/usado no host Debian."
 
 TRONFIRE_PANEL_PORT="8081"
-TRONSOFTOS_PORT="$(ask "Porta do painel TronSoftOS" "8080")"
+TRONSOFTOS_PORT="8080"
+echo "Porta do painel TronSoftOS: $TRONSOFTOS_PORT"
 FIREBIRD_PORT="3050"
 echo "Porta Firebird padrao: $FIREBIRD_PORT"
 
@@ -297,7 +298,7 @@ HA_INTERFACE=""
 HA_VIP=""
 HA_VIP_CIDR=""
 HA_ROUTER_ID="51"
-HA_AUTH_PASS=""
+HA_AUTH_PASS="vip123"
 HA_PRIORITY="$([ "$NODE_ROLE" = "primary" ] && echo 150 || echo 100)"
 if [ "$DEPLOYMENT_MODE" = "ha" ]; then
   line
@@ -307,10 +308,15 @@ if [ "$DEPLOYMENT_MODE" = "ha" ]; then
   line
   HA_INTERFACE="${STATIC_IP_INTERFACE:-$DEFAULT_IFACE}"
   HA_INTERFACE="$(ask "Interface do VIP/Keepalived" "$HA_INTERFACE")"
-  HA_VIP_CIDR="$(ask "VIP/CIDR do cluster" "${SERVER_IP%.*}.150/24")"
-  HA_VIP="$(ipv4_without_cidr "$HA_VIP_CIDR")"
-  HA_ROUTER_ID="$(ask "Router ID VRRP" "51")"
-  HA_AUTH_PASS="$(ask "Senha VRRP" "vip123")"
+  if [ "$NODE_ROLE" = "primary" ]; then
+    HA_VIP_CIDR="$(ask "VIP/CIDR do cluster" "${SERVER_IP%.*}.150/24")"
+    HA_VIP="$(ipv4_without_cidr "$HA_VIP_CIDR")"
+    HA_ROUTER_ID="$(ask "Router ID VRRP" "51")"
+    echo "Senha VRRP padrao: $HA_AUTH_PASS"
+  else
+    echo "VIP/CIDR, Router ID e senha VRRP serao importados pelo arquivo de pareamento do primary."
+    echo "Depois de importar o pareamento no standby, o Keepalived sera configurado como BACKUP usando a interface informada."
+  fi
   echo "Prioridade Keepalived definida automaticamente: $HA_PRIORITY"
 fi
 

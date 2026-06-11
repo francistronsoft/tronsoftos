@@ -97,9 +97,8 @@ Para instalacao HA:
 - No primeiro servidor, selecione papel `primary`.
 - No segundo servidor, selecione papel `standby`.
 - Fixe o IP real de cada host.
-- Informe o mesmo VIP/CIDR nos dois nos.
-- Use o mesmo Router ID VRRP nos dois nos.
-- Use a mesma senha VRRP nos dois nos.
+- No primary, informe VIP/CIDR e Router ID VRRP.
+- No standby, informe apenas a interface local do VIP/Keepalived; VIP, Router ID e senha VRRP entram pelo arquivo de pareamento.
 - Primary normalmente usa prioridade `150`.
 - Standby normalmente usa prioridade `100`.
 
@@ -109,7 +108,9 @@ Para instalacao HA:
 http://IP_REAL:8080
 ```
 
-Em HA, depois de configurar o VIP:
+Durante a instalacao e pareamento HA, acesse sempre pelo IP real do host que esta sendo configurado, seja primary ou standby. Use o VIP somente depois que os dois nos estiverem instalados, pareados e com Keepalived validado.
+
+Em HA, depois de configurar e validar o VIP:
 
 ```text
 http://VIP:8080
@@ -141,14 +142,18 @@ No primary:
 - Prioridade: `150`.
 - Aplique o VIP.
 
+No instalador, o primary coleta VIP/CIDR e Router ID. A senha VRRP padrao e `vip123` e entra no arquivo de pareamento.
+
 No standby:
 
-- Use o mesmo VIP/CIDR, Router ID e senha VRRP.
-- Papel Keepalived: `BACKUP`.
-- Prioridade: `100`.
-- Aplique o VIP.
+- Informe apenas a interface local do VIP/Keepalived no instalador.
+- Importe o arquivo de pareamento exportado do primary.
+- O VIP/CIDR, Router ID e senha VRRP sao importados do primary.
+- O Keepalived e aplicado como `BACKUP` com prioridade `100`.
 
 O VIP deve aparecer apenas no primary enquanto ele estiver saudavel.
+
+A interface do VIP pode ser diferente da interface usada pelo Sync HA, desde que a interface do VIP exista nos dois servidores, esteja na mesma rede/VLAN de broadcast para VRRP e seja a rede acessada pelos clientes/ERP. O Sync HA pode usar outro IP real/interface, configurado no campo do host standby.
 
 ### 3. Pareamento
 

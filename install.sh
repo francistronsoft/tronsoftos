@@ -306,19 +306,19 @@ else
 fi
 
 echo "Instalacao concluida."
-echo "Edite $ENV_FILE e $APP_DIR/apps/tronfire/.env conforme o cliente."
 ACCESS_PORT="8080"
 ACCESS_HOST=""
 if [ -f "$ENV_FILE" ]; then
   ACCESS_PORT="$(grep '^TRONSOFTOS_PORT=' "$ENV_FILE" | tail -n1 | cut -d= -f2- || true)"
-  ACCESS_HOST="$(grep '^HA_VIP=' "$ENV_FILE" | tail -n1 | cut -d= -f2- || true)"
-  if [ -z "$ACCESS_HOST" ]; then
-    ACCESS_HOST="$(grep '^HOST_STATIC_IP_ADDRESS_CIDR=' "$ENV_FILE" | tail -n1 | cut -d= -f2- | cut -d/ -f1 || true)"
-  fi
+  ACCESS_HOST="$(grep '^HOST_STATIC_IP_ADDRESS_CIDR=' "$ENV_FILE" | tail -n1 | cut -d= -f2- | cut -d/ -f1 || true)"
 fi
 if [ -z "$ACCESS_HOST" ]; then
   ACCESS_HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"
 fi
 ACCESS_PORT="${ACCESS_PORT:-8080}"
 ACCESS_HOST="${ACCESS_HOST:-IP-DO-SERVIDOR}"
-echo "Acesse: http://$ACCESS_HOST:$ACCESS_PORT"
+echo "Configuracoes finais podem ser feitas pelo painel TronSoftOS."
+echo "Acesse este host pelo IP real: http://$ACCESS_HOST:$ACCESS_PORT"
+if [ "$(env_value "$ENV_FILE" "TRONSOFTOS_DEPLOYMENT_MODE")" = "ha" ]; then
+  echo "Em HA, use o VIP somente depois de instalar/parear primary e standby e validar o Keepalived."
+fi
