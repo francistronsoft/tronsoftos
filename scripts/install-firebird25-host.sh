@@ -31,6 +31,32 @@ apt-get install -y ca-certificates libstdc++6 libtommath1 procps net-tools bash 
 apt-get install -y libncurses5 || apt-get install -y libncurses6 libtinfo6
 touch /etc/services /etc/inetd.conf
 
+firebird_host_ready() {
+  [ -x /usr/local/firebird/bin/gbak ] &&
+    [ -x /usr/local/firebird/bin/gfix ] &&
+    [ -x /usr/local/firebird/bin/gstat ] &&
+    [ -x /usr/local/firebird/bin/isql ] &&
+    [ -f /usr/local/firebird/firebird.msg ]
+}
+
+stop_existing_firebird() {
+  local service
+  for service in firebird firebird.service firebird-superserver firebird2.5-superclassic firebird2.5-classic firebird3.0; do
+    if systemctl list-unit-files "$service" >/dev/null 2>&1 || systemctl list-units "$service" >/dev/null 2>&1; then
+      systemctl stop "$service" >/dev/null 2>&1 || true
+    fi
+  done
+
+  if pgrep -x fbguard >/dev/null 2>&1 || pgrep -x fb_smp_server >/dev/null 2>&1 || pgrep -x fbserver >/dev/null 2>&1 || pgrep -x fb_inet_server >/dev/null 2>&1; then
+    echo "Parando processos Firebird existentes antes da instalacao..."
+    pkill -TERM -x fbguard >/dev/null 2>&1 || true
+    pkill -TERM -x fb_smp_server >/dev/null 2>&1 || true
+    pkill -TERM -x fbserver >/dev/null 2>&1 || true
+    pkill -TERM -x fb_inet_server >/dev/null 2>&1 || true
+    sleep 3
+  fi
+}
+
 ensure_legacy_ncurses() {
   local lib_dir
   for lib_dir in /lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu /lib /usr/lib; do
@@ -169,10 +195,15 @@ force_firebird_installer_masterkey() {
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
-tar -xzf "$PACKAGE" -C "$tmp_dir" --strip-components=1
-force_firebird_installer_masterkey
-cd "$tmp_dir"
-./install.sh -silent
+if firebird_host_ready; then
+  echo "Firebird host ja instalado em /usr/local/firebird; conferindo configuracao."
+else
+  stop_existing_firebird
+  tar -xzf "$PACKAGE" -C "$tmp_dir" --strip-components=1
+  force_firebird_installer_masterkey
+  cd "$tmp_dir"
+  ./install.sh -silent
+fi
 
 FB_GBAK="$(find /opt /usr/local -type f -name gbak 2>/dev/null | head -n 1)"
 if [ -z "$FB_GBAK" ]; then
