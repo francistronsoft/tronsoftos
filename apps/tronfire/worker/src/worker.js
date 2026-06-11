@@ -57,6 +57,29 @@ function isPrimaryNode() {
   return TRONFIRE_NODE_ROLE === 'primary';
 }
 
+function databaseOperationActive(db, now = new Date()) {
+  if (String(db.operationStatus || 'IDLE').toUpperCase() !== 'RUNNING') return false;
+  if (!db.operationExpiresAt) return true;
+  return new Date(db.operationExpiresAt) > now;
+}
+
+async function clearExpiredDatabaseOperation(db) {
+  const now = new Date();
+  if (!db?.id || !db.operationExpiresAt || String(db.operationStatus || 'IDLE').toUpperCase() !== 'RUNNING') return db;
+  if (new Date(db.operationExpiresAt) > now) return db;
+  return prisma.managedDatabase.update({
+    where: { id: db.id },
+    data: {
+      operationStatus: 'IDLE',
+      operationKind: null,
+      operationToken: null,
+      operationStartedAt: null,
+      operationExpiresAt: null,
+      operationMessage: null
+    }
+  });
+}
+
 function shQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
 }
@@ -416,6 +439,11 @@ function quarantineInvalidBackup(backupPath, manifestPath = null) {
 async function runBackup(db, reason = 'AUTO') {
   if (!isPrimaryNode()) {
     console.log(`[worker] backup ${reason} ignorado no no ${TRONFIRE_NODE_ROLE}: ${db.alias}`);
+    return;
+  }
+  const currentDb = await clearExpiredDatabaseOperation(db);
+  if (databaseOperationActive(currentDb)) {
+    console.log(`[worker] backup ${reason} ignorado: operacao ${currentDb.operationKind || 'desconhecida'} em andamento para ${db.alias}`);
     return;
   }
   const stamp = backupStamp();

@@ -225,6 +225,19 @@ Em modo HA normal:
 - Standby restaura e valida.
 - Rclone deve ficar permitido apenas no papel `primary`.
 
+## Migracao e Restore de Banco no TronFire
+
+O tecnico nao precisa habilitar manualmente um modo de manutencao antes de migrar ou restaurar um banco pelo TronFire. Ao iniciar restore manual, migracao por upload ou manutencao automatica, o TronFire coloca o banco em operacao protegida automaticamente.
+
+Enquanto a operacao protegida estiver ativa:
+
+- Backup manual e backup automatico desse banco ficam bloqueados.
+- Sync/restore HA desse banco fica bloqueado ou ignorado ate a operacao terminar.
+- O standby desse banco deixa de ser considerado pronto para promocao.
+- A promocao HA automatica/manual nao deve seguir se algum banco obrigatorio estiver em operacao.
+
+Quando a migracao ou restore termina com sucesso, o banco volta para uso e o standby fica `PENDING`. Em seguida, gere ou aguarde um novo backup validado, execute o Sync HA e confirme que o standby voltou para `READY`. So depois disso o banco deve ser considerado pronto para failover.
+
 ## Queda de Energia no Local
 
 Quando a energia voltar:

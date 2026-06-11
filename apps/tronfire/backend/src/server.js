@@ -438,44 +438,159 @@ async function writeJsonSetting(key, value) {
   });
 }
 
-async function acquireDatabaseOperationLock(req, db, operation, reply) {
-  const key = `DATABASE_LOCK_${operation}_${db.id}`;
+const databaseOperationTtlMs = 1000 * 60 * 60 * 6;
+
+function databaseOperationActive(db, now = new Date()) {
+  if (String(db.operationStatus || 'IDLE').toUpperCase() !== 'RUNNING') return false;
+  if (!db.operationExpiresAt) return true;
+  return new Date(db.operationExpiresAt) > now;
+}
+
+function databaseOperationPayload(db) {
+  return {
+    databaseId: db.id,
+    databaseName: db.name,
+    operationStatus: db.operationStatus || 'IDLE',
+    operationKind: db.operationKind || null,
+    operationStartedAt: db.operationStartedAt || null,
+    operationExpiresAt: db.operationExpiresAt || null,
+    operationMessage: db.operationMessage || null
+  };
+}
+
+async function clearExpiredDatabaseOperation(db) {
   const now = new Date();
-  const existing = await prisma.systemSetting.findUnique({ where: { key } });
-  const current = parseJsonSetting(existing?.value);
-  if (current.expiresAt && new Date(current.expiresAt) > now) {
+  if (!db?.id || !db.operationExpiresAt || String(db.operationStatus || 'IDLE').toUpperCase() !== 'RUNNING') return db;
+  if (new Date(db.operationExpiresAt) > now) return db;
+  return prisma.managedDatabase.update({
+    where: { id: db.id },
+    data: {
+      operationStatus: 'IDLE',
+      operationKind: null,
+      operationToken: null,
+      operationStartedAt: null,
+      operationExpiresAt: null,
+      operationMessage: null
+    }
+  });
+}
+
+async function requestHaProtectionForDatabaseOperation(db, operation) {
+  if (!isHaMode() || nodeRole !== 'primary') return null;
+  const reason = `${operation} em andamento no banco ${db.alias}`;
+  const calls = [
+    ['block-promotion', '/api/cluster/promotion/block', { reason }],
+    ['stop-standby-failover', '/api/maintenance/standby/keepalived/stop', { confirmation: 'SUSPENDER STANDBY', reason }]
+  ];
+  const results = [];
+  for (const [name, endpoint, body] of calls) {
+    try {
+      const response = await fetch(`${tronsoftosApiUrl}${endpoint}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(8000)
+      });
+      results.push({ name, ok: response.ok, status: response.status });
+    } catch (err) {
+      results.push({ name, ok: false, error: err.message });
+    }
+  }
+  if (results.some(item => item.ok === false)) {
+    await createAlertOnce(`HA_OPERATION_PROTECTION_FAILED_${db.alias}`, 'WARNING', `Nao foi possivel confirmar protecao HA automatica para ${db.name}`);
+  }
+  return results;
+}
+
+async function replyIfDatabaseOperationActive(db, reply, message = null) {
+  const fresh = await clearExpiredDatabaseOperation(db);
+  if (databaseOperationActive(fresh)) {
     return reply.code(409).send({
-      error: `Ja existe uma ${operation.toLowerCase()} manual em andamento para o banco ${db.name}. Aguarde finalizar antes de iniciar outra operacao.`,
+      error: message || `Ja existe uma operacao em andamento para o banco ${fresh.name}. Aguarde finalizar antes de iniciar outra operacao.`,
       code: 'DATABASE_OPERATION_IN_PROGRESS',
-      databaseId: db.id,
-      databaseName: db.name,
-      operation,
-      startedAt: current.startedAt,
-      expiresAt: current.expiresAt,
-      user: current.user || null
+      operation: databaseOperationPayload(fresh)
     });
   }
+  return null;
+}
+
+async function acquireDatabaseOperationLock(req, db, operation, reply, options = {}) {
+  const fresh = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: db.id } });
+  if (await replyIfDatabaseOperationActive(fresh, reply, `Ja existe uma operacao em andamento para o banco ${fresh.name}. Aguarde finalizar antes de iniciar ${operation.toLowerCase()}.`)) {
+    return null;
+  }
+  const runningBackups = await prisma.backupJob.count({ where: { databaseId: db.id, status: 'RUNNING' } });
+  if (runningBackups > 0) {
+    reply.code(409).send({
+      error: `Existe backup em andamento para o banco ${fresh.name}. Aguarde finalizar antes de iniciar ${operation.toLowerCase()}.`,
+      code: 'DATABASE_BACKUP_IN_PROGRESS',
+      databaseId: fresh.id,
+      databaseName: fresh.name
+    });
+    return null;
+  }
+  const now = new Date();
   const token = makeToken();
   const lock = {
     token,
     operation,
-    databaseId: db.id,
-    databaseName: db.name,
+    databaseId: fresh.id,
+    databaseName: fresh.name,
     user: req.user?.name || req.user?.email || 'desconhecido',
     startedAt: now.toISOString(),
-    expiresAt: new Date(now.getTime() + 1000 * 60 * 60 * 6).toISOString()
+    expiresAt: new Date(now.getTime() + databaseOperationTtlMs).toISOString()
   };
-  await prisma.systemSetting.upsert({
-    where: { key },
-    update: { value: JSON.stringify(lock) },
-    create: { key, value: JSON.stringify(lock) }
-  });
+  const data = {
+    operationStatus: 'RUNNING',
+    operationKind: operation,
+    operationToken: token,
+    operationStartedAt: now,
+    operationExpiresAt: new Date(now.getTime() + databaseOperationTtlMs),
+    operationMessage: options.message || `${operation} em andamento`
+  };
+  if (options.markStandbyMaintenance !== false && isHaMode() && nodeRole === 'primary') {
+    data.standbyStatus = 'MAINTENANCE';
+  }
+  const lockedDb = await prisma.managedDatabase.update({ where: { id: fresh.id }, data });
+  const haProtection = options.markStandbyMaintenance !== false
+    ? await requestHaProtectionForDatabaseOperation(fresh, operation)
+    : null;
   return {
     lock,
+    previousDatabase: fresh,
+    database: lockedDb,
+    haProtection,
     release: async () => {
-      const latest = await prisma.systemSetting.findUnique({ where: { key } });
-      if (parseJsonSetting(latest?.value).token === token) {
-        await prisma.systemSetting.delete({ where: { key } }).catch(() => {});
+      const latest = await prisma.managedDatabase.findUnique({ where: { id: fresh.id } });
+      if (latest?.operationToken === token) {
+        await prisma.managedDatabase.update({
+          where: { id: fresh.id },
+          data: {
+            operationStatus: 'IDLE',
+            operationKind: null,
+            operationToken: null,
+            operationStartedAt: null,
+            operationExpiresAt: null,
+            operationMessage: null
+          }
+        }).catch(() => {});
+      }
+    },
+    releaseWith: async (extraData = {}) => {
+      const latest = await prisma.managedDatabase.findUnique({ where: { id: fresh.id } });
+      if (latest?.operationToken === token) {
+        await prisma.managedDatabase.update({
+          where: { id: fresh.id },
+          data: {
+            ...extraData,
+            operationStatus: 'IDLE',
+            operationKind: null,
+            operationToken: null,
+            operationStartedAt: null,
+            operationExpiresAt: null,
+            operationMessage: null
+          }
+        }).catch(() => {});
       }
     }
   };
@@ -1044,6 +1159,10 @@ app.post('/api/databases/:id/integrity-check', { preHandler: requireOperator }, 
 app.post('/api/databases/:id/auto-maintenance', { preHandler: requireOperator }, async (req, reply) => {
   assertPrimaryWritable();
   const db = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: req.params.id } });
+  const lockHandle = await acquireDatabaseOperationLock(req, db, 'AUTO_MAINTENANCE', reply, {
+    message: 'Manutencao automatica em andamento'
+  });
+  if (reply.sent) return;
   const stamp = timestamp14();
   const rawBackupPath = `/firebird/backups/${db.alias}_maintenance_${stamp}.gbk`;
   const backupPath = `${rawBackupPath}.gz`;
@@ -1119,6 +1238,7 @@ app.post('/api/databases/:id/auto-maintenance', { preHandler: requireOperator },
       entityId: db.id,
       details: { backupPath, safetyCopyPath, repairedPath, logPath }
     });
+    await lockHandle.releaseWith({ standbyStatus: isHaMode() ? 'PENDING' : lockHandle.previousDatabase.standbyStatus });
     const drive = await uploadBackupJobToExternal(req, db, job.id, backupPath);
     return {
       ok: true,
@@ -1143,13 +1263,15 @@ app.post('/api/databases/:id/auto-maintenance', { preHandler: requireOperator },
       entityId: db.id,
       details: { backupPath, safetyCopyPath, repairedPath, logPath, error, quarantined }
     });
+    await lockHandle.releaseWith({ standbyStatus: lockHandle.previousDatabase.standbyStatus });
     return reply.code(500).send({ error, backupPath, safetyCopyPath, logPath });
   }
 });
 
-app.post('/api/backups/:databaseId/run', { preHandler: requireOperator }, async (req) => {
+app.post('/api/backups/:databaseId/run', { preHandler: requireOperator }, async (req, reply) => {
   assertPrimaryWritable();
   const db = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: req.params.databaseId } });
+  if (await replyIfDatabaseOperationActive(db, reply, `Banco ${db.name} esta em manutencao/migracao. Backup manual bloqueado ate finalizar a operacao.`)) return;
   const stamp = safeLogToken(req.body?.logToken);
   const rawBackupPath = `/firebird/backups/${db.alias}_${stamp}.gbk`;
   const backupPath = `${rawBackupPath}.gz`;
@@ -1265,7 +1387,9 @@ app.post('/api/restores/from-upload', { preHandler: requireOperator }, async (re
   const body = req.body || {};
   const sourcePath = assertUploadedBackupPath(body.uploadPath);
   const targetDb = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: body.databaseId } });
-  const lockHandle = await acquireDatabaseOperationLock(req, targetDb, 'RESTORE', reply);
+  const lockHandle = await acquireDatabaseOperationLock(req, targetDb, 'RESTORE', reply, {
+    message: 'Restore/migracao manual em andamento'
+  });
   if (reply.sent) return;
   const stamp = safeLogToken(body.logToken);
   const tempRestorePath = `/firebird/restore-work/${targetDb.alias}_restore_${stamp}.fdb`;
@@ -1308,14 +1432,14 @@ app.post('/api/restores/from-upload', { preHandler: requireOperator }, async (re
     });
     await syncFirebirdAliases();
     await audit(req, 'RESTORE_FINISHED', { entityType: 'database', entityId: db.id, details: { targetDatabaseId: targetDb.id, sourcePath, targetPath: targetDb.filePath, currentBackupPath, logPath } });
+    await lockHandle.releaseWith({ standbyStatus: isHaMode() ? 'PENDING' : lockHandle.previousDatabase.standbyStatus });
     return reply.code(200).send({ ok: true, database: db, sourcePath, targetPath: targetDb.filePath, currentBackupPath, logPath });
   } catch (err) {
     const error = shellErrorText(err);
     await prisma.alert.create({ data: { type: 'RESTORE_FAILED', severity: 'CRITICAL', message: `Restore falhou: ${targetDb.name}` } });
     await audit(req, 'RESTORE_FAILED', { entityType: 'database', entityId: targetDb.id, details: { sourcePath, targetPath: targetDb.filePath, tempRestorePath, logPath, error } });
+    await lockHandle.releaseWith({ standbyStatus: lockHandle.previousDatabase.standbyStatus });
     return reply.code(500).send({ error, logPath });
-  } finally {
-    await lockHandle.release();
   }
 });
 
@@ -1346,7 +1470,12 @@ app.get('/api/ha/status', async () => {
       standbyRequiredForPromotion: db.standbyRequiredForPromotion,
       lastStandbyBackupAt: db.lastStandbyBackupAt,
       lastStandbyValidatedAt: db.lastStandbyValidatedAt,
-      lastStandbyBackupSha256: db.lastStandbyBackupSha256
+      lastStandbyBackupSha256: db.lastStandbyBackupSha256,
+      operationStatus: db.operationStatus || 'IDLE',
+      operationKind: db.operationKind || null,
+      operationStartedAt: db.operationStartedAt || null,
+      operationExpiresAt: db.operationExpiresAt || null,
+      operationMessage: db.operationMessage || null
     }))
   };
 });
@@ -1365,7 +1494,17 @@ app.post('/api/ha/standby/restore', async (req, reply) => {
   const alias = normalizeAlias(body.databaseAlias || manifest?.databaseAlias || path.basename(sourcePath).split('_').slice(0, -1).join('_'));
   const db = await prisma.managedDatabase.findUnique({ where: { alias } });
   if (!db) return reply.code(404).send({ error: `Banco nao cadastrado para alias ${alias}` });
-  const lockHandle = await acquireDatabaseOperationLock(req, db, 'HA_STANDBY_RESTORE', reply);
+  const currentDb = await clearExpiredDatabaseOperation(db);
+  if (databaseOperationActive(currentDb) || String(currentDb.standbyStatus || '').toUpperCase() === 'MAINTENANCE') {
+    await audit(req, 'HA_STANDBY_RESTORE_SKIPPED_MAINTENANCE', { entityType: 'database', entityId: db.id, details: databaseOperationPayload(currentDb) });
+    return {
+      ok: true,
+      skipped: true,
+      reason: 'database_operation_in_progress',
+      database: databaseOperationPayload(currentDb)
+    };
+  }
+  const lockHandle = await acquireDatabaseOperationLock(req, currentDb, 'HA_STANDBY_RESTORE', reply, { markStandbyMaintenance: false });
   if (reply.sent) return;
 
   const stamp = safeLogToken(body.logToken);
@@ -1409,16 +1548,14 @@ app.post('/api/ha/standby/restore', async (req, reply) => {
     ].join('; ');
     await dockerExec(['sh', '-lc', cmd], { timeout: 1000 * 60 * 60 * 4 });
     const sha = manifest?.backupSha256 || null;
-    const updated = await prisma.managedDatabase.update({
-      where: { id: db.id },
-      data: {
+    await lockHandle.releaseWith({
         standbyPath,
         standbyStatus: 'READY',
         lastStandbyBackupAt: manifest?.backupFinishedAt ? new Date(manifest.backupFinishedAt) : new Date(),
         lastStandbyValidatedAt: new Date(),
         lastStandbyBackupSha256: sha
-      }
     });
+    const updated = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: db.id } });
     await syncFirebirdAliases();
     await audit(req, 'HA_STANDBY_RESTORED', { entityType: 'database', entityId: db.id, details: { sourcePath, manifestPath: manifestPath || null, standbyPath, logPath } });
     return { ok: true, database: updated, standbyPath, logPath };
@@ -1427,12 +1564,10 @@ app.post('/api/ha/standby/restore', async (req, reply) => {
     const failureData = previousStandby.standbyStatus === 'READY'
       ? previousStandby
       : { standbyStatus: 'INVALID' };
-    await prisma.managedDatabase.update({ where: { id: db.id }, data: failureData });
+    await lockHandle.releaseWith(failureData);
     await createAlertOnce(`HA_STANDBY_RESTORE_FAILED_${db.alias}`, 'CRITICAL', `Restore HA do standby falhou: ${db.name}`);
     await audit(req, 'HA_STANDBY_RESTORE_FAILED', { entityType: 'database', entityId: db.id, details: { sourcePath, standbyPath, logPath, error } });
     return reply.code(500).send({ error, logPath });
-  } finally {
-    await lockHandle.release();
   }
 });
 
@@ -1484,9 +1619,9 @@ app.post('/api/ha/standby/promote', async (req, reply) => {
     where: { type: { not: 'ARQUIVADO' }, standbyRequiredForPromotion: true },
     orderBy: [{ isPrimary: 'desc' }, { name: 'asc' }]
   });
-  const notReady = dbs.filter(db => db.standbyStatus !== 'READY' || !db.standbyPath);
+  const notReady = dbs.filter(db => db.standbyStatus !== 'READY' || !db.standbyPath || databaseOperationActive(db));
   if (notReady.length) {
-    return reply.code(409).send({ error: 'Nem todos os bancos obrigatorios estao prontos para promocao', databases: notReady.map(db => ({ alias: db.alias, standbyStatus: db.standbyStatus })) });
+    return reply.code(409).send({ error: 'Nem todos os bancos obrigatorios estao prontos para promocao', databases: notReady.map(db => ({ alias: db.alias, standbyStatus: db.standbyStatus, operationStatus: db.operationStatus, operationKind: db.operationKind })) });
   }
 
   const stamp = timestamp14();

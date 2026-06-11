@@ -172,6 +172,12 @@ function badge(type) {
   return `<span class="badge bg-${map[type] || 'secondary'}">${escapeHtml(type)}</span>`;
 }
 
+function operationBadge(db) {
+  if (db.operationStatus !== 'RUNNING') return '<span class="badge bg-success">Livre</span>';
+  const label = db.operationKind || 'Operacao';
+  return `<span class="badge bg-warning text-dark" title="${escapeHtml(db.operationMessage || '')}">${escapeHtml(label)}</span>`;
+}
+
 function databaseStatusView(db, diagnostic) {
   if (diagnostic?.ok === false) return { text: 'Erro/offline', className: 'danger', title: diagnostic.error || 'Falha ao consultar o banco' };
   if (diagnostic?.ok) return { text: 'Conexao OK', className: 'success', title: 'Consulta via isql respondeu; use gfix -online se o ERP ficar limitado por shutdown/maintenance' };
@@ -183,7 +189,7 @@ function databaseStatusView(db, diagnostic) {
 function haOperationWarning(haStatus) {
   if (haStatus?.deploymentMode !== 'ha' || haStatus?.nodeRole !== 'primary') return '';
   return `<div class="alert alert-warning mb-3">
-    Ambiente HA primary detectado. Antes de manutencao, restore ou migracao de banco, suspenda o failover no standby pelo TronSoftOS para evitar promocao durante uma parada planejada do Firebird.
+    Ambiente HA primary detectado. Restore, migracao e manutencao automatica colocam o banco em manutencao operacional e bloqueiam backup/sync/restore HA desse banco ate finalizar.
   </div>`;
 }
 
@@ -548,6 +554,9 @@ function databaseDetailsPanel(db, diagnostic, haStatus) {
           ${usingStandbyPath ? `<div class="col-md-6"><div class="subheader">Caminho de producao</div><code>${escapeHtml(db.filePath)}</code></div>` : ''}
           ${db.standbyPath ? `<div class="col-md-6"><div class="subheader">Caminho standby</div><code>${escapeHtml(db.standbyPath)}</code></div>` : ''}
           ${db.standbyStatus ? `<div class="col-md-3"><div class="subheader">Status standby</div><div>${escapeHtml(db.standbyStatus)}</div></div>` : ''}
+          <div class="col-md-3"><div class="subheader">Operacao</div><div>${operationBadge(db)}</div></div>
+          ${db.operationStartedAt ? `<div class="col-md-3"><div class="subheader">Inicio operacao</div><div>${new Date(db.operationStartedAt).toLocaleString()}</div></div>` : ''}
+          ${db.operationExpiresAt ? `<div class="col-md-3"><div class="subheader">Expira em</div><div>${new Date(db.operationExpiresAt).toLocaleString()}</div></div>` : ''}
           <div class="col-md-3"><div class="subheader">Ultima checagem</div><div>${db.lastCheckAt ? new Date(db.lastCheckAt).toLocaleString() : '-'}</div></div>
           <div class="col-md-3"><div class="subheader">Ultimo backup</div><div>${db.lastBackupAt ? new Date(db.lastBackupAt).toLocaleString() : '-'}</div></div>
           <div class="col-md-3"><div class="subheader">Backup automatico</div><div>${db.backupEnabled ? 'Ativo' : 'Inativo'}</div></div>
@@ -639,7 +648,7 @@ async function databases() {
         <div class="col-12"><div id="dbError" class="text-danger small mt-2"></div></div>
       </div>
     </div></div>
-    <div class="card"><div class="table-responsive"><table class="table"><thead><tr><th>Nome</th><th>Alias</th><th>Status</th><th>Tipo</th><th>Producao</th><th>Backup</th><th>Acoes</th></tr></thead><tbody>${dbs.map(d => {
+    <div class="card"><div class="table-responsive"><table class="table"><thead><tr><th>Nome</th><th>Alias</th><th>Status</th><th>Tipo</th><th>Operacao</th><th>Producao</th><th>Backup</th><th>Acoes</th></tr></thead><tbody>${dbs.map(d => {
       const diagnostic = diagnosticById.get(d.id);
       const status = databaseStatusView(d, diagnostic);
       return `<tr>
@@ -647,6 +656,7 @@ async function databases() {
         <td>${escapeHtml(d.alias)}</td>
         <td title="${escapeHtml(status.title)}"><span class="status-dot bg-${status.className}"></span>${escapeHtml(status.text)}</td>
         <td>${badge(d.type)}</td>
+        <td>${operationBadge(d)}</td>
         <td>${d.isPrimary ? 'Sim' : 'Nao'}</td>
         <td>
           <div class="d-flex flex-wrap align-items-end gap-2">

@@ -71,6 +71,12 @@ model ManagedDatabase {
   lastStandbyBackupAt     DateTime?
   lastStandbyValidatedAt  DateTime?
   lastStandbyBackupSha256 String?
+  operationStatus         String       @default("IDLE")
+  operationKind           String?
+  operationToken          String?
+  operationStartedAt      DateTime?
+  operationExpiresAt      DateTime?
+  operationMessage        String?
   type                    DatabaseType @default(HOMOLOGACAO)
   accessMode              AccessMode   @default(READ_WRITE)
   isPrimary               Boolean      @default(false)
