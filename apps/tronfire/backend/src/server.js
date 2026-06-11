@@ -452,6 +452,7 @@ function databaseOperationPayload(db) {
     databaseName: db.name,
     operationStatus: db.operationStatus || 'IDLE',
     operationKind: db.operationKind || null,
+    operationToken: db.operationToken || null,
     operationStartedAt: db.operationStartedAt || null,
     operationExpiresAt: db.operationExpiresAt || null,
     operationMessage: db.operationMessage || null
@@ -516,21 +517,55 @@ async function replyIfDatabaseOperationActive(db, reply, message = null) {
 
 async function acquireDatabaseOperationLock(req, db, operation, reply, options = {}) {
   const fresh = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: db.id } });
-  if (await replyIfDatabaseOperationActive(fresh, reply, `Ja existe uma operacao em andamento para o banco ${fresh.name}. Aguarde finalizar antes de iniciar ${operation.toLowerCase()}.`)) {
-    return null;
+  if (databaseOperationActive(await clearExpiredDatabaseOperation(fresh))) {
+    const current = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: db.id } });
+    if (options.existingToken && current.operationToken === options.existingToken && current.operationKind === operation) {
+      const refreshed = await prisma.managedDatabase.update({
+        where: { id: current.id },
+        data: {
+          operationMessage: options.message || current.operationMessage,
+          operationExpiresAt: new Date(Date.now() + databaseOperationTtlMs)
+        }
+      });
+      const lock = {
+        token: refreshed.operationToken,
+        operation,
+        databaseId: refreshed.id,
+        databaseName: refreshed.name,
+        user: req.user?.name || req.user?.email || 'desconhecido',
+        startedAt: refreshed.operationStartedAt?.toISOString?.() || null,
+        expiresAt: refreshed.operationExpiresAt?.toISOString?.() || null
+      };
+      return operationLockHandle(current, refreshed, lock, null);
+    }
+    return reply.code(409).send({
+      error: `Ja existe uma operacao em andamento para o banco ${current.name}. Aguarde finalizar antes de iniciar ${operation.toLowerCase()}.`,
+      code: 'DATABASE_OPERATION_IN_PROGRESS',
+      operation: databaseOperationPayload(current)
+    }) && null;
   }
-  const runningBackups = await prisma.backupJob.count({ where: { databaseId: db.id, status: 'RUNNING' } });
-  if (runningBackups > 0) {
+  const runningBackup = await prisma.backupJob.findFirst({
+    where: { databaseId: db.id, status: 'RUNNING' },
+    orderBy: { startedAt: 'desc' }
+  });
+  if (runningBackup) {
     reply.code(409).send({
       error: `Existe backup em andamento para o banco ${fresh.name}. Aguarde finalizar antes de iniciar ${operation.toLowerCase()}.`,
       code: 'DATABASE_BACKUP_IN_PROGRESS',
       databaseId: fresh.id,
-      databaseName: fresh.name
+      databaseName: fresh.name,
+      runningBackup: {
+        id: runningBackup.id,
+        status: runningBackup.status,
+        startedAt: runningBackup.startedAt,
+        backupPath: runningBackup.backupPath,
+        logPath: runningBackup.logPath
+      }
     });
     return null;
   }
   const now = new Date();
-  const token = makeToken();
+  const token = options.token || makeToken();
   const lock = {
     token,
     operation,
@@ -555,16 +590,20 @@ async function acquireDatabaseOperationLock(req, db, operation, reply, options =
   const haProtection = options.markStandbyMaintenance !== false
     ? await requestHaProtectionForDatabaseOperation(fresh, operation)
     : null;
+  return operationLockHandle(fresh, lockedDb, lock, haProtection);
+}
+
+function operationLockHandle(previousDatabase, database, lock, haProtection) {
   return {
     lock,
-    previousDatabase: fresh,
-    database: lockedDb,
+    previousDatabase,
+    database,
     haProtection,
     release: async () => {
-      const latest = await prisma.managedDatabase.findUnique({ where: { id: fresh.id } });
-      if (latest?.operationToken === token) {
+      const latest = await prisma.managedDatabase.findUnique({ where: { id: database.id } });
+      if (latest?.operationToken === lock.token) {
         await prisma.managedDatabase.update({
-          where: { id: fresh.id },
+          where: { id: database.id },
           data: {
             operationStatus: 'IDLE',
             operationKind: null,
@@ -577,10 +616,10 @@ async function acquireDatabaseOperationLock(req, db, operation, reply, options =
       }
     },
     releaseWith: async (extraData = {}) => {
-      const latest = await prisma.managedDatabase.findUnique({ where: { id: fresh.id } });
-      if (latest?.operationToken === token) {
+      const latest = await prisma.managedDatabase.findUnique({ where: { id: database.id } });
+      if (latest?.operationToken === lock.token) {
         await prisma.managedDatabase.update({
-          where: { id: fresh.id },
+          where: { id: database.id },
           data: {
             ...extraData,
             operationStatus: 'IDLE',
@@ -1159,6 +1198,7 @@ app.post('/api/databases/:id/integrity-check', { preHandler: requireOperator }, 
 app.post('/api/databases/:id/auto-maintenance', { preHandler: requireOperator }, async (req, reply) => {
   assertPrimaryWritable();
   const db = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: req.params.id } });
+  const databaseSizeBefore = fs.existsSync(db.filePath) ? fs.statSync(db.filePath).size : null;
   const lockHandle = await acquireDatabaseOperationLock(req, db, 'AUTO_MAINTENANCE', reply, {
     message: 'Manutencao automatica em andamento'
   });
@@ -1220,6 +1260,7 @@ app.post('/api/databases/:id/auto-maintenance', { preHandler: requireOperator },
     ].join('; ');
     await dockerExec(['sh', '-lc', cmd], { timeout: 1000 * 60 * 60 * 4 });
     const { stdout: sizeOut } = await dockerExec(['stat', '-c', '%s', backupPath]);
+    const databaseSizeAfter = fs.existsSync(db.filePath) ? fs.statSync(db.filePath).size : null;
     const { stdout: shaOut } = await dockerExec(['sha256sum', backupPath]);
     const sha = shaOut.trim().split(/\s+/)[0];
     const validation = await validateBackupRestore(db, backupPath, logPath, stamp);
@@ -1236,7 +1277,7 @@ app.post('/api/databases/:id/auto-maintenance', { preHandler: requireOperator },
     await audit(req, 'DATABASE_AUTO_MAINTENANCE_FINISHED', {
       entityType: 'database',
       entityId: db.id,
-      details: { backupPath, safetyCopyPath, repairedPath, logPath }
+      details: { backupPath, safetyCopyPath, repairedPath, logPath, databaseSizeBefore, databaseSizeAfter }
     });
     await lockHandle.releaseWith({ standbyStatus: isHaMode() ? 'PENDING' : lockHandle.previousDatabase.standbyStatus });
     const drive = await uploadBackupJobToExternal(req, db, job.id, backupPath);
@@ -1245,6 +1286,8 @@ app.post('/api/databases/:id/auto-maintenance', { preHandler: requireOperator },
       databaseId: db.id,
       backupPath,
       backupSize: done.backupSize?.toString(),
+      databaseSizeBefore: databaseSizeBefore?.toString?.() ?? null,
+      databaseSizeAfter: databaseSizeAfter?.toString?.() ?? null,
       safetyCopyPath,
       logPath,
       drive
@@ -1382,12 +1425,48 @@ app.post('/api/uploads/gbk', { preHandler: requireOperator }, async (req) => {
   return { ok: true, path: dest, sha256: digest };
 });
 
+app.post('/api/restores/prepare', { preHandler: requireOperator }, async (req, reply) => {
+  assertPrimaryWritable();
+  const body = req.body || {};
+  const targetDb = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: body.databaseId } });
+  const token = makeToken();
+  const lockHandle = await acquireDatabaseOperationLock(req, targetDb, 'RESTORE', reply, {
+    token,
+    message: 'Restore/migracao manual aguardando upload/execucao'
+  });
+  if (reply.sent) return;
+  await audit(req, 'RESTORE_PREPARED', { entityType: 'database', entityId: targetDb.id, details: { token } });
+  return { ok: true, operation: databaseOperationPayload(lockHandle.database) };
+});
+
+app.post('/api/restores/release', { preHandler: requireOperator }, async (req) => {
+  const body = req.body || {};
+  const token = String(body.operationToken || '');
+  if (!token) return { ok: true, released: false };
+  const db = await prisma.managedDatabase.findFirst({ where: { operationToken: token, operationKind: 'RESTORE' } });
+  if (!db) return { ok: true, released: false };
+  await prisma.managedDatabase.update({
+    where: { id: db.id },
+    data: {
+      operationStatus: 'IDLE',
+      operationKind: null,
+      operationToken: null,
+      operationStartedAt: null,
+      operationExpiresAt: null,
+      operationMessage: null
+    }
+  });
+  await audit(req, 'RESTORE_PREPARE_RELEASED', { entityType: 'database', entityId: db.id, details: { token } });
+  return { ok: true, released: true };
+});
+
 app.post('/api/restores/from-upload', { preHandler: requireOperator }, async (req, reply) => {
   assertPrimaryWritable();
   const body = req.body || {};
   const sourcePath = assertUploadedBackupPath(body.uploadPath);
   const targetDb = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: body.databaseId } });
   const lockHandle = await acquireDatabaseOperationLock(req, targetDb, 'RESTORE', reply, {
+    existingToken: body.operationToken ? String(body.operationToken) : null,
     message: 'Restore/migracao manual em andamento'
   });
   if (reply.sent) return;

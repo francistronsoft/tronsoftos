@@ -1,5 +1,6 @@
 import { firebirdExec } from './shell.js';
 import { prisma } from './prisma.js';
+import fs from 'node:fs';
 
 const FIREBIRD_BIN = process.env.FIREBIRD_BIN || '/usr/local/firebird/bin';
 const FIREBIRD_EXEC_MODE = String(process.env.FIREBIRD_EXEC_MODE || 'container').toLowerCase();
@@ -27,6 +28,15 @@ function effectiveDatabasePath(db) {
     return db.standbyPath || standbyPathForAlias(db.alias);
   }
   return db.filePath;
+}
+
+function databaseFileSize(db) {
+  const databasePath = effectiveDatabasePath(db);
+  try {
+    return fs.statSync(databasePath).size;
+  } catch (_) {
+    return null;
+  }
 }
 
 async function queryDatabaseValue(db, sql) {
@@ -57,6 +67,7 @@ async function databaseDiagnostics() {
         ok: true,
         path: effectiveDatabasePath(db),
         pathRole: effectiveDatabasePath(db) === db.filePath ? 'production' : 'standby_read_only',
+        fileSizeBytes: databaseFileSize(db),
         version: version || 'Nao informado',
         licensedUnit: licensedUnit || 'Nao informado'
       });
@@ -68,6 +79,7 @@ async function databaseDiagnostics() {
         ok: false,
         path: effectiveDatabasePath(db),
         pathRole: effectiveDatabasePath(db) === db.filePath ? 'production' : 'standby_read_only',
+        fileSizeBytes: databaseFileSize(db),
         version: 'Erro',
         licensedUnit: 'Erro',
         error: err.message

@@ -257,6 +257,46 @@ async function finishVerbose(logPath, output, finalText, variant = 'success') {
   setVerboseStatus(output, variant === 'success' ? 'concluido' : 'falhou', variant);
 }
 
+function formatDateTime(value) {
+  if (!value) return 'nao informado';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString();
+}
+
+function renderRestoreBlocked(target, err, context = {}) {
+  const payload = err.payload || {};
+  const operation = payload.operation || {};
+  const backup = payload.runningBackup || {};
+  const isBackup = payload.code === 'DATABASE_BACKUP_IN_PROGRESS';
+  const title = isBackup ? 'Restore nao iniciado: backup em andamento' : 'Restore nao iniciado: operacao em andamento';
+  const details = [
+    context.uploadPath ? `<div><strong>Arquivo enviado:</strong> <code>${escapeHtml(context.uploadPath)}</code></div>` : '',
+    `<div><strong>Banco:</strong> ${escapeHtml(payload.databaseName || operation.databaseName || context.databaseName || 'nao informado')}</div>`,
+    `<div><strong>Motivo:</strong> ${escapeHtml(err.message)}</div>`,
+    isBackup ? `<div><strong>Backup iniciado em:</strong> ${escapeHtml(formatDateTime(backup.startedAt))}</div>` : '',
+    isBackup && backup.logPath ? `<div><strong>Log do backup:</strong> <code>${escapeHtml(backup.logPath)}</code></div>` : '',
+    operation.operationKind ? `<div><strong>Operacao ativa:</strong> ${escapeHtml(operation.operationKind)}</div>` : '',
+    operation.operationStartedAt ? `<div><strong>Inicio da operacao:</strong> ${escapeHtml(formatDateTime(operation.operationStartedAt))}</div>` : '',
+    operation.operationExpiresAt ? `<div><strong>Expira em:</strong> ${escapeHtml(formatDateTime(operation.operationExpiresAt))}</div>` : ''
+  ].filter(Boolean).join('');
+
+  target.innerHTML = `<div class="alert alert-warning mt-3">
+    <div class="fw-bold mb-2">${escapeHtml(title)}</div>
+    <div class="mb-2">A restauracao ainda nao foi executada. Aguarde a rotina atual terminar e clique novamente em restaurar.</div>
+    <div class="small">${details}</div>
+  </div>`;
+}
+
+async function releaseRestorePrepare(operationToken) {
+  if (!operationToken) return;
+  try {
+    await api('/api/restores/release', { method: 'POST', body: JSON.stringify({ operationToken }) });
+  } catch (_) {
+    // A reserva expira sozinha pelo TTL se a liberacao best-effort falhar.
+  }
+}
+
 function startLogPolling(logPath, output) {
   let active = true;
   setVerboseStatus(output, 'em andamento', 'primary');
@@ -577,6 +617,7 @@ function databaseDetailsPanel(db, diagnostic, haStatus) {
         <div class="row g-3">
           <div class="col-md-3"><div class="subheader">Alias</div><div>${escapeHtml(db.alias)}</div></div>
           <div class="col-md-3"><div class="subheader">Tipo</div><div>${badge(db.type)}</div></div>
+          <div class="col-md-3"><div class="subheader">Tamanho do banco</div><div>${diagnostic?.fileSizeBytes !== null && diagnostic?.fileSizeBytes !== undefined ? formatBytes(diagnostic.fileSizeBytes) : 'Nao informado'}</div></div>
           <div class="col-md-3"><div class="subheader">Versao</div><div>${escapeHtml(diagnostic?.version || 'Nao informado')}</div></div>
           <div class="col-md-3"><div class="subheader">Empresa Sintegra</div><div>${escapeHtml(diagnostic?.licensedUnit || 'Nao informado')}</div></div>
           <div class="col-md-6"><div class="subheader">Caminho consultado</div><code>${escapeHtml(diagnosticPath)}</code></div>
@@ -811,7 +852,7 @@ async function databases() {
         btn.textContent = 'Manutencao...';
         detailConnectionSlot.innerHTML = `<div class="alert alert-warning mb-3">Manutencao do banco em andamento. Se este ambiente estiver em HA, mantenha o failover suspenso no standby ate concluir e validar o banco.</div>`;
         const out = await api(`/api/databases/${btn.dataset.detailMaintenance}/auto-maintenance`, { method: 'POST' });
-        await appAlert('Manutencao concluida', `Backup: ${out.backupPath}\nCopia anterior: ${out.safetyCopyPath}\nLog: ${out.logPath}`, 'success');
+        await appAlert('Manutencao concluida', `Tamanho antes: ${formatBytes(out.databaseSizeBefore)}\nTamanho depois: ${formatBytes(out.databaseSizeAfter)}\nBackup: ${out.backupPath}\nCopia anterior: ${out.safetyCopyPath}\nLog: ${out.logPath}`, 'success');
         databases();
       } catch (err) {
         await appAlert('Falha na manutencao', `${err.message}\nLog: ${err.payload?.logPath || 'Nao informado'}\nCopia anterior: ${err.payload?.safetyCopyPath || 'Nao informada'}`, 'danger');
@@ -885,13 +926,27 @@ async function uploads() {
         gbkOut.textContent = 'Restore cancelado pelo usuario.';
         return;
       }
+      btnGbk.disabled = true;
+      let preparedOperationToken = null;
+      try {
+        gbkOut.innerHTML = '<div class="alert alert-info mb-0"><strong>Preparando migração...</strong><br>Reservando o banco para impedir backup/sync enquanto o arquivo é enviado e restaurado.</div>';
+        const prepared = await api('/api/restores/prepare', { method: 'POST', body: JSON.stringify({ databaseId: restoreDb.value }) });
+        preparedOperationToken = prepared.operation?.operationToken;
+      } catch (err) {
+        if (err.code === 'DATABASE_BACKUP_IN_PROGRESS' || err.code === 'DATABASE_OPERATION_IN_PROGRESS') {
+          renderRestoreBlocked(gbkOut, err, { databaseName: selected.text });
+          await appAlert('Restore nao iniciado', `${err.message}\n\nA restauracao nao foi executada. Aguarde a rotina atual finalizar e tente novamente.`, 'warning');
+          btnGbk.disabled = false;
+          return;
+        }
+        throw err;
+      }
       uploadProgressWrap.classList.remove('hidden');
       uploadProgress.style.width = '0%';
       uploadProgress.textContent = '0%';
       gbkOut.textContent = 'Enviando arquivo...';
       const f = new FormData();
       f.append('file', gbkFile.files[0]);
-      btnGbk.disabled = true;
       btnCancelUpload.classList.remove('hidden');
       const uploadRequest = apiFormProgress('/api/uploads/gbk', f, percent => {
         uploadProgress.style.width = `${percent}%`;
@@ -899,7 +954,13 @@ async function uploads() {
         gbkOut.textContent = `Enviando arquivo... ${percent}%`;
       });
       btnCancelUpload.onclick = () => uploadRequest.abort();
-      const uploaded = await uploadRequest.promise;
+      let uploaded;
+      try {
+        uploaded = await uploadRequest.promise;
+      } catch (err) {
+        await releaseRestorePrepare(preparedOperationToken);
+        throw err;
+      }
       btnCancelUpload.classList.add('hidden');
       const token = operationToken();
       const logPath = logPathFor('restore', selected.dataset.alias, token);
@@ -907,10 +968,11 @@ async function uploads() {
       const stopPolling = startLogPolling(logPath, verbose);
       let restored;
       try {
-        restored = await api('/api/restores/from-upload', { method: 'POST', body: JSON.stringify({ uploadPath: uploaded.path, databaseId: restoreDb.value, logToken: token }) });
+        restored = await api('/api/restores/from-upload', { method: 'POST', body: JSON.stringify({ uploadPath: uploaded.path, databaseId: restoreDb.value, logToken: token, operationToken: preparedOperationToken }) });
       } catch (err) {
         if (err.status === 401) {
           stopPolling();
+          await releaseRestorePrepare(preparedOperationToken);
           verbose.textContent = `Upload concluido, mas a sessao expirou antes de iniciar a restauracao.\n\nArquivo enviado: ${uploaded.path}\n\nEntre novamente no TronFire e use a opcao "Usar arquivo ja copiado no servidor" para restaurar este arquivo.`;
           setVerboseStatus(verbose, 'sessao expirada', 'warning');
           btnGbk.disabled = false;
@@ -918,6 +980,14 @@ async function uploads() {
           return;
         }
         stopPolling();
+        if (err.code === 'DATABASE_BACKUP_IN_PROGRESS' || err.code === 'DATABASE_OPERATION_IN_PROGRESS') {
+          await releaseRestorePrepare(preparedOperationToken);
+          renderRestoreBlocked(gbkOut, err, { uploadPath: uploaded.path, databaseName: selected.text });
+          await appAlert('Restore nao iniciado', `${err.message}\n\nA restauracao nao foi executada. Aguarde a rotina atual finalizar e tente novamente.`, 'warning');
+          btnGbk.disabled = false;
+          btnCancelUpload.classList.add('hidden');
+          return;
+        }
         await finishVerbose(logPath, verbose, `Erro no restore: ${err.message}`, 'danger');
         await appAlert('Falha no restore', `${err.message}\nLog: ${err.payload?.logPath || logPath}`, 'danger');
         btnGbk.disabled = false;
@@ -951,17 +1021,37 @@ async function uploads() {
         return;
       }
       btnServerRestore.disabled = true;
+      let preparedOperationToken = null;
+      try {
+        serverRestoreOut.innerHTML = '<div class="alert alert-info mb-0"><strong>Preparando migração...</strong><br>Reservando o banco para impedir backup/sync enquanto o arquivo é restaurado.</div>';
+        const prepared = await api('/api/restores/prepare', { method: 'POST', body: JSON.stringify({ databaseId: serverRestoreDb.value }) });
+        preparedOperationToken = prepared.operation?.operationToken;
+      } catch (err) {
+        if (err.code === 'DATABASE_BACKUP_IN_PROGRESS' || err.code === 'DATABASE_OPERATION_IN_PROGRESS') {
+          renderRestoreBlocked(serverRestoreOut, err, { uploadPath: serverUploadPath.value, databaseName: selected.text });
+          await appAlert('Restore nao iniciado', `${err.message}\n\nA restauracao nao foi executada. Aguarde a rotina atual finalizar e tente novamente.`, 'warning');
+          return;
+        }
+        throw err;
+      }
       const token = operationToken();
       const logPath = logPathFor('restore', selected.dataset.alias, token);
       const verbose = renderVerboseBox(serverRestoreOut, 'Restaurando e substituindo o banco escolhido...', logPath);
       const stopPolling = startLogPolling(logPath, verbose);
       try {
-        const restored = await api('/api/restores/from-upload', { method: 'POST', body: JSON.stringify({ uploadPath: serverUploadPath.value, databaseId: serverRestoreDb.value, logToken: token }) });
+        const restored = await api('/api/restores/from-upload', { method: 'POST', body: JSON.stringify({ uploadPath: serverUploadPath.value, databaseId: serverRestoreDb.value, logToken: token, operationToken: preparedOperationToken }) });
         stopPolling();
         await finishVerbose(logPath, verbose, `Restore concluido.\n${JSON.stringify(restored, null, 2)}`);
         await appAlert('Restore concluido', `Banco substituido com sucesso.\nLog: ${restored.logPath || logPath}`, 'success');
       } catch (err) {
         stopPolling();
+        if (err.code === 'DATABASE_BACKUP_IN_PROGRESS' || err.code === 'DATABASE_OPERATION_IN_PROGRESS') {
+          await releaseRestorePrepare(preparedOperationToken);
+          renderRestoreBlocked(serverRestoreOut, err, { uploadPath: serverUploadPath.value, databaseName: selected.text });
+          await appAlert('Restore nao iniciado', `${err.message}\n\nA restauracao nao foi executada. Aguarde a rotina atual finalizar e tente novamente.`, 'warning');
+          return;
+        }
+        await releaseRestorePrepare(preparedOperationToken);
         await finishVerbose(logPath, verbose, `Erro no restore: ${err.message}`, 'danger');
         await appAlert('Falha no restore', `${err.message}\nLog: ${err.payload?.logPath || logPath}`, 'danger');
       }
