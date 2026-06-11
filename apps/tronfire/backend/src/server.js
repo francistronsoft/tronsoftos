@@ -196,8 +196,21 @@ async function tronsoftosRequest(pathname, options = {}) {
   const response = await fetch(`${tronsoftosApiUrl}${pathname}`, { ...options, headers });
   const text = await response.text();
   const body = text ? JSON.parse(text) : {};
-  if (!response.ok) throw new Error(body.error || `TronSoftOS HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(body.error || `TronSoftOS HTTP ${response.status}`);
+    error.payload = body;
+    error.status = response.status;
+    throw error;
+  }
   return body;
+}
+
+async function runHostFirebirdScript(script, timeoutMs = 1000 * 60 * 60 * 4) {
+  return tronsoftosRequest('/api/host/firebird/script', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ script, timeoutMs })
+  });
 }
 
 function timestamp14() {
@@ -1476,12 +1489,12 @@ app.post('/api/restores/from-upload', { preHandler: requireOperator }, async (re
   const logPath = `/firebird/logs/restore_${targetDb.alias}_${stamp}.log`;
 
   try {
-    const cmd = [
+    const restoreSteps = [
       'set -e',
       `src=${shQuote(sourcePath)}`,
       `temp_dest=${shQuote(tempRestorePath)}`,
       `target=${shQuote(targetDb.filePath)}`,
-      `target_conn=${shQuote(firebirdDbConnect(targetDb.filePath))}`,
+      `target_conn=${shQuote(firebirdExecMode === 'host' || firebirdExecMode === 'direct' ? `localhost:${targetDb.filePath}` : firebirdDbConnect(targetDb.filePath))}`,
       `current_backup=${shQuote(currentBackupPath)}`,
       `log=${shQuote(logPath)}`,
       'fail() { code="$1"; shift; echo "$*"; test -f "$log" && cat "$log"; exit "$code"; }',
@@ -1489,19 +1502,24 @@ app.post('/api/restores/from-upload', { preHandler: requireOperator }, async (re
       'rm -f "$temp_dest" || fail 61 "Nao foi possivel remover restore temporario anterior: $temp_dest"',
       'restore_src="$src"',
       `case "$src" in *.gz) restore_src=${shQuote(`/tmp/tronfire_restore_${targetDb.alias}_${stamp}.gbk`)}; gzip -dc "$src" > "$restore_src" || fail 62 "Falha ao descompactar backup: $src" ;; esac`,
-      `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gbak`)} -c -v -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} "$restore_src" ${shQuote(firebirdCreateTarget(tempRestorePath))} > "$log" 2>&1 || fail 66 "Falha no gbak restore"`,
+      `${shQuote(`${firebirdExecMode === 'host' || firebirdExecMode === 'direct' ? '/usr/local/firebird/bin' : (process.env.FIREBIRD_BIN || '/usr/local/firebird/bin')}/gbak`)} -c -v -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} "$restore_src" ${shQuote(firebirdExecMode === 'host' || firebirdExecMode === 'direct' ? `localhost:${tempRestorePath}` : firebirdCreateTarget(tempRestorePath))} > "$log" 2>&1 || fail 66 "Falha no gbak restore"`,
       'if [ "$restore_src" != "$src" ]; then rm -f "$restore_src" || true; fi',
       'test -f "$temp_dest" || fail 63 "Restore terminou, mas o arquivo temporario nao foi encontrado: $temp_dest"',
       'chmod 0666 "$temp_dest" || fail 64 "Nao foi possivel ajustar permissao do banco restaurado: $temp_dest"',
-      `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$temp_dest" >> "$log" 2>&1 || fail 67 "Falha ao validar banco restaurado com gstat"`,
-      `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gfix`)} -shut -force 0 -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} "$target_conn" >> "$log" 2>&1 || true`,
+      `${shQuote(`${firebirdExecMode === 'host' || firebirdExecMode === 'direct' ? '/usr/local/firebird/bin' : (process.env.FIREBIRD_BIN || '/usr/local/firebird/bin')}/gstat`)} -h "$temp_dest" >> "$log" 2>&1 || fail 67 "Falha ao validar banco restaurado com gstat"`,
+      `${shQuote(`${firebirdExecMode === 'host' || firebirdExecMode === 'direct' ? '/usr/local/firebird/bin' : (process.env.FIREBIRD_BIN || '/usr/local/firebird/bin')}/gfix`)} -shut -force 0 -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} "$target_conn" >> "$log" 2>&1 || true`,
       'if [ -f "$target" ]; then cp -p "$target" "$current_backup" || fail 68 "Nao foi possivel criar copia de seguranca atual: $current_backup"; fi',
       'mv -f "$temp_dest" "$target" || fail 69 "Nao foi possivel substituir banco de destino: $target"',
       'chmod 0666 "$target" || fail 70 "Nao foi possivel ajustar permissao do banco final: $target"',
-      `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gfix`)} -online -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} "$target_conn" >> "$log" 2>&1 || true`,
-      `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$target" >> "$log" 2>&1 || fail 71 "Falha ao validar banco final com gstat"`
-    ].join('; ');
-    await dockerExec(['sh', '-lc', cmd], { timeout: 1000 * 60 * 60 * 4 });
+      `${shQuote(`${firebirdExecMode === 'host' || firebirdExecMode === 'direct' ? '/usr/local/firebird/bin' : (process.env.FIREBIRD_BIN || '/usr/local/firebird/bin')}/gfix`)} -online -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} "$target_conn" >> "$log" 2>&1 || true`,
+      `${shQuote(`${firebirdExecMode === 'host' || firebirdExecMode === 'direct' ? '/usr/local/firebird/bin' : (process.env.FIREBIRD_BIN || '/usr/local/firebird/bin')}/gstat`)} -h "$target" >> "$log" 2>&1 || fail 71 "Falha ao validar banco final com gstat"`
+    ];
+    const cmd = restoreSteps.join('; ');
+    if (firebirdExecMode === 'host' || firebirdExecMode === 'direct') {
+      await runHostFirebirdScript(`# TronFire host Firebird script\n${cmd}\n`, 1000 * 60 * 60 * 4);
+    } else {
+      await dockerExec(['sh', '-lc', cmd], { timeout: 1000 * 60 * 60 * 4 });
+    }
     const db = await prisma.managedDatabase.update({
       where: { id: targetDb.id },
       data: {

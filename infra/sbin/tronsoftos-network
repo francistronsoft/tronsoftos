@@ -421,6 +421,16 @@ host_power() {
   printf '{"ok":true,"action":"%s","scheduled":true,"delaySeconds":2}\n' "$(json_escape "$action")"
 }
 
+firebird_script() {
+  local script_path="${1:-}"
+  [[ "$script_path" =~ ^/tmp/tronsoftos-firebird-[A-Za-z0-9._-]+\.sh$ ]] || fail "Script Firebird invalido"
+  [ -f "$script_path" ] || fail "Script Firebird nao encontrado"
+  grep -q '^# TronFire host Firebird script$' "$script_path" || fail "Script Firebird sem assinatura esperada"
+  chmod 0700 "$script_path"
+  FIREBIRD=/usr/local/firebird LD_LIBRARY_PATH="/usr/local/firebird/lib:${LD_LIBRARY_PATH:-}" bash "$script_path"
+  printf '{"ok":true,"script":"%s"}\n' "$(json_escape "$script_path")"
+}
+
 case "$action" in
   apply-static)
     shift
@@ -449,6 +459,10 @@ case "$action" in
   host-power)
     shift
     host_power "$@"
+    ;;
+  firebird-script)
+    shift
+    firebird_script "$@"
     ;;
   *)
     fail "Acao invalida"

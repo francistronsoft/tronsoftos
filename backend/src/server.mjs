@@ -1866,6 +1866,29 @@ async function hostFirebirdAliases(req) {
   }
 }
 
+async function hostFirebirdScript(req) {
+  assertInternalToken(req);
+  const body = await readBody(req);
+  const script = String(body.script || '');
+  const timeoutMs = Math.min(Math.max(Number(body.timeoutMs || 14_400_000), 60_000), 14_400_000);
+  if (!script.startsWith('# TronFire host Firebird script\n')) throw new Error('Script Firebird invalido');
+  if (script.length > 1024 * 512) throw new Error('Script Firebird muito grande');
+  ensureStateDir();
+  const tmpPath = `/tmp/tronsoftos-firebird-${Date.now()}-${Math.random().toString(16).slice(2)}.sh`;
+  fs.writeFileSync(tmpPath, script, { mode: 0o700 });
+  try {
+    const out = await privilegedRun('/usr/local/sbin/tronsoftos-network', ['firebird-script', tmpPath], {
+      timeout: timeoutMs,
+      maxBuffer: 1024 * 1024 * 10
+    });
+    const result = parseJsonLines(out.stdout).at(-1) || { ok: true };
+    appendEvent('FIREBIRD_HOST_SCRIPT_EXECUTED', { script: path.basename(tmpPath), stderr: out.stderr });
+    return { ...result, stdout: out.stdout, stderr: out.stderr };
+  } finally {
+    fs.rmSync(tmpPath, { force: true });
+  }
+}
+
 async function hostNetworkStatus() {
   let interfaces = [];
   try {
@@ -2920,6 +2943,7 @@ async function handleApi(req, reply, url) {
   if (req.method === 'POST' && url.pathname === '/api/cluster/pairing-file/import') return json(reply, 200, await importPairingFile(await readBody(req)));
   if (req.method === 'GET' && url.pathname === '/api/host/firebird') return json(reply, 200, await hostFirebirdStatus());
   if (req.method === 'POST' && url.pathname === '/api/host/firebird/aliases') return json(reply, 200, await hostFirebirdAliases(req));
+  if (req.method === 'POST' && url.pathname === '/api/host/firebird/script') return json(reply, 200, await hostFirebirdScript(req));
   if (req.method === 'GET' && url.pathname === '/api/host/network') return json(reply, 200, await hostNetworkStatus());
   if (req.method === 'POST' && url.pathname === '/api/host/network/static') return json(reply, 200, await hostNetworkStatic(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/host/network/vip') return json(reply, 200, await hostNetworkVip(await readBody(req)));
