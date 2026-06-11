@@ -26,6 +26,7 @@ const METRIC_CONTAINERS = [
 let backupRunning = false;
 
 function firebirdExecOptions(timeout = 60_000, maxBuffer = 1024 * 1024 * 5) {
+  const firebirdHome = process.env.FIREBIRD || '/usr/local/firebird';
   const firebirdLib = process.env.FIREBIRD_LIB || '/usr/local/firebird/lib';
   const currentLdPath = process.env.LD_LIBRARY_PATH || '';
   return {
@@ -33,6 +34,7 @@ function firebirdExecOptions(timeout = 60_000, maxBuffer = 1024 * 1024 * 5) {
     maxBuffer,
     env: {
       ...process.env,
+      FIREBIRD: firebirdHome,
       LD_LIBRARY_PATH: [firebirdLib, currentLdPath].filter(Boolean).join(':')
     }
   };
@@ -308,7 +310,7 @@ async function collectHostFirebirdMetrics() {
 
 async function collectDiskMetrics() {
   try {
-    const { stdout } = await dockerExec(['sh', '-lc', "df -PB1 /firebird/data /firebird/backups | awk 'NR>1 {print $6\" \"$2\" \"$3\" \"$4\" \"$5}'"], 60_000);
+    const { stdout } = await dockerExec(['sh', '-lc', "mkdir -p /firebird/data /firebird/backups; for p in /firebird/data /firebird/backups; do df -PB1 \"$p\" | awk -v p=\"$p\" 'NR==2 {print p\" \"$2\" \"$3\" \"$4\" \"$5}'; done"], 60_000);
     const seen = new Set();
     for (const line of stdout.split(/\r?\n/).map(row => row.trim()).filter(Boolean)) {
       const [mount, total, used, free, usedPercentText] = line.split(/\s+/);

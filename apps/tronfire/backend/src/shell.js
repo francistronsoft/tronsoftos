@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 
 function execOptions(options = {}) {
+  const firebirdHome = process.env.FIREBIRD || '/usr/local/firebird';
   const firebirdLib = process.env.FIREBIRD_LIB || '/usr/local/firebird/lib';
   const currentLdPath = process.env.LD_LIBRARY_PATH || '';
   return {
@@ -11,6 +12,7 @@ function execOptions(options = {}) {
     env: {
       ...process.env,
       ...(options.env || {}),
+      FIREBIRD: firebirdHome,
       LD_LIBRARY_PATH: [firebirdLib, currentLdPath].filter(Boolean).join(':')
     }
   };
