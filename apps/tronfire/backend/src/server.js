@@ -34,7 +34,6 @@ const clusterLockPath = process.env.TRONSOFTOS_CLUSTER_LOCK || '/opt/tronsoftos/
 const clusterSecretsPath = process.env.TRONSOFTOS_CLUSTER_SECRETS || path.join(path.dirname(clusterLockPath), 'cluster-secrets.env');
 const firebirdExecMode = String(process.env.FIREBIRD_EXEC_MODE || 'container').toLowerCase();
 const tronsoftosApiUrl = String(process.env.TRONSOFTOS_API_URL || 'http://host.docker.internal:8080').replace(/\/+$/, '');
-const firebirdInternalHost = process.env.FIREBIRD_HOST || 'host.docker.internal';
 const defaultProductionAlias = 'erp_tronsoft';
 
 await app.register(cors, { origin: true, credentials: true });
@@ -97,12 +96,14 @@ function standbyPathForAlias(alias) {
 
 function firebirdDbConnect(filePath) {
   const value = String(filePath || '').trim();
-  if (firebirdExecMode === 'host' || firebirdExecMode === 'direct') return `${firebirdInternalHost}:${value}`;
+  if (firebirdExecMode === 'host' || firebirdExecMode === 'direct') return `localhost:${value}`;
   return value;
 }
 
 function firebirdCreateTarget(filePath) {
-  return firebirdDbConnect(filePath);
+  const value = String(filePath || '').trim();
+  if (firebirdExecMode === 'host' || firebirdExecMode === 'direct') return value;
+  return firebirdDbConnect(value);
 }
 
 function backupValidationFor(logPath) {
@@ -238,6 +239,13 @@ async function runHostFirebirdScript(script, timeoutMs = 1000 * 60 * 60 * 4) {
     body: JSON.stringify({ script, timeoutMs }),
     timeoutMs: timeoutMs + 60_000
   });
+}
+
+async function runFirebirdShellScript(cmd, timeoutMs = 1000 * 60 * 60 * 4) {
+  if (firebirdExecMode === 'host' || firebirdExecMode === 'direct') {
+    return runHostFirebirdScript(`# TronFire host Firebird script\n${cmd}\n`, timeoutMs);
+  }
+  return dockerExec(['sh', '-lc', cmd], { timeout: timeoutMs });
 }
 
 function timestamp14() {
@@ -767,7 +775,7 @@ async function validateBackupRestore(db, backupPath, logPath, token = timestamp1
     'rm -f "$restore"',
     'echo "[validacao] backup aprovado" >> "$log"'
   ].join('; ');
-  await dockerExec(['sh', '-lc', cmd], { timeout: 1000 * 60 * 60 * 4 });
+  await runFirebirdShellScript(cmd, 1000 * 60 * 60 * 4);
   return backupValidationFor(logPath);
 }
 
@@ -1174,7 +1182,7 @@ app.post('/api/databases/:id/validate', { preHandler: requireOperator }, async (
   const db = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: req.params.id } });
   const targetPath = effectiveDatabasePath(db);
   try {
-    await dockerExec(['sh','-lc',`test -f ${shQuote(targetPath)} && ${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h ${shQuote(targetPath)} >/tmp/tronfire_gstat.txt 2>&1`], { timeout: 120000 });
+    await runFirebirdShellScript(`test -f ${shQuote(targetPath)} && ${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h ${shQuote(targetPath)} >/tmp/tronfire_gstat.txt 2>&1`, 120000);
     const updated = await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ONLINE', lastCheckAt: new Date() } });
     await audit(req, 'DATABASE_VALIDATED', { entityType: 'database', entityId: db.id });
     return updated;
@@ -1198,7 +1206,7 @@ app.post('/api/databases/:id/online', { preHandler: requireOperator }, async (re
       `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gfix`)} -online -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} "$db" > "$log" 2>&1`,
       `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$db_file" >> "$log" 2>&1`
     ].join('; ');
-    await dockerExec(['sh', '-lc', cmd], { timeout: 120000 });
+    await runFirebirdShellScript(cmd, 120000);
     const updated = await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ONLINE', lastCheckAt: new Date() } });
     await audit(req, 'DATABASE_GFIX_ONLINE', { entityType: 'database', entityId: db.id, details: { logPath } });
     return { ok: true, database: updated, logPath };
@@ -1223,7 +1231,7 @@ app.post('/api/databases/:id/integrity-check', { preHandler: requireOperator }, 
       `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gfix`)} -v -full -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} "$db" > "$log" 2>&1`,
       `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$db_file" >> "$log" 2>&1`
     ].join('; ');
-    await dockerExec(['sh', '-lc', cmd], { timeout: 1000 * 60 * 20 });
+    await runFirebirdShellScript(cmd, 1000 * 60 * 20);
     const updated = await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ONLINE', lastCheckAt: new Date() } });
     await audit(req, 'DATABASE_INTEGRITY_OK', { entityType: 'database', entityId: db.id, details: { logPath } });
     return { ok: true, database: updated, logPath };
@@ -1298,7 +1306,7 @@ app.post('/api/databases/:id/auto-maintenance', { preHandler: requireOperator },
       `${gfix} -online -user SYSDBA -password ${password} "$db" >> "$log" 2>&1 || true`,
       `${gstat} -h "$db_file" >> "$log" 2>&1 || fail 72 "Falha ao validar banco final com gstat"`
     ].join('; ');
-    await dockerExec(['sh', '-lc', cmd], { timeout: 1000 * 60 * 60 * 4 });
+    await runFirebirdShellScript(cmd, 1000 * 60 * 60 * 4);
     const { stdout: sizeOut } = await dockerExec(['stat', '-c', '%s', backupPath]);
     const databaseSizeAfter = fs.existsSync(db.filePath) ? fs.statSync(db.filePath).size : null;
     const { stdout: shaOut } = await dockerExec(['sha256sum', backupPath]);
@@ -1363,7 +1371,7 @@ app.post('/api/backups/:databaseId/run', { preHandler: requireOperator }, async 
   const job = await prisma.backupJob.create({ data: { databaseId: db.id, status: 'RUNNING', startedAt: new Date(), backupPath, manifestPath, sourceNode: process.env.TRONSOFTOS_NODE_NAME || null, targetAlias: db.alias, logPath } });
   try {
     const cmd = `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gbak`)} -b -v -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} ${shQuote(firebirdDbConnect(db.filePath))} ${shQuote(rawBackupPath)} > ${shQuote(logPath)} 2>&1 && gzip -f ${shQuote(rawBackupPath)}`;
-    await dockerExec(['sh','-lc', cmd], { timeout: 1000 * 60 * 60 * 4 });
+    await runFirebirdShellScript(cmd, 1000 * 60 * 60 * 4);
     const { stdout: sizeOut } = await dockerExec(['stat','-c','%s', backupPath]);
     const { stdout: shaOut } = await dockerExec(['sha256sum', backupPath]);
     const sha = shaOut.trim().split(/\s+/)[0];
@@ -1542,11 +1550,7 @@ app.post('/api/restores/from-upload', { preHandler: requireOperator }, async (re
       `${shQuote(`${firebirdExecMode === 'host' || firebirdExecMode === 'direct' ? '/usr/local/firebird/bin' : (process.env.FIREBIRD_BIN || '/usr/local/firebird/bin')}/gstat`)} -h "$target" >> "$log" 2>&1 || fail 71 "Falha ao validar banco final com gstat"`
     ];
     const cmd = restoreSteps.join('; ');
-    if (firebirdExecMode === 'host' || firebirdExecMode === 'direct') {
-      await runHostFirebirdScript(`# TronFire host Firebird script\n${cmd}\n`, 1000 * 60 * 60 * 4);
-    } else {
-      await dockerExec(['sh', '-lc', cmd], { timeout: 1000 * 60 * 60 * 4 });
-    }
+    await runFirebirdShellScript(cmd, 1000 * 60 * 60 * 4);
     const db = await prisma.managedDatabase.update({
       where: { id: targetDb.id },
       data: {
@@ -1670,7 +1674,7 @@ app.post('/api/ha/standby/restore', async (req, reply) => {
       `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gfix`)} -mode read_only -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} "$standby_conn" >> "$log" 2>&1 || true`,
       `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$standby" >> "$log" 2>&1 || fail 70 "Falha ao validar standby final com gstat"`
     ].join('; ');
-    await dockerExec(['sh', '-lc', cmd], { timeout: 1000 * 60 * 60 * 4 });
+    await runFirebirdShellScript(cmd, 1000 * 60 * 60 * 4);
     const sha = manifest?.backupSha256 || null;
     await lockHandle.releaseWith({
         standbyPath,
@@ -1712,7 +1716,7 @@ app.post('/api/ha/standby/validate', async (req, reply) => {
       'test -f "$db"',
       `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$db" > "$log" 2>&1`
     ].join('; ');
-    await dockerExec(['sh', '-lc', cmd], { timeout: 120000 });
+    await runFirebirdShellScript(cmd, 120000);
     const data = { standbyStatus: 'READY', lastStandbyValidatedAt: new Date() };
     if (backupSha256) data.lastStandbyBackupSha256 = backupSha256;
     if (backupFinishedAt && !Number.isNaN(backupFinishedAt.getTime())) data.lastStandbyBackupAt = backupFinishedAt;
@@ -1768,7 +1772,7 @@ app.post('/api/ha/standby/promote', async (req, reply) => {
       `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gfix`)} -mode read_write -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} "$prod_conn" >> "$log" 2>&1 || true`,
       `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$prod" >> "$log" 2>&1`
     ].join('; ');
-    await dockerExec(['sh', '-lc', cmd], { timeout: 1000 * 60 * 20 });
+    await runFirebirdShellScript(cmd, 1000 * 60 * 20);
     await prisma.managedDatabase.update({
       where: { id: db.id },
       data: { standbyStatus: 'PROMOTED', status: 'ONLINE', lastCheckAt: new Date(), accessMode: 'READ_WRITE' }

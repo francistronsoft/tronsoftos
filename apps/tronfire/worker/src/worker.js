@@ -93,7 +93,9 @@ function firebirdDbConnect(filePath) {
 }
 
 function firebirdCreateTarget(filePath) {
-  return firebirdDbConnect(filePath);
+  const value = String(filePath || '').trim();
+  if (FIREBIRD_EXEC_MODE === 'host' || FIREBIRD_EXEC_MODE === 'direct') return value;
+  return firebirdDbConnect(value);
 }
 
 function backupStamp() {
