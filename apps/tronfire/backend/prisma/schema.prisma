@@ -82,6 +82,7 @@ model ManagedDatabase {
   isPrimary               Boolean      @default(false)
   backupEnabled           Boolean      @default(false)
   backupFrequencyMinutes  Int          @default(20)
+  backupScheduleUpdatedAt DateTime?
   retentionDays           Int          @default(7)
   status                  String       @default("UNKNOWN")
   lastCheckAt             DateTime?

@@ -510,14 +510,23 @@ async function runBackup(db, reason = 'AUTO') {
 async function cleanupRetention(db) {
   const retentionDays = Math.max(Number(db.retentionDays || 7), 1);
   const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+  const latestSuccess = await prisma.backupJob.findFirst({
+    where: { databaseId: db.id, status: 'SUCCESS' },
+    orderBy: { createdAt: 'desc' }
+  });
   const oldJobs = await prisma.backupJob.findMany({
-    where: { databaseId: db.id, status: 'SUCCESS', createdAt: { lt: cutoff } },
+    where: {
+      databaseId: db.id,
+      status: 'SUCCESS',
+      createdAt: { lt: cutoff },
+      ...(latestSuccess ? { id: { not: latestSuccess.id } } : {})
+    },
     orderBy: { createdAt: 'asc' }
   });
   for (const job of oldJobs) {
-    if (job.backupPath) {
-      try { await dockerExec(['rm', '-f', job.backupPath], 60_000); }
-      catch (err) { console.error('[worker] retention file error', job.backupPath, err.message); }
+    for (const filePath of [job.backupPath, job.manifestPath].filter(Boolean)) {
+      try { await dockerExec(['rm', '-f', filePath], 60_000); }
+      catch (err) { console.error('[worker] retention file error', filePath, err.message); }
     }
     await prisma.backupJob.delete({ where: { id: job.id } });
   }
@@ -537,7 +546,9 @@ async function runAutomaticBackups() {
       const running = await prisma.backupJob.count({ where: { databaseId: db.id, status: 'RUNNING' } });
       if (running > 0) continue;
       const frequencyMs = Math.max(Number(db.backupFrequencyMinutes || 60), 1) * 60 * 1000;
-      const last = db.lastBackupAt ? new Date(db.lastBackupAt).getTime() : 0;
+      const lastBackup = db.lastBackupAt ? new Date(db.lastBackupAt).getTime() : 0;
+      const scheduleUpdated = db.backupScheduleUpdatedAt ? new Date(db.backupScheduleUpdatedAt).getTime() : 0;
+      const last = Math.max(lastBackup || 0, scheduleUpdated || 0);
       if (!last || now - last >= frequencyMs) {
         await runBackup(db);
       }
@@ -558,9 +569,14 @@ async function checkDisk() {
 
 async function checkDatabases() {
   if (!isPrimaryNode()) return;
+  if (backupRunning) return;
   const dbs = await prisma.managedDatabase.findMany({ where: { type: { not: 'ARQUIVADO' } } });
   for (const db of dbs) {
     try {
+      const currentDb = await clearExpiredDatabaseOperation(db);
+      if (databaseOperationActive(currentDb)) continue;
+      const runningBackup = await prisma.backupJob.count({ where: { databaseId: db.id, status: 'RUNNING' } });
+      if (runningBackup > 0) continue;
       const logPath = `/firebird/logs/check_${db.alias}.log`;
       const cmd = [
         'set -e',
@@ -568,14 +584,16 @@ async function checkDatabases() {
         `db=${shQuote(firebirdDbConnect(db.filePath))}`,
         `log=${shQuote(logPath)}`,
         'test -f "$db_file"',
-        `${shQuote(`${FIREBIRD_BIN}/gfix`)} -v -full -user SYSDBA -password ${shQuote(FIREBIRD_PASSWORD)} "$db" > "$log" 2>&1`,
+        `printf 'select 1 from rdb$database;\\nquit;\\n' | ${shQuote(`${FIREBIRD_BIN}/isql`)} -user SYSDBA -password ${shQuote(FIREBIRD_PASSWORD)} "$db" > "$log" 2>&1`,
         `${shQuote(`${FIREBIRD_BIN}/gstat`)} -h "$db_file" >> "$log" 2>&1`
       ].join('; ');
       await dockerExec(['sh','-lc', cmd], 120_000);
       await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ONLINE', lastCheckAt: new Date() } });
+      await prisma.alert.updateMany({ where: { type: `DATABASE_INTEGRITY_ERROR_${db.alias}`, resolved: false }, data: { resolved: true } });
+      await prisma.alert.updateMany({ where: { type: `DATABASE_HEALTH_ERROR_${db.alias}`, resolved: false }, data: { resolved: true } });
     } catch (err) {
       await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ERROR', lastCheckAt: new Date() } });
-      await createAlertOnce(`DATABASE_INTEGRITY_ERROR_${db.alias}`, 'CRITICAL', `Banco com erro/offline ou integridade comprometida: ${db.name}`);
+      await createAlertOnce(`DATABASE_HEALTH_ERROR_${db.alias}`, 'CRITICAL', `Banco offline ou sem resposta no check automatico: ${db.name}`);
     }
   }
 }

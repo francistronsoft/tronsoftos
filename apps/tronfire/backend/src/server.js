@@ -359,6 +359,7 @@ async function backupCleanupCandidates(options = {}) {
       databaseName: job.database?.name || '',
       alias: job.database?.alias || '',
       backupPath: job.backupPath,
+      manifestPath: job.manifestPath,
       backupSize: String(size),
       createdAt: job.createdAt,
       exists
@@ -1166,15 +1167,19 @@ app.patch('/api/databases/:id/backup-settings', { preHandler: requireOperator },
   const body = req.body || {};
   const backupFrequencyMinutes = Math.max(Number(body.backupFrequencyMinutes || 20), 1);
   const retentionDays = Math.max(Number(body.retentionDays || 7), 1);
+  const current = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: req.params.id } });
+  const backupEnabled = !!body.backupEnabled;
+  const scheduleChanged = current.backupEnabled !== backupEnabled || current.backupFrequencyMinutes !== backupFrequencyMinutes;
   const db = await prisma.managedDatabase.update({
     where: { id: req.params.id },
     data: {
-      backupEnabled: !!body.backupEnabled,
+      backupEnabled,
       backupFrequencyMinutes,
-      retentionDays
+      retentionDays,
+      ...(scheduleChanged && backupEnabled ? { backupScheduleUpdatedAt: new Date() } : {})
     }
   });
-  await audit(req, 'BACKUP_SETTINGS_UPDATED', { entityType: 'database', entityId: db.id, details: { backupEnabled: db.backupEnabled, backupFrequencyMinutes, retentionDays } });
+  await audit(req, 'BACKUP_SETTINGS_UPDATED', { entityType: 'database', entityId: db.id, details: { backupEnabled: db.backupEnabled, backupFrequencyMinutes, retentionDays, scheduleChanged } });
   return db;
 });
 
@@ -1408,6 +1413,7 @@ app.post('/api/backups/cleanup', { preHandler: requireAdmin }, async (req) => {
   for (const item of preview.candidates) {
     try {
       if (item.exists) fs.rmSync(item.backupPath, { force: true });
+      if (item.manifestPath && isManagedBackupPath(item.manifestPath)) fs.rmSync(item.manifestPath, { force: true });
       await prisma.backupJob.delete({ where: { id: item.id } });
       deleted.push(item);
     } catch (err) {
