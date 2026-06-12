@@ -87,6 +87,7 @@ model ManagedDatabase {
   status                  String       @default("UNKNOWN")
   lastCheckAt             DateTime?
   lastBackupAt            DateTime?
+  lastBackupAttemptAt     DateTime?
   version                 Int?
   createdAt               DateTime     @default(now())
   updatedAt               DateTime     @updatedAt

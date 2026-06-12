@@ -93,9 +93,7 @@ function firebirdDbConnect(filePath) {
 }
 
 function firebirdCreateTarget(filePath) {
-  const value = String(filePath || '').trim();
-  if (FIREBIRD_EXEC_MODE === 'host' || FIREBIRD_EXEC_MODE === 'direct') return value;
-  return firebirdDbConnect(value);
+  return firebirdDbConnect(filePath);
 }
 
 function backupStamp() {
@@ -455,8 +453,13 @@ async function runBackup(db, reason = 'AUTO') {
   const backupPath = `${rawBackupPath}.gz`;
   const manifestPath = `${backupPath}.manifest.json`;
   const logPath = `/firebird/logs/backup_${db.alias}_${stamp}.log`;
+  const attemptStartedAt = new Date();
+  await prisma.managedDatabase.update({
+    where: { id: db.id },
+    data: { lastBackupAttemptAt: attemptStartedAt }
+  });
   const job = await prisma.backupJob.create({
-    data: { databaseId: db.id, status: 'RUNNING', startedAt: new Date(), backupPath, manifestPath, logPath }
+    data: { databaseId: db.id, status: 'RUNNING', startedAt: attemptStartedAt, backupPath, manifestPath, logPath }
   });
 
   try {
@@ -547,8 +550,9 @@ async function runAutomaticBackups() {
       if (running > 0) continue;
       const frequencyMs = Math.max(Number(db.backupFrequencyMinutes || 60), 1) * 60 * 1000;
       const lastBackup = db.lastBackupAt ? new Date(db.lastBackupAt).getTime() : 0;
+      const lastAttempt = db.lastBackupAttemptAt ? new Date(db.lastBackupAttemptAt).getTime() : 0;
       const scheduleUpdated = db.backupScheduleUpdatedAt ? new Date(db.backupScheduleUpdatedAt).getTime() : 0;
-      const last = Math.max(lastBackup || 0, scheduleUpdated || 0);
+      const last = Math.max(lastBackup || 0, lastAttempt || 0, scheduleUpdated || 0);
       if (!last || now - last >= frequencyMs) {
         await runBackup(db);
       }
