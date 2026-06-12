@@ -2,6 +2,8 @@ import 'dotenv/config';
 import path from 'node:path';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import http from 'node:http';
+import https from 'node:https';
 import { pipeline } from 'node:stream/promises';
 import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
@@ -193,23 +195,48 @@ async function tronsoftosRequest(pathname, options = {}) {
   const internalToken = internalTokenValue();
   const headers = { ...(options.headers || {}) };
   if (internalToken) headers['x-tronsoftos-token'] = internalToken;
-  const response = await fetch(`${tronsoftosApiUrl}${pathname}`, { ...options, headers });
-  const text = await response.text();
-  const body = text ? JSON.parse(text) : {};
-  if (!response.ok) {
-    const error = new Error(body.error || `TronSoftOS HTTP ${response.status}`);
-    error.payload = body;
-    error.status = response.status;
-    throw error;
-  }
-  return body;
+  const url = new URL(pathname, `${tronsoftosApiUrl}/`);
+  const payload = options.body || null;
+  return new Promise((resolve, reject) => {
+    const client = url.protocol === 'https:' ? https : http;
+    const req = client.request(url, {
+      method: options.method || 'GET',
+      headers,
+      timeout: options.timeoutMs || 0
+    }, (res) => {
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let body = {};
+        try {
+          body = text ? JSON.parse(text) : {};
+        } catch (err) {
+          err.message = `Resposta invalida do TronSoftOS: ${err.message}`;
+          return reject(err);
+        }
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          const error = new Error(body.error || `TronSoftOS HTTP ${res.statusCode}`);
+          error.payload = body;
+          error.status = res.statusCode;
+          return reject(error);
+        }
+        resolve(body);
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('Timeout comunicando com TronSoftOS')));
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
 }
 
 async function runHostFirebirdScript(script, timeoutMs = 1000 * 60 * 60 * 4) {
   return tronsoftosRequest('/api/host/firebird/script', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ script, timeoutMs })
+    body: JSON.stringify({ script, timeoutMs }),
+    timeoutMs: timeoutMs + 60_000
   });
 }
 
