@@ -1529,7 +1529,7 @@ app.post('/api/restores/from-upload', { preHandler: requireOperator }, async (re
       'rm -f "$temp_dest" || fail 61 "Nao foi possivel remover restore temporario anterior: $temp_dest"',
       'restore_src="$src"',
       `case "$src" in *.gz) restore_src=${shQuote(`/tmp/tronfire_restore_${targetDb.alias}_${stamp}.gbk`)}; gzip -dc "$src" > "$restore_src" || fail 62 "Falha ao descompactar backup: $src" ;; esac`,
-      `${shQuote(`${firebirdExecMode === 'host' || firebirdExecMode === 'direct' ? '/usr/local/firebird/bin' : (process.env.FIREBIRD_BIN || '/usr/local/firebird/bin')}/gbak`)} -c -v -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} "$restore_src" ${shQuote(firebirdExecMode === 'host' || firebirdExecMode === 'direct' ? `localhost:${tempRestorePath}` : firebirdCreateTarget(tempRestorePath))} > "$log" 2>&1 || fail 66 "Falha no gbak restore"`,
+      `${shQuote(`${firebirdExecMode === 'host' || firebirdExecMode === 'direct' ? '/usr/local/firebird/bin' : (process.env.FIREBIRD_BIN || '/usr/local/firebird/bin')}/gbak`)} -c -v -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} "$restore_src" ${shQuote(firebirdExecMode === 'host' || firebirdExecMode === 'direct' ? tempRestorePath : firebirdCreateTarget(tempRestorePath))} > "$log" 2>&1 || fail 66 "Falha no gbak restore"`,
       'if [ "$restore_src" != "$src" ]; then rm -f "$restore_src" || true; fi',
       'test -f "$temp_dest" || fail 63 "Restore terminou, mas o arquivo temporario nao foi encontrado: $temp_dest"',
       'chmod 0666 "$temp_dest" || fail 64 "Nao foi possivel ajustar permissao do banco restaurado: $temp_dest"',

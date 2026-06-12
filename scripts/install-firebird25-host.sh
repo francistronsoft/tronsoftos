@@ -199,6 +199,46 @@ configure_sysdba_password() {
   return 69
 }
 
+set_firebird_conf_value() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  if grep -Eq "^[#[:space:]]*${key}[[:space:]]*=" "$file"; then
+    perl -pi -e "s|^[#\\s]*${key}\\s*=.*|${key} = ${value}|" "$file"
+  else
+    printf '\n%s = %s\n' "$key" "$value" >> "$file"
+  fi
+}
+
+tune_firebird_host() {
+  local conf="/usr/local/firebird/firebird.conf"
+  local mem_kb=0
+  local temp_cache=134217728
+  local default_cache_pages=2048
+  local temp_dir="$STORAGE_ROOT/firebird/tmp"
+
+  [ -f "$conf" ] || return 0
+  mem_kb="$(awk '/MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+  if [ "$mem_kb" -ge 12582912 ]; then
+    temp_cache=1073741824
+    default_cache_pages=8192
+  elif [ "$mem_kb" -ge 6291456 ]; then
+    temp_cache=536870912
+    default_cache_pages=4096
+  elif [ "$mem_kb" -ge 3145728 ]; then
+    temp_cache=268435456
+    default_cache_pages=2048
+  fi
+
+  mkdir -p "$temp_dir"
+  chmod 0777 "$temp_dir"
+  cp -n "$conf" "$conf.tronsoftos.bak" 2>/dev/null || true
+  set_firebird_conf_value "$conf" "TempCacheLimit" "$temp_cache"
+  set_firebird_conf_value "$conf" "DefaultDbCachePages" "$default_cache_pages"
+  set_firebird_conf_value "$conf" "TempDirectories" "$temp_dir"
+  echo "Firebird host ajustado: TempCacheLimit=$temp_cache, DefaultDbCachePages=$default_cache_pages, TempDirectories=$temp_dir"
+}
+
 force_firebird_installer_masterkey() {
   local installer_file=""
   local patched=0
@@ -248,8 +288,8 @@ if [ "$FB_HOME_REAL" != "/opt/firebird" ] && [ ! -e /opt/firebird ]; then
   ln -s "$FB_HOME_REAL" /opt/firebird
 fi
 
-mkdir -p "$STORAGE_ROOT/firebird/data" "$STORAGE_ROOT/firebird/backups" "$STORAGE_ROOT/firebird/uploads" "$STORAGE_ROOT/firebird/templates" "$STORAGE_ROOT/firebird/standby" "$STORAGE_ROOT/firebird/restore-work" "$STORAGE_ROOT/firebird/quarantine" "$STORAGE_ROOT/firebird/logs" "$STORAGE_ROOT/firebird/scripts"
-chmod 0777 "$STORAGE_ROOT/firebird/data" "$STORAGE_ROOT/firebird/backups" "$STORAGE_ROOT/firebird/uploads" "$STORAGE_ROOT/firebird/templates" "$STORAGE_ROOT/firebird/standby" "$STORAGE_ROOT/firebird/restore-work" "$STORAGE_ROOT/firebird/quarantine" "$STORAGE_ROOT/firebird/logs" "$STORAGE_ROOT/firebird/scripts"
+mkdir -p "$STORAGE_ROOT/firebird/data" "$STORAGE_ROOT/firebird/backups" "$STORAGE_ROOT/firebird/uploads" "$STORAGE_ROOT/firebird/templates" "$STORAGE_ROOT/firebird/standby" "$STORAGE_ROOT/firebird/restore-work" "$STORAGE_ROOT/firebird/quarantine" "$STORAGE_ROOT/firebird/logs" "$STORAGE_ROOT/firebird/scripts" "$STORAGE_ROOT/firebird/tmp"
+chmod 0777 "$STORAGE_ROOT/firebird/data" "$STORAGE_ROOT/firebird/backups" "$STORAGE_ROOT/firebird/uploads" "$STORAGE_ROOT/firebird/templates" "$STORAGE_ROOT/firebird/standby" "$STORAGE_ROOT/firebird/restore-work" "$STORAGE_ROOT/firebird/quarantine" "$STORAGE_ROOT/firebird/logs" "$STORAGE_ROOT/firebird/scripts" "$STORAGE_ROOT/firebird/tmp"
 if [ ! -e /firebird ]; then
   ln -s "$STORAGE_ROOT/firebird" /firebird
 fi
@@ -283,6 +323,7 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now firebird.service
+tune_firebird_host
 configure_sysdba_password
 systemctl restart firebird.service
 
