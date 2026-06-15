@@ -16,6 +16,7 @@ if [ -z "$INTERNAL_TOKEN" ] && [ -f "${TRONSOFTOS_CLUSTER_SECRETS:-${APP_DIR}/st
   INTERNAL_TOKEN="$(grep '^TRONSOFTOS_INTERNAL_TOKEN=' "${TRONSOFTOS_CLUSTER_SECRETS:-${APP_DIR}/state/cluster-secrets.env}" | tail -n1 | cut -d= -f2- || true)"
 fi
 LOG_DIR="${TRONSOFTOS_LOG_DIR:-${APP_DIR}/logs}/ha-sync"
+LOCK_FILE="${TRONSOFTOS_HA_SYNC_LOCK:-${APP_DIR}/state/ha-sync.lock}"
 STAMP="$(date +%Y%m%d%H%M%S)"
 LOG_FILE="${LOG_DIR}/ha-sync-${STAMP}.log"
 KNOWN_HOSTS="${TRONSOFTOS_SSH_KNOWN_HOSTS:-${APP_DIR}/state/known_hosts}"
@@ -23,12 +24,17 @@ IDENTITY_FILE="${TRONSOFTOS_SSH_IDENTITY_FILE:-${APP_DIR}/state/ssh/id_ed25519}"
 SSH_BASE_OPTS="-p ${SSH_PORT} -i ${IDENTITY_FILE} -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${KNOWN_HOSTS}"
 RSYNC_SSH="ssh ${SSH_BASE_OPTS}"
 
-mkdir -p "$LOG_DIR" "$CATALOG_DIR" "$(dirname "$KNOWN_HOSTS")"
+mkdir -p "$LOG_DIR" "$CATALOG_DIR" "$(dirname "$KNOWN_HOSTS")" "$(dirname "$LOCK_FILE")"
 [ -f "$IDENTITY_FILE" ] || { echo "[ha-sync] chave SSH nao encontrada: $IDENTITY_FILE" >&2; exit 1; }
 touch "$KNOWN_HOSTS"
 chmod 700 "$(dirname "$KNOWN_HOSTS")" 2>/dev/null || true
 chmod 600 "$KNOWN_HOSTS" 2>/dev/null || true
 chmod 600 "$IDENTITY_FILE" 2>/dev/null || true
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  echo "[ha-sync] outro sync/restore HA ja esta em execucao; ignorando esta rodada"
+  exit 0
+fi
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "[ha-sync] inicio $(date -Is)"

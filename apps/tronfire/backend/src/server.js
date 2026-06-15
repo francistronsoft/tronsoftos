@@ -35,6 +35,8 @@ const clusterSecretsPath = process.env.TRONSOFTOS_CLUSTER_SECRETS || path.join(p
 const firebirdExecMode = String(process.env.FIREBIRD_EXEC_MODE || 'container').toLowerCase();
 const tronsoftosApiUrl = String(process.env.TRONSOFTOS_API_URL || 'http://host.docker.internal:8080').replace(/\/+$/, '');
 const defaultProductionAlias = 'erp_tronsoft';
+const fixedBackupFrequencyMinutes = 10;
+const fixedBackupRetentionDays = 30;
 
 await app.register(cors, { origin: true, credentials: true });
 await app.register(cookie, { secret: process.env.SESSION_SECRET || 'dev-secret-change-me' });
@@ -1126,8 +1128,8 @@ app.post('/api/databases', { preHandler: requireOperator }, async (req, reply) =
       accessMode: body.accessMode || 'READ_WRITE',
       isPrimary: !!body.isPrimary,
       backupEnabled: !!body.backupEnabled,
-      backupFrequencyMinutes: Number(body.backupFrequencyMinutes || 20),
-      retentionDays: Number(body.retentionDays || 7)
+      backupFrequencyMinutes: fixedBackupFrequencyMinutes,
+      retentionDays: fixedBackupRetentionDays
     }
   });
   await syncFirebirdAliases();
@@ -1165,21 +1167,19 @@ app.post('/api/databases/:id/mark-primary', { preHandler: requireAdmin }, async 
 
 app.patch('/api/databases/:id/backup-settings', { preHandler: requireOperator }, async (req) => {
   const body = req.body || {};
-  const backupFrequencyMinutes = Math.max(Number(body.backupFrequencyMinutes || 20), 1);
-  const retentionDays = Math.max(Number(body.retentionDays || 7), 1);
   const current = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: req.params.id } });
   const backupEnabled = !!body.backupEnabled;
-  const scheduleChanged = current.backupEnabled !== backupEnabled || current.backupFrequencyMinutes !== backupFrequencyMinutes;
+  const scheduleChanged = current.backupEnabled !== backupEnabled || current.backupFrequencyMinutes !== fixedBackupFrequencyMinutes || current.retentionDays !== fixedBackupRetentionDays;
   const db = await prisma.managedDatabase.update({
     where: { id: req.params.id },
     data: {
       backupEnabled,
-      backupFrequencyMinutes,
-      retentionDays,
+      backupFrequencyMinutes: fixedBackupFrequencyMinutes,
+      retentionDays: fixedBackupRetentionDays,
       ...(scheduleChanged && backupEnabled ? { backupScheduleUpdatedAt: new Date() } : {})
     }
   });
-  await audit(req, 'BACKUP_SETTINGS_UPDATED', { entityType: 'database', entityId: db.id, details: { backupEnabled: db.backupEnabled, backupFrequencyMinutes, retentionDays, scheduleChanged } });
+  await audit(req, 'BACKUP_SETTINGS_UPDATED', { entityType: 'database', entityId: db.id, details: { backupEnabled: db.backupEnabled, backupFrequencyMinutes: fixedBackupFrequencyMinutes, retentionDays: fixedBackupRetentionDays, scheduleChanged } });
   return db;
 });
 

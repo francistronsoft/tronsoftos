@@ -81,9 +81,9 @@ model ManagedDatabase {
   accessMode              AccessMode   @default(READ_WRITE)
   isPrimary               Boolean      @default(false)
   backupEnabled           Boolean      @default(false)
-  backupFrequencyMinutes  Int          @default(20)
+  backupFrequencyMinutes  Int          @default(10)
   backupScheduleUpdatedAt DateTime?
-  retentionDays           Int          @default(7)
+  retentionDays           Int          @default(30)
   status                  String       @default("UNKNOWN")
   lastCheckAt             DateTime?
   lastBackupAt            DateTime?

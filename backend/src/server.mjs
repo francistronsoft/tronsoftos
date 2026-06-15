@@ -32,6 +32,7 @@ const googleCredentialsPath = process.env.TRONSOFTOS_GOOGLE_CREDENTIALS || path.
 const googleOauthDir = process.env.TRONSOFTOS_GOOGLE_OAUTH_DIR || path.join(stateDir, 'google-oauth');
 const frontendDist = process.env.TRONSOFTOS_FRONTEND_DIST || path.join(appRoot, 'frontend/dist');
 const haSyncLogDir = process.env.TRONSOFTOS_HA_SYNC_LOG_DIR || path.join(appRoot, 'logs', 'ha-sync');
+const FIXED_HA_SYNC_INTERVAL_MINUTES = 10;
 const actionJobs = new Map();
 const maxActionLogLength = 1024 * 128;
 const dockerConfigDir = process.env.TRONSOFTOS_DOCKER_CONFIG || path.join(stateDir, 'docker-config');
@@ -69,6 +70,7 @@ function buildInfo() {
   const saved = readJson(buildInfoPath, {});
   return {
     version: saved.version || version,
+    buildNumber: Number(saved.buildNumber || process.env.TRONSOFTOS_BUILD_NUMBER || 0) || null,
     commit: saved.commit || process.env.TRONSOFTOS_GIT_COMMIT || 'unknown',
     branch: saved.branch || process.env.TRONSOFTOS_GIT_BRANCH || 'unknown',
     installedAt: saved.installedAt || null
@@ -350,7 +352,7 @@ function rawHaSyncSettings() {
   return {
     enabled: true,
     autoEnabled: true,
-    intervalMinutes: 10,
+    intervalMinutes: FIXED_HA_SYNC_INTERVAL_MINUTES,
     standbyHost: process.env.HA_SYNC_STANDBY_HOST || '',
     sshUser: process.env.HA_SYNC_SSH_USER || 'tronsoft',
     sshPort: Number(process.env.HA_SYNC_SSH_PORT || 22),
@@ -366,7 +368,7 @@ function publicHaSyncSettings(settings = rawHaSyncSettings()) {
   return {
     enabled: settings.enabled !== false,
     autoEnabled: settings.autoEnabled !== false,
-    intervalMinutes: Number(settings.intervalMinutes || 10),
+    intervalMinutes: FIXED_HA_SYNC_INTERVAL_MINUTES,
     standbyHost: settings.standbyHost || '',
     sshUser: settings.sshUser || 'tronsoft',
     sshPort: Number(settings.sshPort || 22),
@@ -428,7 +430,7 @@ function haSyncStatus() {
   const latestBackup = latestFileInfo(receiverBackupPath, /\.(gbk|fbk|gbk\.gz|fbk\.gz)$/i);
   const latestValidatedBackup = latestFileInfo(receiverBackupPath, /\.(manifest\.json)$/i);
   const lastExitCode = lastEvent?.details?.exitCode;
-  const intervalMinutes = Number(settings.intervalMinutes || 10);
+  const intervalMinutes = FIXED_HA_SYNC_INTERVAL_MINUTES;
   const lastSyncAtMs = lastEvent?.createdAt ? new Date(lastEvent.createdAt).getTime() : 0;
   const nextRunAt = settings.enabled && settings.autoEnabled && lastSyncAtMs
     ? new Date(lastSyncAtMs + intervalMinutes * 60 * 1000).toISOString()
@@ -490,7 +492,7 @@ function normalizeHaSyncSettings(body) {
   const next = {
     enabled: body.enabled !== undefined ? body.enabled !== false : current.enabled !== false,
     autoEnabled: body.autoEnabled !== undefined ? body.autoEnabled !== false : current.autoEnabled !== false,
-    intervalMinutes: Number(body.intervalMinutes || current.intervalMinutes || 10),
+    intervalMinutes: FIXED_HA_SYNC_INTERVAL_MINUTES,
     standbyHost: String(body.standbyHost || '').trim(),
     sshUser: String(body.sshUser || current.sshUser || 'tronsoft').trim(),
     sshPort: Number(body.sshPort || current.sshPort || 22),
@@ -500,7 +502,6 @@ function normalizeHaSyncSettings(body) {
     catalogDir: String(body.catalogDir || current.catalogDir || path.join(stateDir, 'tronfire-catalog')).trim()
   };
   if (next.enabled && !next.standbyHost) throw new Error('host standby nao informado');
-  if (!Number.isInteger(next.intervalMinutes) || next.intervalMinutes < 2 || next.intervalMinutes > 1440) throw new Error('intervalo automatico deve ficar entre 2 e 1440 minutos');
   if (!/^[A-Za-z0-9_.@-]{1,80}$/.test(next.sshUser)) throw new Error('usuario SSH invalido');
   if (!Number.isInteger(next.sshPort) || next.sshPort < 1 || next.sshPort > 65535) throw new Error('porta SSH invalida');
   for (const key of ['remoteBackupDir', 'remoteCatalogDir', 'backupDir', 'catalogDir']) {
@@ -1539,7 +1540,11 @@ async function remoteTronsoftosHealth(host) {
 
 function buildsDiffer(left, right) {
   if (!left || !right) return false;
-  return Boolean((left.commit && right.commit && left.commit !== right.commit) || (left.version && right.version && left.version !== right.version));
+  return Boolean(
+    (left.buildNumber && right.buildNumber && left.buildNumber !== right.buildNumber)
+    || (left.commit && right.commit && left.commit !== right.commit)
+    || (left.version && right.version && left.version !== right.version)
+  );
 }
 
 function checkSeverity(ok, warn = false) {
@@ -2186,7 +2191,11 @@ async function dashboard() {
   const backups = await backupStatus();
   const alerts = [];
   if (apps.some(app => app.status === 'offline' && app.enabled)) alerts.push({ severity: 'critical', message: 'App gerenciado offline' });
-  if (buildsDiffer(cluster.build, cluster.standbyHealth)) alerts.push({ severity: 'warning', message: `Nós HA em versões diferentes: local ${cluster.build.commit || cluster.build.version}, standby ${cluster.standbyHealth.commit || cluster.standbyHealth.version}` });
+  if (buildsDiffer(cluster.build, cluster.standbyHealth)) {
+    const localVersion = cluster.build.buildNumber ? `build ${cluster.build.buildNumber}` : (cluster.build.commit || cluster.build.version);
+    const standbyVersion = cluster.standbyHealth.buildNumber ? `build ${cluster.standbyHealth.buildNumber}` : (cluster.standbyHealth.commit || cluster.standbyHealth.version);
+    alerts.push({ severity: 'warning', message: `Nos HA em versoes diferentes: local ${localVersion}, standby ${standbyVersion}` });
+  }
   if (cluster.mode === 'ha' && !cluster.lock) alerts.push({ severity: 'warning', message: 'Cluster HA sem cluster-lock' });
   if (cluster.sync?.status === 'failed') alerts.push({ severity: 'critical', message: 'Sync HA falhou na ultima execucao' });
   if (cluster.failover?.primaryDownSince) {
@@ -2489,7 +2498,7 @@ function shouldRunAutoHaSync(settings) {
   if (identity.deploymentMode === 'ha' && clusterGuard().canServeProduction !== true) return false;
   const runningJob = [...actionJobs.values()].reverse().find(job => job.app === 'ha-sync' && job.status === 'running');
   if (runningJob) return false;
-  const intervalMs = Math.max(Number(settings.intervalMinutes || 10), 2) * 60 * 1000;
+  const intervalMs = FIXED_HA_SYNC_INTERVAL_MINUTES * 60 * 1000;
   const lastEvent = readEvents(200).find(event => ['HA_SYNC_STARTED', 'HA_SYNC_FINISHED', 'HA_SYNC_FAILED'].includes(event.type)) || null;
   const lastEventAt = lastEvent?.createdAt ? new Date(lastEvent.createdAt).getTime() : 0;
   const lastRunAt = Math.max(lastEventAt || 0, lastAutoHaSyncStartedAt || 0);

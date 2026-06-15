@@ -224,9 +224,11 @@ fi
 VERSION_VALUE="$(cat "$APP_DIR/VERSION" 2>/dev/null || printf '0.1.0')"
 GIT_COMMIT="$(git -C "$APP_DIR" rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
 GIT_BRANCH="$(git -C "$APP_DIR" branch --show-current 2>/dev/null || printf 'unknown')"
+BUILD_NUMBER="$(git -C "$APP_DIR" rev-list --count HEAD 2>/dev/null || printf '0')"
 cat > "$APP_DIR/state/build-info.json" <<EOF
 {
   "version": "$VERSION_VALUE",
+  "buildNumber": $BUILD_NUMBER,
   "commit": "$GIT_COMMIT",
   "branch": "$GIT_BRANCH",
   "installedAt": "$(date -Is)"

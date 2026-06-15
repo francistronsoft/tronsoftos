@@ -731,20 +731,10 @@ async function databases() {
         <td>
           <div class="d-flex flex-wrap align-items-end gap-2">
             <input class="form-check-input m-0" type="checkbox" title="Ativar backup automatico" data-backup-enabled="${d.id}" ${d.backupEnabled ? 'checked' : ''}>
-            <label class="d-inline-flex flex-column gap-1 small text-muted mb-0">
-              <span>Intervalo do backup</span>
-              <span class="d-inline-flex align-items-center gap-1">
-              <input class="form-control form-control-sm" type="number" min="1" value="${d.backupFrequencyMinutes || 20}" data-backup-frequency="${d.id}" aria-label="Intervalo do backup automatico em minutos" style="width:72px">
-              min
-              </span>
-            </label>
-            <label class="d-inline-flex flex-column gap-1 small text-muted mb-0">
-              <span>Retencao</span>
-              <span class="d-inline-flex align-items-center gap-1">
-              <input class="form-control form-control-sm" type="number" min="1" value="${d.retentionDays || 7}" data-backup-retention="${d.id}" aria-label="Dias de retencao dos backups" style="width:72px">
-              dias
-              </span>
-            </label>
+            <div class="small text-muted">
+              <div>Automatico: 10 min</div>
+              <div>Retencao: 30 dias</div>
+            </div>
           </div>
         </td>
         <td><button class="btn btn-sm btn-outline-primary" data-details="${d.id}">Detalhes</button> <button class="btn btn-sm btn-outline-warning" data-save-backup="${d.id}">Salvar backup</button></td>
@@ -863,9 +853,7 @@ async function databases() {
   document.querySelectorAll('[data-save-backup]').forEach(b => b.onclick = async () => {
     const id = b.dataset.saveBackup;
     const enabled = document.querySelector(`[data-backup-enabled="${id}"]`).checked;
-    const frequency = Number(document.querySelector(`[data-backup-frequency="${id}"]`).value || 20);
-    const retention = Number(document.querySelector(`[data-backup-retention="${id}"]`).value || 7);
-    await api(`/api/databases/${id}/backup-settings`, { method:'PATCH', body: JSON.stringify({ backupEnabled: enabled, backupFrequencyMinutes: frequency, retentionDays: retention }) });
+    await api(`/api/databases/${id}/backup-settings`, { method:'PATCH', body: JSON.stringify({ backupEnabled: enabled }) });
     b.textContent = 'Salvo';
     setTimeout(() => { databases(); }, 600);
   });

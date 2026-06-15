@@ -15,6 +15,8 @@ const TRONFIRE_NODE_ROLE = String(process.env.TRONFIRE_NODE_ROLE || 'primary').t
 const FIREBIRD_HOST = process.env.FIREBIRD_HOST || 'host.docker.internal';
 const HOST_PROC_ROOT = process.env.HOST_PROC_ROOT || '/host/proc';
 const FIREBIRD_HOST_TARGET = 'firebird_host';
+const FIXED_BACKUP_FREQUENCY_MINUTES = 10;
+const FIXED_BACKUP_RETENTION_DAYS = 30;
 const FIREBIRD_PROCESS_NAMES = new Set(['fbguard', 'fbserver', 'fb_inet_server', 'fb_smp_server', 'firebird']);
 const METRIC_CONTAINERS = [
   'tronfire_firebird25',
@@ -511,7 +513,7 @@ async function runBackup(db, reason = 'AUTO') {
 }
 
 async function cleanupRetention(db) {
-  const retentionDays = Math.max(Number(db.retentionDays || 7), 1);
+  const retentionDays = FIXED_BACKUP_RETENTION_DAYS;
   const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
   const latestSuccess = await prisma.backupJob.findFirst({
     where: { databaseId: db.id, status: 'SUCCESS' },
@@ -548,7 +550,7 @@ async function runAutomaticBackups() {
       await cleanupRetention(db);
       const running = await prisma.backupJob.count({ where: { databaseId: db.id, status: 'RUNNING' } });
       if (running > 0) continue;
-      const frequencyMs = Math.max(Number(db.backupFrequencyMinutes || 60), 1) * 60 * 1000;
+      const frequencyMs = FIXED_BACKUP_FREQUENCY_MINUTES * 60 * 1000;
       const lastBackup = db.lastBackupAt ? new Date(db.lastBackupAt).getTime() : 0;
       const lastAttempt = db.lastBackupAttemptAt ? new Date(db.lastBackupAttemptAt).getTime() : 0;
       const scheduleUpdated = db.backupScheduleUpdatedAt ? new Date(db.backupScheduleUpdatedAt).getTime() : 0;

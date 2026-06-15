@@ -352,6 +352,15 @@ function DashboardView({ dashboard }) {
     : dashboard.cluster.guard?.canPromote
       ? 'A promocao esta liberada, mas so ocorre se o watchdog detectar queda do primary ou se o tecnico acionar manualmente.'
       : 'Ainda nao houve promocao. O standby continua recebendo/validando backups e aguardando autorizacao.';
+  const localBuild = dashboard.build || dashboard.cluster.build || {};
+  const standbyBuild = dashboard.cluster.standbyHealth || {};
+  const buildValue = build => build?.buildNumber ? `Build ${build.buildNumber}` : (build?.version || '-');
+  const buildDetail = build => `versao ${build?.version || '-'} · commit ${build?.commit || 'unknown'}`;
+  const buildsDifferClient = (left, right) => Boolean(
+    (left?.buildNumber && right?.buildNumber && left.buildNumber !== right.buildNumber)
+    || (left?.commit && right?.commit && left.commit !== right.commit)
+    || (left?.version && right?.version && left.version !== right.version)
+  );
   return (
     <div className="space-y-5">
       <div className="grid gap-4 lg:grid-cols-5">
@@ -362,11 +371,11 @@ function DashboardView({ dashboard }) {
         <Stat label="Hora servidor" value={formatDateTime(dashboard.generatedAt)} detail="gerado pelo backend" icon={FileClock} tone="slate" />
       </div>
       <div className="grid gap-4 lg:grid-cols-3">
-        <Stat label="Versao local" value={dashboard.build?.version || dashboard.cluster.build?.version || '-'} detail={`commit ${dashboard.build?.commit || dashboard.cluster.build?.commit || 'unknown'}`} icon={GitBranch} tone="slate" />
+        <Stat label="Versao local" value={buildValue(localBuild)} detail={buildDetail(localBuild)} icon={GitBranch} tone="slate" />
         {isStandbyNode ? (
-          <Stat label="Versao deste standby" value={dashboard.build?.version || dashboard.cluster.build?.version || '-'} detail={`commit ${dashboard.build?.commit || dashboard.cluster.build?.commit || 'unknown'}`} icon={GitBranch} tone="green" />
+          <Stat label="Versao deste standby" value={buildValue(localBuild)} detail={buildDetail(localBuild)} icon={GitBranch} tone="green" />
         ) : (
-          <Stat label="Versao standby" value={dashboard.cluster.standbyHealth?.version || '-'} detail={dashboard.cluster.standbyHealth?.ok ? `commit ${dashboard.cluster.standbyHealth.commit || 'unknown'}` : dashboard.cluster.standbyHealth?.error || 'nao consultado'} icon={GitBranch} tone={dashboard.cluster.standbyHealth?.ok ? ((dashboard.cluster.standbyHealth.commit && dashboard.cluster.build?.commit && dashboard.cluster.standbyHealth.commit !== dashboard.cluster.build.commit) ? 'amber' : 'green') : 'slate'} />
+          <Stat label="Versao standby" value={buildValue(standbyBuild)} detail={dashboard.cluster.standbyHealth?.ok ? buildDetail(standbyBuild) : dashboard.cluster.standbyHealth?.error || 'nao consultado'} icon={GitBranch} tone={dashboard.cluster.standbyHealth?.ok ? (buildsDifferClient(localBuild, standbyBuild) ? 'amber' : 'green') : 'slate'} />
         )}
         {isStandbyNode ? (
           <Stat label="Sync recebido" value={sync.standbyReady ? 'operando' : standbyDbSummary} detail={syncReceiverDetail} icon={RefreshCw} tone={sync.standbyReady ? 'green' : 'amber'} />
@@ -606,7 +615,7 @@ function ClusterView({ dashboard }) {
     sshUser: sync.sshUser || 'tronsoft',
     sshPort: sync.sshPort || 22,
     autoEnabled: true,
-    intervalMinutes: sync.intervalMinutes || 10,
+    intervalMinutes: 10,
     remoteBackupDir: sync.remoteBackupDir || '/opt/tronfire-storage/firebird/backups',
     remoteCatalogDir: sync.remoteCatalogDir || '/tmp/tronfire-catalog',
     backupDir: sync.backupDir || '/opt/tronfire-storage/firebird/backups',
@@ -1275,24 +1284,13 @@ function ClusterView({ dashboard }) {
               <div>
                 <div className="text-sm font-medium text-slate-950">Sincronizacao automatica ativa</div>
                 <div className="mt-1 text-xs text-slate-500">
-                  O primary envia continuamente backups validados, catalogo e restore do standby conforme o intervalo configurado.
+                  O primary envia continuamente backups validados, catalogo e restore do standby a cada 10 minutos.
                 </div>
               </div>
-              <label className="block">
-                <span className="text-xs font-medium uppercase text-slate-500">Intervalo</span>
-                <select
-                  value={syncValues.intervalMinutes}
-                  onChange={event => setSyncValue('intervalMinutes', Number(event.target.value))}
-                  className="mt-1 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
-                >
-                  <option value={2}>2 minutos</option>
-                  <option value={5}>5 minutos</option>
-                  <option value={10}>10 minutos</option>
-                  <option value={15}>15 minutos</option>
-                  <option value={30}>30 minutos</option>
-                  <option value={60}>60 minutos</option>
-                </select>
-              </label>
+              <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm">
+                <div className="text-xs font-medium uppercase text-slate-500">Intervalo</div>
+                <div className="mt-1 font-semibold text-slate-950">10 minutos</div>
+              </div>
             </div>
             <div className="mt-2 text-xs text-slate-500">
               O automatico roda somente no primary/ativo e nao inicia outro sync se ja houver um job em execucao. Esse ciclo continuo mantem o standby pronto para failover.
