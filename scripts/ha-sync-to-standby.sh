@@ -3,14 +3,19 @@ set -euo pipefail
 
 APP_DIR="${TRONSOFTOS_APP_DIR:-/opt/tronsoftos}"
 STANDBY_HOST="${HA_SYNC_STANDBY_HOST:?missing HA_SYNC_STANDBY_HOST}"
+HA_SYNC_MODE="${HA_SYNC_MODE:-physical}"
 SSH_USER="${HA_SYNC_SSH_USER:-tronsoft}"
 SSH_PORT="${HA_SYNC_SSH_PORT:-22}"
 REMOTE_BACKUP_DIR="${HA_SYNC_REMOTE_BACKUP_DIR:-/opt/tronfire-storage/firebird/backups}"
+REMOTE_RESTORE_DIR="${HA_SYNC_REMOTE_RESTORE_DIR:-/opt/tronfire-storage/firebird/restore-work}"
 REMOTE_CATALOG_DIR="${HA_SYNC_REMOTE_CATALOG_DIR:-/tmp/tronfire-catalog}"
 BACKUP_DIR="${FIREBIRD_BACKUP_DIR:-/opt/tronfire-storage/firebird/backups}"
+DATA_DIR="${FIREBIRD_DATA_DIR:-/opt/tronfire-storage/firebird/data}"
 CATALOG_DIR="${TRONFIRE_CATALOG_EXPORT_DIR:-${APP_DIR}/state/tronfire-catalog}"
 AUTO_RESTORE_STANDBY="${HA_SYNC_AUTO_RESTORE_STANDBY:-true}"
 STANDBY_TRONFIRE_URL="${HA_SYNC_STANDBY_TRONFIRE_URL:-http://127.0.0.1:${TRONFIRE_PANEL_PORT:-8081}}"
+FIREBIRD_BIN="${FIREBIRD_BIN:-/usr/local/firebird/bin}"
+FIREBIRD_PASSWORD="${FIREBIRD_PASSWORD:-masterkey}"
 INTERNAL_TOKEN="${TRONSOFTOS_INTERNAL_TOKEN:-}"
 if [ -z "$INTERNAL_TOKEN" ] && [ -f "${TRONSOFTOS_CLUSTER_SECRETS:-${APP_DIR}/state/cluster-secrets.env}" ]; then
   INTERNAL_TOKEN="$(grep '^TRONSOFTOS_INTERNAL_TOKEN=' "${TRONSOFTOS_CLUSTER_SECRETS:-${APP_DIR}/state/cluster-secrets.env}" | tail -n1 | cut -d= -f2- || true)"
@@ -38,13 +43,14 @@ fi
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "[ha-sync] inicio $(date -Is)"
-echo "[ha-sync] destino ${SSH_USER}@${STANDBY_HOST}:${REMOTE_BACKUP_DIR}"
+echo "[ha-sync] modo ${HA_SYNC_MODE}"
+echo "[ha-sync] destino ${SSH_USER}@${STANDBY_HOST}"
 
 echo "[ha-sync] exportando catalogo PostgreSQL do TronFire"
 TRONSOFTOS_APP_DIR="$APP_DIR" TRONFIRE_CATALOG_EXPORT_DIR="$CATALOG_DIR" bash "$APP_DIR/scripts/tronfire-catalog-export.sh"
 
 echo "[ha-sync] preparando diretorios no standby"
-ssh ${SSH_BASE_OPTS} "${SSH_USER}@${STANDBY_HOST}" "mkdir -p '$REMOTE_BACKUP_DIR' '$REMOTE_CATALOG_DIR'"
+ssh ${SSH_BASE_OPTS} "${SSH_USER}@${STANDBY_HOST}" "mkdir -p '$REMOTE_BACKUP_DIR' '$REMOTE_RESTORE_DIR' '$REMOTE_CATALOG_DIR'"
 
 VALID_BACKUP_LIST="$(mktemp)"
 RESTORE_LIST="$(mktemp)"
@@ -84,7 +90,9 @@ for alias in "${!latest_backup_by_alias[@]}"; do
 done
 
 echo "[ha-sync] sincronizando backups Firebird"
-if [ -s "$VALID_BACKUP_LIST" ]; then
+if [ "$HA_SYNC_MODE" != "backup_restore" ]; then
+  echo "[ha-sync] modo ${HA_SYNC_MODE}: backup GBK nao sera sincronizado nesta rodada"
+elif [ -s "$VALID_BACKUP_LIST" ]; then
   rsync -aHAX --no-owner --no-group \
     -e "$RSYNC_SSH" \
     --files-from="$VALID_BACKUP_LIST" \
@@ -105,6 +113,39 @@ rsync -aHAX --no-owner --no-group \
 
 json_escape() {
   printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+run_physical_sync() {
+  local found=0
+  local db_file
+  local alias
+  local temp_name
+  local remote_tmp_path
+  local api_tmp_path
+  shopt -s nullglob
+  for db_file in "${DATA_DIR%/}"/*.fdb; do
+    found=1
+    alias="$(basename "$db_file" .fdb)"
+    temp_name="${alias}_physical_${STAMP}.fdb"
+    remote_tmp_path="${REMOTE_RESTORE_DIR%/}/${temp_name}"
+    api_tmp_path="/firebird/restore-work/${temp_name}"
+    echo "[ha-sync] sync fisico ${alias}: bloqueando banco para copia"
+    "${FIREBIRD_BIN%/}/nbackup" -user SYSDBA -password "$FIREBIRD_PASSWORD" -L "$db_file"
+    if ! rsync -aHAX --no-owner --no-group --inplace -e "$RSYNC_SSH" "$db_file" "${SSH_USER}@${STANDBY_HOST}:${remote_tmp_path}"; then
+      "${FIREBIRD_BIN%/}/nbackup" -user SYSDBA -password "$FIREBIRD_PASSWORD" -N "$db_file" || true
+      echo "[ha-sync] falha no rsync fisico ${alias}" >&2
+      exit 31
+    fi
+    "${FIREBIRD_BIN%/}/nbackup" -user SYSDBA -password "$FIREBIRD_PASSWORD" -N "$db_file"
+    echo "[ha-sync] sync fisico ${alias}: finalizando no standby"
+    body="{\"databaseAlias\":\"$(json_escape "$alias")\",\"physicalPath\":\"$(json_escape "$api_tmp_path")\",\"logToken\":\"ha_physical_${STAMP}\"}"
+    ssh ${SSH_BASE_OPTS} "${SSH_USER}@${STANDBY_HOST}" \
+      "response=\$(curl -sS -w '\n%{http_code}' -X POST '${STANDBY_TRONFIRE_URL%/}/api/ha/standby/physical-restore' -H 'content-type: application/json' -H 'x-tronsoftos-token: $INTERNAL_TOKEN' --data-binary '$body'); status=\$(printf '%s' \"\$response\" | tail -n1); payload=\$(printf '%s' \"\$response\" | sed '\$d'); printf '%s\n' \"\$payload\"; case \"\$status\" in 2*) exit 0 ;; *) exit 22 ;; esac"
+  done
+  shopt -u nullglob
+  if [ "$found" -eq 0 ]; then
+    echo "[ha-sync] nenhum banco .fdb encontrado para sync fisico em ${DATA_DIR}"
+  fi
 }
 
 standby_backup_ready() {
@@ -139,7 +180,13 @@ echo "[ha-sync] importando catalogo TronFire no standby"
 ssh ${SSH_BASE_OPTS} "${SSH_USER}@${STANDBY_HOST}" \
   "TRONSOFTOS_APP_DIR='$APP_DIR' bash '$APP_DIR/scripts/tronfire-catalog-import.sh' '${REMOTE_CATALOG_DIR%/}/tronfire_catalog_latest.dump'"
 
-if [ "$AUTO_RESTORE_STANDBY" = "true" ]; then
+if [ "$AUTO_RESTORE_STANDBY" = "true" ] && [ "$HA_SYNC_MODE" = "physical" ]; then
+  if [ -z "$INTERNAL_TOKEN" ]; then
+    echo "[ha-sync] sync fisico habilitado, mas TRONSOFTOS_INTERNAL_TOKEN nao esta configurado" >&2
+    exit 2
+  fi
+  run_physical_sync
+elif [ "$AUTO_RESTORE_STANDBY" = "true" ]; then
   if [ -z "$INTERNAL_TOKEN" ]; then
     echo "[ha-sync] restore standby automatico habilitado, mas TRONSOFTOS_INTERNAL_TOKEN nao esta configurado" >&2
     exit 2

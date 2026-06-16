@@ -732,7 +732,7 @@ async function databases() {
           <div class="d-flex flex-wrap align-items-end gap-2">
             <input class="form-check-input m-0" type="checkbox" title="Ativar backup automatico" data-backup-enabled="${d.id}" ${d.backupEnabled ? 'checked' : ''}>
             <div class="small text-muted">
-              <div>Automatico: 10 min</div>
+              <div>Automatico: 5 min</div>
               <div>Retencao: 30 dias</div>
             </div>
           </div>

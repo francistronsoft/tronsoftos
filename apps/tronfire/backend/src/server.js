@@ -35,7 +35,7 @@ const clusterSecretsPath = process.env.TRONSOFTOS_CLUSTER_SECRETS || path.join(p
 const firebirdExecMode = String(process.env.FIREBIRD_EXEC_MODE || 'container').toLowerCase();
 const tronsoftosApiUrl = String(process.env.TRONSOFTOS_API_URL || 'http://host.docker.internal:8080').replace(/\/+$/, '');
 const defaultProductionAlias = 'erp_tronsoft';
-const fixedBackupFrequencyMinutes = 10;
+const fixedBackupFrequencyMinutes = 5;
 const fixedBackupRetentionDays = 30;
 
 await app.register(cors, { origin: true, credentials: true });
@@ -324,6 +324,18 @@ function normalizeReceivedManifestPath(filePath) {
   const storagePrefix = `${storageRoot.replace(/\/+$/, '')}/firebird/backups/`;
   if (value.startsWith(storagePrefix)) return `/firebird/backups/${value.slice(storagePrefix.length)}`;
   return value;
+}
+
+function normalizeReceivedPhysicalPath(filePath) {
+  const value = String(filePath || '').trim();
+  const storagePrefix = `${storageRoot.replace(/\/+$/, '')}/firebird/restore-work/`;
+  if (value.startsWith(storagePrefix)) return `/firebird/restore-work/${value.slice(storagePrefix.length)}`;
+  return value;
+}
+
+function isReceivedPhysicalPath(filePath) {
+  const value = String(filePath || '').trim();
+  return value.startsWith('/firebird/restore-work/') && /\.fdb$/i.test(value);
 }
 
 function normalizeBackupCleanupOptions(query = {}) {
@@ -943,6 +955,11 @@ function reqQueryRange(req) {
 }
 
 app.get('/api/metrics/dashboard', { preHandler: requireAuth }, async (req) => loadDashboardMetrics(reqQueryRange(req)));
+
+app.get('/api/internal/metrics/dashboard', async (req) => {
+  assertInternalTronsoftos(req);
+  return loadDashboardMetrics(reqQueryRange(req));
+});
 
 app.get('/api/alerts', { preHandler: requireAuth }, async (req) => {
   const status = String(req.query?.status || 'active');
@@ -1701,6 +1718,83 @@ app.post('/api/ha/standby/restore', async (req, reply) => {
     await lockHandle.releaseWith(failureData);
     await createAlertOnce(`HA_STANDBY_RESTORE_FAILED_${db.alias}`, 'CRITICAL', `Restore HA do standby falhou: ${db.name}`);
     await audit(req, 'HA_STANDBY_RESTORE_FAILED', { entityType: 'database', entityId: db.id, details: { sourcePath, standbyPath, logPath, error } });
+    return reply.code(500).send({ error, logPath });
+  }
+});
+
+app.post('/api/ha/standby/physical-restore', async (req, reply) => {
+  assertInternalTronsoftos(req);
+  if (!isHaMode() || nodeRole === 'primary') {
+    return reply.code(409).send({ error: 'Restore fisico standby permitido apenas em no HA standby/recovery' });
+  }
+  const body = req.body || {};
+  const sourcePath = normalizeReceivedPhysicalPath(body.physicalPath);
+  if (!isReceivedPhysicalPath(sourcePath)) return reply.code(400).send({ error: 'physicalPath invalido' });
+  const alias = normalizeAlias(body.databaseAlias || path.basename(sourcePath).replace(/_physical_\d+\.fdb$/i, '').replace(/\.fdb$/i, ''));
+  const db = await prisma.managedDatabase.findUnique({ where: { alias } });
+  if (!db) return reply.code(404).send({ error: `Banco nao cadastrado para alias ${alias}` });
+  const currentDb = await clearExpiredDatabaseOperation(db);
+  if (databaseOperationActive(currentDb) || String(currentDb.standbyStatus || '').toUpperCase() === 'MAINTENANCE') {
+    await audit(req, 'HA_STANDBY_PHYSICAL_RESTORE_SKIPPED_MAINTENANCE', { entityType: 'database', entityId: db.id, details: databaseOperationPayload(currentDb) });
+    return {
+      ok: true,
+      skipped: true,
+      reason: 'database_operation_in_progress',
+      database: databaseOperationPayload(currentDb)
+    };
+  }
+  const lockHandle = await acquireDatabaseOperationLock(req, currentDb, 'HA_STANDBY_PHYSICAL_RESTORE', reply, { markStandbyMaintenance: false });
+  if (reply.sent) return;
+
+  const stamp = safeLogToken(body.logToken);
+  const standbyPath = db.standbyPath || standbyPathForAlias(db.alias);
+  const logPath = `/firebird/logs/standby_physical_${db.alias}_${stamp}.log`;
+  const previousStandby = {
+    standbyPath: db.standbyPath,
+    standbyStatus: db.standbyStatus,
+    lastStandbyBackupAt: db.lastStandbyBackupAt,
+    lastStandbyValidatedAt: db.lastStandbyValidatedAt,
+    lastStandbyBackupSha256: db.lastStandbyBackupSha256
+  };
+
+  try {
+    await prisma.managedDatabase.update({ where: { id: db.id }, data: { standbyStatus: 'RESTORING' } });
+    const cmd = [
+      'set -e',
+      `temp_src=${shQuote(sourcePath)}`,
+      `standby=${shQuote(standbyPath)}`,
+      `standby_conn=${shQuote(firebirdDbConnect(standbyPath))}`,
+      `log=${shQuote(logPath)}`,
+      'fail() { code="$1"; shift; echo "$*" | tee -a "$log"; test -f "$log" && cat "$log"; exit "$code"; }',
+      'mkdir -p /firebird/standby /firebird/logs || fail 60 "Nao foi possivel criar diretorios de standby"',
+      'test -f "$temp_src" || fail 61 "Arquivo fisico recebido nao encontrado: $temp_src"',
+      `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/nbackup`)} -F "$temp_src" >> "$log" 2>&1 || fail 62 "Falha no nbackup -F do standby"`,
+      `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$temp_src" >> "$log" 2>&1 || fail 63 "Falha ao validar standby fisico com gstat"`,
+      'mv -f "$temp_src" "$standby" || fail 64 "Nao foi possivel substituir banco standby: $standby"',
+      'chmod 0666 "$standby" || fail 65 "Nao foi possivel ajustar permissao do standby final"',
+      `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gfix`)} -mode read_only -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} "$standby_conn" >> "$log" 2>&1 || true`,
+      `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$standby" >> "$log" 2>&1 || fail 66 "Falha ao validar standby final com gstat"`
+    ].join('; ');
+    await runFirebirdShellScript(cmd, 1000 * 60 * 60);
+    await lockHandle.releaseWith({
+      standbyPath,
+      standbyStatus: 'READY',
+      lastStandbyBackupAt: new Date(),
+      lastStandbyValidatedAt: new Date(),
+      lastStandbyBackupSha256: `physical:${stamp}`
+    });
+    const updated = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: db.id } });
+    await syncFirebirdAliases();
+    await audit(req, 'HA_STANDBY_PHYSICAL_RESTORED', { entityType: 'database', entityId: db.id, details: { sourcePath, standbyPath, logPath } });
+    return { ok: true, database: updated, standbyPath, logPath };
+  } catch (err) {
+    const error = shellErrorText(err);
+    const failureData = previousStandby.standbyStatus === 'READY'
+      ? previousStandby
+      : { standbyStatus: 'INVALID' };
+    await lockHandle.releaseWith(failureData);
+    await createAlertOnce(`HA_STANDBY_PHYSICAL_RESTORE_FAILED_${db.alias}`, 'CRITICAL', `Restore fisico HA do standby falhou: ${db.name}`);
+    await audit(req, 'HA_STANDBY_PHYSICAL_RESTORE_FAILED', { entityType: 'database', entityId: db.id, details: { sourcePath, standbyPath, logPath, error } });
     return reply.code(500).send({ error, logPath });
   }
 });

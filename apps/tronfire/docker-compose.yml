@@ -95,6 +95,7 @@ services:
       TRONFIRE_AUTH_DISABLED: ${TRONFIRE_AUTH_DISABLED:-true}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /proc:/host/proc:ro
       - ${STORAGE_ROOT}/firebird:/firebird
       - ${TRONSOFTOS_STATE_DIR:-/opt/tronsoftos/state}:${TRONSOFTOS_STATE_DIR:-/opt/tronsoftos/state}
       - ${STORAGE_ROOT}/config-backups:/config-backups

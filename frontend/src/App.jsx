@@ -89,17 +89,9 @@ const fallbackDashboard = {
     recentFiles: []
   },
   cloudflare: { recordName: null, recordType: 'A', targetIp: null, tokenConfigured: false },
+  systemMetrics: { latest: [], series: [] },
   alerts: [{ severity: 'warning', message: 'Backend ainda nao retornou dados reais' }]
 };
-
-const metricSeries = [
-  { time: '00h', cpu: 21, memory: 38, disk: 42 },
-  { time: '04h', cpu: 28, memory: 41, disk: 43 },
-  { time: '08h', cpu: 36, memory: 45, disk: 44 },
-  { time: '12h', cpu: 31, memory: 47, disk: 44 },
-  { time: '16h', cpu: 44, memory: 51, disk: 45 },
-  { time: '20h', cpu: 26, memory: 43, disk: 45 }
-];
 
 async function api(path) {
   const response = await fetch(path);
@@ -167,6 +159,11 @@ function formatBytes(value) {
     unit += 1;
   }
   return `${current >= 10 || unit === 0 ? Math.round(current) : current.toFixed(1)} ${units[unit]}`;
+}
+
+function formatPercent(value) {
+  const current = Number(value);
+  return Number.isFinite(current) ? `${current.toFixed(1)}%` : '-';
 }
 
 function formatDateTime(value) {
@@ -355,12 +352,22 @@ function DashboardView({ dashboard }) {
   const localBuild = dashboard.build || dashboard.cluster.build || {};
   const standbyBuild = dashboard.cluster.standbyHealth || {};
   const buildValue = build => build?.buildNumber ? `Build ${build.buildNumber}` : (build?.version || '-');
-  const buildDetail = build => `versao ${build?.version || '-'} · commit ${build?.commit || 'unknown'}`;
+  const buildDetail = build => `versao ${build?.version || '-'}`;
   const buildsDifferClient = (left, right) => Boolean(
     (left?.buildNumber && right?.buildNumber && left.buildNumber !== right.buildNumber)
     || (left?.commit && right?.commit && left.commit !== right.commit)
     || (left?.version && right?.version && left.version !== right.version)
   );
+  const hostMetrics = dashboard.systemMetrics || {};
+  const hostLatest = (hostMetrics.latest || []).find(metric => metric.scope === 'HOST' && metric.target) || {};
+  const hardwareSeries = (hostMetrics.series || [])
+    .filter(metric => metric.scope === 'HOST' && metric.target)
+    .map(metric => ({
+      time: new Date(metric.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+      cpu: Number(metric.cpuPercent ?? 0),
+      memory: Number(metric.memoryPercent ?? 0),
+      disk: Number(metric.diskUsedPercent ?? 0)
+    }));
   return (
     <div className="space-y-5">
       <div className="grid gap-4 lg:grid-cols-5">
@@ -382,6 +389,11 @@ function DashboardView({ dashboard }) {
         ) : (
           <Stat label="Standby restaurado" value={standbyDbSummary} detail={sync.tronfireStandby?.latestValidatedAt ? `restore ${formatDateTime(sync.tronfireStandby.latestValidatedAt)}` : 'nao validado'} icon={ShieldCheck} tone={sync.standbyReady ? 'green' : 'amber'} />
         )}
+      </div>
+      <div className="grid gap-4 lg:grid-cols-3">
+        <Stat label="CPU host" value={formatPercent(hostLatest.cpuPercent)} detail={hostLatest.createdAt ? `coleta ${formatDateTime(hostLatest.createdAt)}` : 'aguardando coleta'} icon={Activity} tone="sky" />
+        <Stat label="Memoria host" value={formatPercent(hostLatest.memoryPercent)} detail={`${formatBytes(hostLatest.memoryUsageBytes)} de ${formatBytes(hostLatest.memoryLimitBytes)}`} icon={Gauge} tone="green" />
+        <Stat label="Disco host" value={formatPercent(hostLatest.diskUsedPercent)} detail={`${formatBytes(hostLatest.diskFreeBytes)} livre`} icon={HardDrive} tone="slate" />
       </div>
       {isStandbyNode ? (
         <Card title="Preparacao para promocao" icon={ShieldCheck} action={<StatusPill value={sync.standbyReady ? 'READY' : 'standby'} />}>
@@ -408,16 +420,18 @@ function DashboardView({ dashboard }) {
         <Card title="Saude" icon={Gauge}>
           <div className="h-72">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={metricSeries}>
+              <AreaChart data={hardwareSeries}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                 <XAxis dataKey="time" fontSize={12} />
                 <YAxis fontSize={12} />
                 <Tooltip />
                 <Area type="monotone" dataKey="cpu" stroke="#0284c7" fill="#bae6fd" />
                 <Area type="monotone" dataKey="memory" stroke="#16a34a" fill="#bbf7d0" />
+                <Area type="monotone" dataKey="disk" stroke="#64748b" fill="#cbd5e1" />
               </AreaChart>
             </ResponsiveContainer>
           </div>
+          {!hardwareSeries.length ? <div className="mt-2 text-xs text-slate-500">Historico de hardware ainda nao coletado pelo TronFire.</div> : null}
         </Card>
       </div>
       <Card title="Alertas ativos" icon={AlertTriangle} action={<StatusPill value={alerts.length ? 'warning' : 'online'} />}>
@@ -615,7 +629,8 @@ function ClusterView({ dashboard }) {
     sshUser: sync.sshUser || 'tronsoft',
     sshPort: sync.sshPort || 22,
     autoEnabled: true,
-    intervalMinutes: 10,
+    syncMode: sync.syncMode || 'physical',
+    intervalMinutes: 3,
     remoteBackupDir: sync.remoteBackupDir || '/opt/tronfire-storage/firebird/backups',
     remoteCatalogDir: sync.remoteCatalogDir || '/tmp/tronfire-catalog',
     backupDir: sync.backupDir || '/opt/tronfire-storage/firebird/backups',
@@ -852,6 +867,7 @@ function ClusterView({ dashboard }) {
                   ['Diretorio backups', syncStatus.receiver?.backupDir || '/opt/tronfire-storage/firebird/backups']
                 ] : [
                   ['Status', syncStatus.status || (syncStatus.enabled ? 'enabled' : 'disabled')],
+                  ['Modo', syncStatus.syncMode === 'backup_restore' ? 'seguro backup/restore' : 'fisico rapido'],
                   ['Automatico', syncStatus.autoEnabled ? 'habilitado' : 'desativado'],
                   ['Intervalo', syncStatus.intervalMinutes ? `${syncStatus.intervalMinutes} min` : '-'],
                   ['Standby', syncStatus.standbyHost || 'nao configurado'],
@@ -1284,19 +1300,30 @@ function ClusterView({ dashboard }) {
               <div>
                 <div className="text-sm font-medium text-slate-950">Sincronizacao automatica ativa</div>
                 <div className="mt-1 text-xs text-slate-500">
-                  O primary envia continuamente backups validados, catalogo e restore do standby a cada 10 minutos.
+                  O modo fisico rapido usa nbackup + rsync pela rede de sync a cada 3 minutos. O modo seguro usa backup validado + restore no standby.
                 </div>
               </div>
               <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm">
                 <div className="text-xs font-medium uppercase text-slate-500">Intervalo</div>
-                <div className="mt-1 font-semibold text-slate-950">10 minutos</div>
+                <div className="mt-1 font-semibold text-slate-950">3 minutos</div>
               </div>
             </div>
             <div className="mt-2 text-xs text-slate-500">
               O automatico roda somente no primary/ativo e nao inicia outro sync se ja houver um job em execucao. Esse ciclo continuo mantem o standby pronto para failover.
             </div>
           </div>
-          <Field label="Host/IP standby" value={syncValues.standbyHost} onChange={value => setSyncValue('standbyHost', value)} placeholder="192.168.1.153" />
+          <label className="block">
+            <span className="text-xs font-medium uppercase text-slate-500">Modo de sincronismo</span>
+            <select
+              value={syncValues.syncMode}
+              onChange={event => setSyncValue('syncMode', event.target.value)}
+              className="mt-1 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+            >
+              <option value="physical">Fisico rapido: nbackup + rsync</option>
+              <option value="backup_restore">Seguro: backup validado + restore</option>
+            </select>
+          </label>
+          <Field label="Host/IP standby na rede de sync" value={syncValues.standbyHost} onChange={value => setSyncValue('standbyHost', value)} placeholder="10.0.0.2" />
           <Field label="Usuario SSH" value={syncValues.sshUser} onChange={value => setSyncValue('sshUser', value)} placeholder="tronsoft" />
           <Field label="Porta SSH" type="number" value={syncValues.sshPort} onChange={value => setSyncValue('sshPort', Number(value || 22))} placeholder="22" />
           <Field label="Backups locais" value={syncValues.backupDir} onChange={value => setSyncValue('backupDir', value)} placeholder="/opt/tronfire-storage/firebird/backups" />

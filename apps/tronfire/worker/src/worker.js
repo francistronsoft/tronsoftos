@@ -15,7 +15,7 @@ const TRONFIRE_NODE_ROLE = String(process.env.TRONFIRE_NODE_ROLE || 'primary').t
 const FIREBIRD_HOST = process.env.FIREBIRD_HOST || 'host.docker.internal';
 const HOST_PROC_ROOT = process.env.HOST_PROC_ROOT || '/host/proc';
 const FIREBIRD_HOST_TARGET = 'firebird_host';
-const FIXED_BACKUP_FREQUENCY_MINUTES = 10;
+const FIXED_BACKUP_FREQUENCY_MINUTES = 5;
 const FIXED_BACKUP_RETENTION_DAYS = 30;
 const FIREBIRD_PROCESS_NAMES = new Set(['fbguard', 'fbserver', 'fb_inet_server', 'fb_smp_server', 'firebird']);
 const METRIC_CONTAINERS = [
@@ -185,6 +185,24 @@ function readHostMemTotalBytes() {
   return match ? BigInt(match[1]) * 1024n : null;
 }
 
+function readHostMemAvailableBytes() {
+  const meminfo = fs.readFileSync(`${HOST_PROC_ROOT}/meminfo`, 'utf8');
+  const available = meminfo.match(/^MemAvailable:\s+(\d+)\s+kB/m)?.[1];
+  if (available) return BigInt(available) * 1024n;
+  const free = meminfo.match(/^MemFree:\s+(\d+)\s+kB/m)?.[1] || '0';
+  const buffers = meminfo.match(/^Buffers:\s+(\d+)\s+kB/m)?.[1] || '0';
+  const cached = meminfo.match(/^Cached:\s+(\d+)\s+kB/m)?.[1] || '0';
+  return BigInt(Number(free) + Number(buffers) + Number(cached)) * 1024n;
+}
+
+function readHostCpuSample() {
+  const firstLine = fs.readFileSync(`${HOST_PROC_ROOT}/stat`, 'utf8').split(/\r?\n/)[0] || '';
+  const fields = firstLine.split(/\s+/).slice(1).map(value => Number(value || 0));
+  const idle = (fields[3] || 0) + (fields[4] || 0);
+  const total = fields.reduce((sum, value) => sum + value, 0);
+  return { idle, total };
+}
+
 function readProcessRssBytes(pid) {
   const status = fs.readFileSync(`${HOST_PROC_ROOT}/${pid}/status`, 'utf8');
   const match = status.match(/^VmRSS:\s+(\d+)\s+kB/m);
@@ -310,6 +328,57 @@ async function collectHostFirebirdMetrics() {
   }
 }
 
+async function collectHostHardwareMetrics() {
+  try {
+    if (!fs.existsSync(`${HOST_PROC_ROOT}/stat`) || !fs.existsSync(`${HOST_PROC_ROOT}/meminfo`)) return;
+    const firstCpu = readHostCpuSample();
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    const secondCpu = readHostCpuSample();
+    const totalDelta = secondCpu.total - firstCpu.total;
+    const idleDelta = secondCpu.idle - firstCpu.idle;
+    const cpuPercent = totalDelta > 0 ? Math.max(0, Math.min(100, (1 - idleDelta / totalDelta) * 100)) : null;
+
+    const memoryLimitBytes = readHostMemTotalBytes();
+    const memoryAvailableBytes = readHostMemAvailableBytes();
+    const memoryUsageBytes = memoryLimitBytes && memoryAvailableBytes ? memoryLimitBytes - memoryAvailableBytes : null;
+    const memoryPercent = memoryLimitBytes && memoryUsageBytes !== null ? Number(memoryUsageBytes * 10000n / memoryLimitBytes) / 100 : null;
+
+    let disk = {};
+    try {
+      const { stdout } = await dockerExec(['sh', '-lc', "df -PB1 /firebird/data | awk 'NR==2 {print $2\" \"$3\" \"$4\" \"$5}'"], 60_000);
+      const [total, used, free, usedPercentText] = stdout.trim().split(/\s+/);
+      disk = {
+        diskTotalBytes: bigIntOrNull(total),
+        diskUsedBytes: bigIntOrNull(used),
+        diskFreeBytes: bigIntOrNull(free),
+        diskUsedPercent: parsePercent(usedPercentText)
+      };
+    } catch {
+      // Disk metrics are still collected separately by path; keep host CPU/memory snapshot.
+    }
+
+    await prisma.metricSnapshot.create({
+      data: {
+        scope: 'HOST',
+        target: process.env.TRONSOFTOS_NODE_NAME || process.env.HOSTNAME || 'hardware',
+        cpuPercent,
+        memoryUsageBytes,
+        memoryLimitBytes,
+        memoryPercent,
+        ...disk
+      }
+    });
+
+    if (memoryPercent >= 95) {
+      await createAlertOnce('HOST_MEMORY_CRITICAL', 'CRITICAL', `Host com memoria critica: ${memoryPercent.toFixed(1)}%`);
+    } else if (memoryPercent >= 85) {
+      await createAlertOnce('HOST_MEMORY_WARNING', 'WARNING', `Host com memoria em atencao: ${memoryPercent.toFixed(1)}%`);
+    }
+  } catch (err) {
+    console.error('[worker] host hardware metrics error', err.message);
+  }
+}
+
 async function collectDiskMetrics() {
   try {
     const { stdout } = await dockerExec(['sh', '-lc', "mkdir -p /firebird/data /firebird/backups; for p in /firebird/data /firebird/backups; do df -PB1 \"$p\" | awk -v p=\"$p\" 'NR==2 {print p\" \"$2\" \"$3\" \"$4\" \"$5}'; done"], 60_000);
@@ -383,6 +452,7 @@ async function cleanupOldMetrics() {
 async function collectMetrics() {
   await collectContainerMetrics();
   await collectHostFirebirdMetrics();
+  await collectHostHardwareMetrics();
   await collectDiskMetrics();
   await collectUptimeMetric();
   await collectDatabaseFileMetrics();
