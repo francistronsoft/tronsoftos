@@ -39,5 +39,6 @@ services:
       - ${FIREBIRD_HOST_ROOT:-/usr/local/firebird}:/opt/firebird:ro
       - /opt/tronfire-storage/firebird:/firebird
       - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"

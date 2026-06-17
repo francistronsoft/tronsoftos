@@ -163,10 +163,18 @@ configure_static_ip() {
 
     nmcli connection modify "$connection" \
       ipv4.addresses "$address_cidr" \
-      ipv4.gateway "$gateway" \
-      ipv4.dns "$dns" \
       ipv4.method manual \
       connection.autoconnect yes
+    if [ -n "$gateway" ]; then
+      nmcli connection modify "$connection" ipv4.gateway "$gateway"
+    else
+      nmcli connection modify "$connection" ipv4.gateway ""
+    fi
+    if [ -n "$dns" ]; then
+      nmcli connection modify "$connection" ipv4.dns "$dns"
+    else
+      nmcli connection modify "$connection" ipv4.ignore-auto-dns yes ipv4.dns ""
+    fi
 
     echo "IP fixo gravado no NetworkManager: conexao '$connection'."
     if [ "$apply_now" = "true" ]; then
@@ -187,9 +195,11 @@ configure_static_ip() {
       echo "[Network]"
       echo "DHCP=no"
       echo "Address=$address_cidr"
-      echo "Gateway=$gateway"
+      if [ -n "$gateway" ]; then
+        echo "Gateway=$gateway"
+      fi
       for dns_server in $dns; do
-        echo "DNS=$dns_server"
+        [ -n "$dns_server" ] && echo "DNS=$dns_server"
       done
     } > "$network_file"
 
@@ -272,6 +282,38 @@ if [ "$DEPLOYMENT_MODE" = "ha" ] || yes_no "Deseja gravar IP fixo do host agora?
   fi
 fi
 
+SYNC_IP_ENABLED="false"
+SYNC_IP_INTERFACE=""
+SYNC_IP_ADDRESS_CIDR=""
+SYNC_IP_APPLY_NOW="false"
+HA_SYNC_STANDBY_HOST=""
+if [ "$DEPLOYMENT_MODE" = "ha" ]; then
+  line
+  echo "Rede de sincronismo HA"
+  echo "Use a segunda placa para replicacao entre primary e standby. Ela nao precisa de gateway nem DNS."
+  echo "Padrao sugerido: primary 10.10.10.1/30 e standby 10.10.10.2/30."
+  line
+  default_sync_iface="eth1"
+  case "$STATIC_IP_INTERFACE" in
+    ens18) default_sync_iface="ens19" ;;
+    eth0) default_sync_iface="eth1" ;;
+    enp0s3) default_sync_iface="enp0s8" ;;
+  esac
+  default_sync_cidr="$([ "$NODE_ROLE" = "primary" ] && echo "10.10.10.1/30" || echo "10.10.10.2/30")"
+  default_peer_ip="$([ "$NODE_ROLE" = "primary" ] && echo "10.10.10.2" || echo "10.10.10.1")"
+  if yes_no "Deseja configurar a segunda placa de sincronismo agora? (s/n)" "s"; then
+    SYNC_IP_ENABLED="true"
+    SYNC_IP_INTERFACE="$(ask "Interface da sincronizacao HA" "$default_sync_iface")"
+    SYNC_IP_ADDRESS_CIDR="$(ask "IP/CIDR desta placa de sincronismo" "$default_sync_cidr")"
+    if yes_no "Aplicar IP da sincronizacao agora? Pode derrubar a sessao se estiver usando esta interface. (s/n)" "n"; then
+      SYNC_IP_APPLY_NOW="true"
+    fi
+  else
+    echo "Configure manualmente uma rede dedicada entre os servidores antes de validar o HA fisico."
+  fi
+  HA_SYNC_STANDBY_HOST="$(ask "IP de sincronismo do outro servidor" "$default_peer_ip")"
+fi
+
 FIREBIRD_MODE="host"
 echo "Firebird 2.5.9 sera instalado/usado no host Debian."
 
@@ -343,6 +385,9 @@ HOST_STATIC_IP_INTERFACE=$STATIC_IP_INTERFACE
 HOST_STATIC_IP_ADDRESS_CIDR=$STATIC_IP_ADDRESS_CIDR
 HOST_STATIC_IP_GATEWAY=$STATIC_IP_GATEWAY
 HOST_STATIC_IP_DNS="$STATIC_IP_DNS"
+HOST_SYNC_IP_ENABLED=$SYNC_IP_ENABLED
+HOST_SYNC_IP_INTERFACE=$SYNC_IP_INTERFACE
+HOST_SYNC_IP_ADDRESS_CIDR=$SYNC_IP_ADDRESS_CIDR
 
 HA_INTERFACE=$HA_INTERFACE
 HA_VIP=$HA_VIP
@@ -363,6 +408,7 @@ FIREBIRD_RSYNC_SSH_PORT=22
 HA_SYNC_SSH_USER=tronsoft
 HA_SYNC_SSH_PORT=22
 HA_SYNC_MODE=physical
+HA_SYNC_STANDBY_HOST=$HA_SYNC_STANDBY_HOST
 HA_SYNC_REMOTE_CATALOG_DIR=/tmp/tronfire-catalog
 
 TRONFIRE_POSTGRES_CONTAINER=tronfire_postgres
@@ -619,6 +665,17 @@ if [ "$STATIC_IP_ENABLED" = "true" ]; then
   else
     echo "  Aplicacao do IP fixo ficara disponivel pelo painel TronSoftOS."
   fi
+fi
+if [ "$SYNC_IP_ENABLED" = "true" ]; then
+  echo "- IP de sincronismo HA: $SYNC_IP_ADDRESS_CIDR em $SYNC_IP_INTERFACE"
+  if [ "$SYNC_IP_APPLY_NOW" = "true" ]; then
+    configure_static_ip "$SYNC_IP_INTERFACE" "$SYNC_IP_ADDRESS_CIDR" "" "" "true" || true
+  else
+    echo "  Aplique o IP de sincronismo depois pelo painel de rede do TronSoftOS ou manualmente no Debian."
+  fi
+fi
+if [ -n "$HA_SYNC_STANDBY_HOST" ]; then
+  echo "- Peer HA sync: $HA_SYNC_STANDBY_HOST"
 fi
 line
 echo "Proximos comandos sugeridos:"

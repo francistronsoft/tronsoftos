@@ -14,6 +14,7 @@ const FIREBIRD_EXEC_MODE = String(process.env.FIREBIRD_EXEC_MODE || 'container')
 const TRONFIRE_NODE_ROLE = String(process.env.TRONFIRE_NODE_ROLE || 'primary').toLowerCase();
 const FIREBIRD_HOST = process.env.FIREBIRD_HOST || 'host.docker.internal';
 const HOST_PROC_ROOT = process.env.HOST_PROC_ROOT || '/host/proc';
+const HOST_SYS_ROOT = process.env.HOST_SYS_ROOT || '/host/sys';
 const FIREBIRD_HOST_TARGET = 'firebird_host';
 const FIXED_BACKUP_FREQUENCY_MINUTES = 5;
 const FIXED_BACKUP_RETENTION_DAYS = 30;
@@ -203,6 +204,39 @@ function readHostCpuSample() {
   return { idle, total };
 }
 
+function readHostTemperatureCelsius() {
+  const values = [];
+  try {
+    const thermalRoot = `${HOST_SYS_ROOT}/class/thermal`;
+    for (const item of fs.readdirSync(thermalRoot, { withFileTypes: true })) {
+      if (!item.isDirectory() || !item.name.startsWith('thermal_zone')) continue;
+      const tempPath = `${thermalRoot}/${item.name}/temp`;
+      if (!fs.existsSync(tempPath)) continue;
+      const raw = Number(fs.readFileSync(tempPath, 'utf8').trim());
+      if (!Number.isFinite(raw)) continue;
+      const celsius = raw > 1000 ? raw / 1000 : raw;
+      if (celsius >= 0 && celsius <= 130) values.push(celsius);
+    }
+  } catch {
+    // Some VMs and hosts do not expose thermal sensors to containers.
+  }
+  return values.length ? Math.round(Math.max(...values) * 10) / 10 : null;
+}
+
+async function readSensorsTemperatureCelsius() {
+  try {
+    const { stdout } = await execFileAsync('sensors', ['-u'], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+    const values = [];
+    for (const match of stdout.matchAll(/temp\d+_input:\s*([+-]?\d+(?:\.\d+)?)/g)) {
+      const celsius = Number(match[1]);
+      if (Number.isFinite(celsius) && celsius >= 0 && celsius <= 130) values.push(celsius);
+    }
+    return values.length ? Math.round(Math.max(...values) * 10) / 10 : null;
+  } catch {
+    return null;
+  }
+}
+
 function readProcessRssBytes(pid) {
   const status = fs.readFileSync(`${HOST_PROC_ROOT}/${pid}/status`, 'utf8');
   const match = status.match(/^VmRSS:\s+(\d+)\s+kB/m);
@@ -342,6 +376,7 @@ async function collectHostHardwareMetrics() {
     const memoryAvailableBytes = readHostMemAvailableBytes();
     const memoryUsageBytes = memoryLimitBytes && memoryAvailableBytes ? memoryLimitBytes - memoryAvailableBytes : null;
     const memoryPercent = memoryLimitBytes && memoryUsageBytes !== null ? Number(memoryUsageBytes * 10000n / memoryLimitBytes) / 100 : null;
+    const temperatureCelsius = readHostTemperatureCelsius() ?? await readSensorsTemperatureCelsius();
 
     let disk = {};
     try {
@@ -365,6 +400,7 @@ async function collectHostHardwareMetrics() {
         memoryUsageBytes,
         memoryLimitBytes,
         memoryPercent,
+        temperatureCelsius,
         ...disk
       }
     });
@@ -373,6 +409,11 @@ async function collectHostHardwareMetrics() {
       await createAlertOnce('HOST_MEMORY_CRITICAL', 'CRITICAL', `Host com memoria critica: ${memoryPercent.toFixed(1)}%`);
     } else if (memoryPercent >= 85) {
       await createAlertOnce('HOST_MEMORY_WARNING', 'WARNING', `Host com memoria em atencao: ${memoryPercent.toFixed(1)}%`);
+    }
+    if (temperatureCelsius !== null && temperatureCelsius >= 85) {
+      await createAlertOnce('HOST_TEMPERATURE_CRITICAL', 'CRITICAL', `Host com temperatura critica: ${temperatureCelsius.toFixed(1)} C`);
+    } else if (temperatureCelsius !== null && temperatureCelsius >= 70) {
+      await createAlertOnce('HOST_TEMPERATURE_WARNING', 'WARNING', `Host com temperatura em atencao: ${temperatureCelsius.toFixed(1)} C`);
     }
   } catch (err) {
     console.error('[worker] host hardware metrics error', err.message);

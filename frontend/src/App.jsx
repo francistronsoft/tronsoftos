@@ -23,6 +23,7 @@ import {
   ShieldCheck,
   Square,
   Terminal,
+  Thermometer,
   UploadCloud,
   XCircle,
   Zap
@@ -164,6 +165,11 @@ function formatBytes(value) {
 function formatPercent(value) {
   const current = Number(value);
   return Number.isFinite(current) ? `${current.toFixed(1)}%` : '-';
+}
+
+function formatTemperature(value) {
+  const current = Number(value);
+  return Number.isFinite(current) ? `${current.toFixed(1)} °C` : '-';
 }
 
 function formatDateTime(value) {
@@ -366,8 +372,13 @@ function DashboardView({ dashboard }) {
       time: new Date(metric.createdAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
       cpu: Number(metric.cpuPercent ?? 0),
       memory: Number(metric.memoryPercent ?? 0),
-      disk: Number(metric.diskUsedPercent ?? 0)
+      disk: Number(metric.diskUsedPercent ?? 0),
+      temperature: metric.temperatureCelsius === null || metric.temperatureCelsius === undefined ? null : Number(metric.temperatureCelsius)
     }));
+  const temperatureValue = Number(hostLatest.temperatureCelsius);
+  const temperatureTone = Number.isFinite(temperatureValue)
+    ? temperatureValue >= 85 ? 'red' : temperatureValue >= 70 ? 'amber' : 'green'
+    : 'slate';
   return (
     <div className="space-y-5">
       <div className="grid gap-4 lg:grid-cols-5">
@@ -390,10 +401,11 @@ function DashboardView({ dashboard }) {
           <Stat label="Standby restaurado" value={standbyDbSummary} detail={sync.tronfireStandby?.latestValidatedAt ? `restore ${formatDateTime(sync.tronfireStandby.latestValidatedAt)}` : 'nao validado'} icon={ShieldCheck} tone={sync.standbyReady ? 'green' : 'amber'} />
         )}
       </div>
-      <div className="grid gap-4 lg:grid-cols-3">
+      <div className="grid gap-4 lg:grid-cols-4">
         <Stat label="CPU host" value={formatPercent(hostLatest.cpuPercent)} detail={hostLatest.createdAt ? `coleta ${formatDateTime(hostLatest.createdAt)}` : 'aguardando coleta'} icon={Activity} tone="sky" />
         <Stat label="Memoria host" value={formatPercent(hostLatest.memoryPercent)} detail={`${formatBytes(hostLatest.memoryUsageBytes)} de ${formatBytes(hostLatest.memoryLimitBytes)}`} icon={Gauge} tone="green" />
         <Stat label="Disco host" value={formatPercent(hostLatest.diskUsedPercent)} detail={`${formatBytes(hostLatest.diskFreeBytes)} livre`} icon={HardDrive} tone="slate" />
+        <Stat label="Temperatura" value={formatTemperature(hostLatest.temperatureCelsius)} detail={hostLatest.temperatureCelsius === null || hostLatest.temperatureCelsius === undefined ? 'sensor indisponivel' : hostLatest.createdAt ? `coleta ${formatDateTime(hostLatest.createdAt)}` : 'aguardando coleta'} icon={Thermometer} tone={temperatureTone} />
       </div>
       {isStandbyNode ? (
         <Card title="Preparacao para promocao" icon={ShieldCheck} action={<StatusPill value={sync.standbyReady ? 'READY' : 'standby'} />}>
@@ -428,6 +440,7 @@ function DashboardView({ dashboard }) {
                 <Area type="monotone" dataKey="cpu" stroke="#0284c7" fill="#bae6fd" />
                 <Area type="monotone" dataKey="memory" stroke="#16a34a" fill="#bbf7d0" />
                 <Area type="monotone" dataKey="disk" stroke="#64748b" fill="#cbd5e1" />
+                <Area type="monotone" dataKey="temperature" stroke="#f97316" fill="#fed7aa" />
               </AreaChart>
             </ResponsiveContainer>
           </div>

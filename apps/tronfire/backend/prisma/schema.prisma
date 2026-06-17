@@ -135,6 +135,7 @@ model MetricSnapshot {
   diskUsedBytes    BigInt?
   diskFreeBytes    BigInt?
   diskUsedPercent  Float?
+  temperatureCelsius Float?
   fileSizeBytes    BigInt?
   uptimeSeconds    BigInt?
   createdAt        DateTime @default(now())
