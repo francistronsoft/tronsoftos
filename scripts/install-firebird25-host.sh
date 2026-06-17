@@ -232,6 +232,8 @@ tune_firebird_host() {
 
   mkdir -p "$temp_dir"
   chmod 0777 "$temp_dir"
+  mkdir -p /tmp/firebird
+  chmod 1777 /tmp/firebird
   cp -n "$conf" "$conf.tronsoftos.bak" 2>/dev/null || true
   set_firebird_conf_value "$conf" "TempCacheLimit" "$temp_cache"
   set_firebird_conf_value "$conf" "DefaultDbCachePages" "$default_cache_pages"

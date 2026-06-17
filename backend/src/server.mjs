@@ -2505,6 +2505,7 @@ function startHaSync() {
     HA_SYNC_REMOTE_BACKUP_DIR: settings.remoteBackupDir || '/opt/tronfire-storage/firebird/backups',
     HA_SYNC_REMOTE_RESTORE_DIR: settings.remoteRestoreDir || '/opt/tronfire-storage/firebird/restore-work',
     HA_SYNC_REMOTE_CATALOG_DIR: settings.remoteCatalogDir || '/tmp/tronfire-catalog',
+    HA_SYNC_STANDBY_TRONFIRE_URL: process.env.HA_SYNC_STANDBY_TRONFIRE_URL || `http://${settings.standbyHost}:${process.env.TRONFIRE_PANEL_PORT || 8081}`,
     FIREBIRD_BACKUP_DIR: settings.backupDir || '/opt/tronfire-storage/firebird/backups',
     FIREBIRD_DATA_DIR: process.env.FIREBIRD_DATA_DIR || '/opt/tronfire-storage/firebird/data',
     FIREBIRD_BIN: process.env.FIREBIRD_BIN || '/usr/local/firebird/bin',

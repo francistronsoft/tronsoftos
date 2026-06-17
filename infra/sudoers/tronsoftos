@@ -1,3 +1,4 @@
 tronsoftos ALL=(root) NOPASSWD: /usr/local/sbin/tronsoftos-network *
 tronsoftos ALL=(root) NOPASSWD: /usr/bin/systemctl start firebird, /usr/bin/systemctl stop firebird, /usr/bin/systemctl restart firebird
 tronsoftos ALL=(root) NOPASSWD: /usr/bin/systemctl start keepalived.service, /usr/bin/systemctl stop keepalived.service, /usr/bin/systemctl restart keepalived.service, /usr/bin/systemctl is-active keepalived.service
+tronsoftos ALL=(root) NOPASSWD: /usr/local/firebird/bin/nbackup, /opt/firebird/bin/nbackup

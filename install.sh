@@ -2,9 +2,16 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP_DIR="${TRONSOFTOS_APP_DIR:-$SCRIPT_DIR}"
 ENV_DIR="/etc/tronsoftos"
 ENV_FILE="${ENV_DIR}/tronsoftos.env"
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+fi
+
+APP_DIR="${TRONSOFTOS_APP_DIR:-$SCRIPT_DIR}"
 USER_NAME="${TRONSOFTOS_USER:-tronsoftos}"
 GROUP_NAME="${TRONSOFTOS_GROUP:-tronsoftos}"
 
@@ -158,6 +165,7 @@ ensure_ha_sync_ssh_user() {
       authorized_keys="$ssh_dir/authorized_keys"
       install -d -m 0700 -o "$ssh_user" -g "$ssh_user" "$ssh_dir"
       touch "$authorized_keys"
+      grep -qxF "$(cat "$app_dir/state/ssh/id_ed25519.pub")" "$authorized_keys" 2>/dev/null || cat "$app_dir/state/ssh/id_ed25519.pub" >> "$authorized_keys"
       chown "$ssh_user:$ssh_user" "$authorized_keys"
       chmod 0600 "$authorized_keys"
     fi
@@ -290,7 +298,12 @@ cp "$APP_DIR/infra/systemd/tronsoftos-rclone-backup.timer" /etc/systemd/system/t
 sed -i "s|/opt/tronsoftos|$APP_DIR|g" /etc/systemd/system/tronsoftos.service
 sed -i "s|/opt/tronsoftos|$APP_DIR|g" /etc/systemd/system/tronsoftos-rclone-backup.service
 
-chown -R "$USER_NAME:$GROUP_NAME" "$APP_DIR" /opt/tronfire-storage
+chown -R "$USER_NAME:$GROUP_NAME" "$APP_DIR"
+for managed_storage_dir in /opt/tronfire-storage/firebird /opt/tronfire-storage/troncomanda /opt/tronfire-storage/config-backups /opt/tronfire-storage/update-backups; do
+  if [ -d "$managed_storage_dir" ]; then
+    chown -R "$USER_NAME:$GROUP_NAME" "$managed_storage_dir"
+  fi
+done
 touch "$APP_DIR/state/events.jsonl"
 chown "$USER_NAME:$GROUP_NAME" "$APP_DIR/state/events.jsonl"
 chmod 700 "$APP_DIR/state"
