@@ -16,7 +16,9 @@ const FIREBIRD_HOST = process.env.FIREBIRD_HOST || 'host.docker.internal';
 const HOST_PROC_ROOT = process.env.HOST_PROC_ROOT || '/host/proc';
 const HOST_SYS_ROOT = process.env.HOST_SYS_ROOT || '/host/sys';
 const FIREBIRD_HOST_TARGET = 'firebird_host';
-const FIXED_BACKUP_FREQUENCY_MINUTES = 5;
+const TRONSOFTOS_STATE_DIR = process.env.TRONSOFTOS_STATE_DIR || '/opt/tronsoftos/state';
+const HA_SYNC_ACTIVE_FILE = process.env.TRONSOFTOS_HA_SYNC_ACTIVE_FILE || `${TRONSOFTOS_STATE_DIR}/ha-sync.active`;
+const FIXED_BACKUP_FREQUENCY_MINUTES = 15;
 const FIXED_BACKUP_RETENTION_DAYS = 30;
 const FIREBIRD_PROCESS_NAMES = new Set(['fbguard', 'fbserver', 'fb_inet_server', 'fb_smp_server', 'firebird']);
 const METRIC_CONTAINERS = [
@@ -27,6 +29,15 @@ const METRIC_CONTAINERS = [
   'tronfire_worker'
 ].filter(name => FIREBIRD_EXEC_MODE === 'container' || name !== FIREBIRD_CONTAINER);
 let backupRunning = false;
+
+function haSyncActive() {
+  try {
+    const stat = fs.statSync(HA_SYNC_ACTIVE_FILE);
+    return Date.now() - stat.mtimeMs < 1000 * 60 * 60 * 2;
+  } catch {
+    return false;
+  }
+}
 
 function firebirdExecOptions(timeout = 60_000, maxBuffer = 1024 * 1024 * 5) {
   const firebirdHome = process.env.FIREBIRD || '/usr/local/firebird';
@@ -651,6 +662,10 @@ async function cleanupRetention(db) {
 async function runAutomaticBackups() {
   if (!isPrimaryNode()) return;
   if (backupRunning) return;
+  if (haSyncActive()) {
+    console.log('[worker] backup agendado adiado: HA sync em execucao');
+    return;
+  }
   backupRunning = true;
   try {
     const dbs = await prisma.managedDatabase.findMany({
@@ -658,6 +673,10 @@ async function runAutomaticBackups() {
     });
     const now = Date.now();
     for (const db of dbs) {
+      if (haSyncActive()) {
+        console.log('[worker] backup agendado interrompido antes de iniciar novo banco: HA sync em execucao');
+        break;
+      }
       await cleanupRetention(db);
       const running = await prisma.backupJob.count({ where: { databaseId: db.id, status: 'RUNNING' } });
       if (running > 0) continue;

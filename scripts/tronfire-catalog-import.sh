@@ -40,6 +40,12 @@ docker exec -i "$POSTGRES_CONTAINER" psql \
   -v ON_ERROR_STOP=1 <<'SQL'
 DO $$
 BEGIN
+  UPDATE "BackupJob"
+  SET
+    "status" = 'FAILED',
+    "finishedAt" = COALESCE("finishedAt", NOW())
+  WHERE "status" = 'RUNNING';
+
   IF to_regclass('"_tronsoftos_ha_standby_state"') IS NOT NULL THEN
     UPDATE "ManagedDatabase" db
     SET

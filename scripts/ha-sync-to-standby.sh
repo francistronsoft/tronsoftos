@@ -16,12 +16,16 @@ AUTO_RESTORE_STANDBY="${HA_SYNC_AUTO_RESTORE_STANDBY:-true}"
 STANDBY_TRONFIRE_URL="${HA_SYNC_STANDBY_TRONFIRE_URL:-http://127.0.0.1:${TRONFIRE_PANEL_PORT:-8081}}"
 FIREBIRD_BIN="${FIREBIRD_BIN:-/usr/local/firebird/bin}"
 FIREBIRD_PASSWORD="${FIREBIRD_PASSWORD:-masterkey}"
+POSTGRES_CONTAINER="${TRONFIRE_POSTGRES_CONTAINER:-tronfire_postgres}"
+POSTGRES_DB="${TRONFIRE_POSTGRES_DB:-tronfire}"
+POSTGRES_USER="${TRONFIRE_POSTGRES_USER:-tronfire}"
 INTERNAL_TOKEN="${TRONSOFTOS_INTERNAL_TOKEN:-}"
 if [ -z "$INTERNAL_TOKEN" ] && [ -f "${TRONSOFTOS_CLUSTER_SECRETS:-${APP_DIR}/state/cluster-secrets.env}" ]; then
   INTERNAL_TOKEN="$(grep '^TRONSOFTOS_INTERNAL_TOKEN=' "${TRONSOFTOS_CLUSTER_SECRETS:-${APP_DIR}/state/cluster-secrets.env}" | tail -n1 | cut -d= -f2- || true)"
 fi
 LOG_DIR="${TRONSOFTOS_LOG_DIR:-${APP_DIR}/logs}/ha-sync"
 LOCK_FILE="${TRONSOFTOS_HA_SYNC_LOCK:-${APP_DIR}/state/ha-sync.lock}"
+ACTIVE_FILE="${TRONSOFTOS_HA_SYNC_ACTIVE_FILE:-${APP_DIR}/state/ha-sync.active}"
 STAMP="$(date +%Y%m%d%H%M%S)"
 LOG_FILE="${LOG_DIR}/ha-sync-${STAMP}.log"
 KNOWN_HOSTS="${TRONSOFTOS_SSH_KNOWN_HOSTS:-${APP_DIR}/state/known_hosts}"
@@ -40,11 +44,24 @@ if ! flock -n 9; then
   echo "[ha-sync] outro sync/restore HA ja esta em execucao; ignorando esta rodada"
   exit 0
 fi
+touch "$ACTIVE_FILE"
+trap 'rm -f "$ACTIVE_FILE"' EXIT
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "[ha-sync] inicio $(date -Is)"
 echo "[ha-sync] modo ${HA_SYNC_MODE}"
 echo "[ha-sync] destino ${SSH_USER}@${STANDBY_HOST}"
+
+primary_backup_running() {
+  local count
+  count="$(docker exec "$POSTGRES_CONTAINER" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT COUNT(*) FROM \"BackupJob\" WHERE \"status\" = 'RUNNING';" 2>/dev/null || true)"
+  [ "${count:-0}" -gt 0 ] 2>/dev/null
+}
+
+if primary_backup_running; then
+  echo "[ha-sync] adiado: backup do TronFire em andamento no primary; nova tentativa ocorrera no proximo ciclo"
+  exit 12
+fi
 
 echo "[ha-sync] exportando catalogo PostgreSQL do TronFire"
 TRONSOFTOS_APP_DIR="$APP_DIR" TRONFIRE_CATALOG_EXPORT_DIR="$CATALOG_DIR" bash "$APP_DIR/scripts/tronfire-catalog-export.sh"
@@ -55,7 +72,7 @@ ssh ${SSH_BASE_OPTS} "${SSH_USER}@${STANDBY_HOST}" "mkdir -p '$REMOTE_BACKUP_DIR
 VALID_BACKUP_LIST="$(mktemp)"
 RESTORE_LIST="$(mktemp)"
 SKIP_RESTORE_LIST="$(mktemp)"
-trap 'rm -f "$VALID_BACKUP_LIST" "$RESTORE_LIST" "$SKIP_RESTORE_LIST"' EXIT
+trap 'rm -f "$VALID_BACKUP_LIST" "$RESTORE_LIST" "$SKIP_RESTORE_LIST" "$ACTIVE_FILE"' EXIT
 declare -A latest_backup_by_alias=()
 declare -A latest_manifest_by_alias=()
 declare -A latest_sha_by_alias=()

@@ -133,6 +133,7 @@ function statusClass(status) {
     degraded: 'bg-amber-100 text-amber-800 border-amber-200',
     warning: 'bg-amber-100 text-amber-800 border-amber-200',
     atrasado: 'bg-amber-100 text-amber-800 border-amber-200',
+    deferred: 'bg-amber-100 text-amber-800 border-amber-200',
     blocked: 'bg-red-100 text-red-800 border-red-200',
     'promotion-allowed': 'bg-amber-100 text-amber-800 border-amber-200',
     standby: 'bg-blue-100 text-blue-800 border-blue-200',

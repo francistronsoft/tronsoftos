@@ -33,6 +33,7 @@ const googleOauthDir = process.env.TRONSOFTOS_GOOGLE_OAUTH_DIR || path.join(stat
 const frontendDist = process.env.TRONSOFTOS_FRONTEND_DIST || path.join(appRoot, 'frontend/dist');
 const haSyncLogDir = process.env.TRONSOFTOS_HA_SYNC_LOG_DIR || path.join(appRoot, 'logs', 'ha-sync');
 const FIXED_HA_SYNC_INTERVAL_MINUTES = 3;
+const HA_SYNC_CRITICAL_LAG_MINUTES = 20;
 const DEFAULT_HA_SYNC_MODE = 'physical';
 const actionJobs = new Map();
 const maxActionLogLength = 1024 * 128;
@@ -430,7 +431,7 @@ function writeHaFailoverSettings(body = {}) {
 
 function haSyncStatus() {
   const settings = publicHaSyncSettings();
-  const lastEvent = readEvents(200).find(event => ['HA_SYNC_STARTED', 'HA_SYNC_FINISHED', 'HA_SYNC_FAILED'].includes(event.type)) || null;
+  const lastEvent = readEvents(200).find(event => ['HA_SYNC_STARTED', 'HA_SYNC_FINISHED', 'HA_SYNC_FAILED', 'HA_SYNC_DEFERRED'].includes(event.type)) || null;
   const runningJob = [...actionJobs.values()].reverse().find(job => job.app === 'ha-sync' && job.status === 'running') || null;
   const receiverCatalogPath = settings.catalogDir || path.join(stateDir, 'tronfire-catalog');
   const receiverBackupPath = settings.backupDir || '/opt/tronfire-storage/firebird/backups';
@@ -452,6 +453,7 @@ function haSyncStatus() {
   if (runningJob) status = 'running';
   else if (settings.enabled && !settings.standbyHost) status = 'warning';
   else if (settings.enabled && lastEvent?.type === 'HA_SYNC_FINISHED') status = 'success';
+  else if (settings.enabled && lastEvent?.type === 'HA_SYNC_DEFERRED') status = 'deferred';
   else if (settings.enabled && lastEvent?.type === 'HA_SYNC_FAILED') status = 'failed';
   else if (settings.enabled && lastEvent?.type === 'HA_SYNC_STARTED') status = 'running';
   else if (settings.enabled) status = 'enabled';
@@ -2228,18 +2230,44 @@ async function dashboard() {
     alerts.push({ severity: 'warning', message: `Nos HA em versoes diferentes: local ${localVersion}, standby ${standbyVersion}` });
   }
   if (cluster.mode === 'ha' && !cluster.lock) alerts.push({ severity: 'warning', message: 'Cluster HA sem cluster-lock' });
-  if (cluster.sync?.status === 'failed') alerts.push({ severity: 'critical', message: 'Sync HA falhou na ultima execucao' });
-  if (cluster.failover?.primaryDownSince) {
+  if (cluster.sync?.status === 'failed') {
     alerts.push({
-      severity: cluster.failover.enabled ? 'critical' : 'warning',
+      severity: 'warning',
+      message: 'Sync HA em recuperacao: ultima tentativa falhou; aguarde a proxima execucao ou rode o sync manual se persistir'
+    });
+  }
+  if (cluster.sync?.status === 'deferred') {
+    alerts.push({
+      severity: 'warning',
+      message: 'Sync HA adiado: backup do TronFire em andamento; nova tentativa automatica ocorrera no proximo ciclo'
+    });
+  }
+  if (cluster.failover?.primaryDownSince) {
+    const standbyBlocked = cluster.failover.enabled && cluster.sync?.enabled && cluster.sync?.standbyReady === false;
+    alerts.push({
+      severity: cluster.failover.enabled && !standbyBlocked ? 'critical' : 'warning',
       message: cluster.failover.enabled
-        ? `Primary indisponivel: failover automatico em ${cluster.failover.remainingSeconds ?? 0}s`
+        ? standbyBlocked
+          ? 'Primary indisponivel: promocao automatica bloqueada porque o standby nao esta pronto'
+          : `Primary indisponivel: failover automatico em ${cluster.failover.remainingSeconds ?? 0}s`
         : 'Primary indisponivel: failover em modo manual'
     });
+    if (standbyBlocked) {
+      const standbySummary = cluster.sync.tronfireStandby?.databaseCount
+        ? `${cluster.sync.tronfireStandby.readyCount || 0}/${cluster.sync.tronfireStandby.databaseCount} bancos READY`
+        : 'sem banco READY confirmado';
+      alerts.push({
+        severity: 'critical',
+        message: `Standby nao assumiu: primary indisponivel, mas o sync foi interrompido ou o standby nao esta READY (${standbySummary}). Restaure/valide o banco pelo TronFire antes de promover.`
+      });
+    }
   }
   if (cluster.sync?.enabled && cluster.sync?.standbyLagMinutes !== null && cluster.sync.standbyLagMinutes > FIXED_HA_SYNC_INTERVAL_MINUTES * 2) {
     const lagLabel = cluster.sync.syncMode === 'physical' ? 'sem standby fisico validado' : 'sem backup validado/restauravel';
-    alerts.push({ severity: 'warning', message: `Standby atrasado: ${cluster.sync.standbyLagMinutes} min ${lagLabel}` });
+    alerts.push({
+      severity: cluster.sync.standbyLagMinutes >= HA_SYNC_CRITICAL_LAG_MINUTES ? 'critical' : 'warning',
+      message: `Standby atrasado: ${cluster.sync.standbyLagMinutes} min ${lagLabel}`
+    });
   }
   if (cluster.sync?.enabled && cluster.sync?.syncMode === 'backup_restore') {
     const intervalMinutes = FIXED_HA_SYNC_INTERVAL_MINUTES;
@@ -2510,7 +2538,11 @@ function startHaSync() {
     FIREBIRD_DATA_DIR: process.env.FIREBIRD_DATA_DIR || '/opt/tronfire-storage/firebird/data',
     FIREBIRD_BIN: process.env.FIREBIRD_BIN || '/usr/local/firebird/bin',
     FIREBIRD_PASSWORD: process.env.FIREBIRD_PASSWORD || parseEnvFile(clusterSecretsPath).FIREBIRD_PASSWORD || 'masterkey',
-    TRONFIRE_CATALOG_EXPORT_DIR: settings.catalogDir || path.join(stateDir, 'tronfire-catalog')
+    TRONFIRE_CATALOG_EXPORT_DIR: settings.catalogDir || path.join(stateDir, 'tronfire-catalog'),
+    TRONSOFTOS_HA_SYNC_ACTIVE_FILE: process.env.TRONSOFTOS_HA_SYNC_ACTIVE_FILE || path.join(stateDir, 'ha-sync.active'),
+    TRONFIRE_POSTGRES_CONTAINER: process.env.TRONFIRE_POSTGRES_CONTAINER || 'tronfire_postgres',
+    TRONFIRE_POSTGRES_DB: process.env.TRONFIRE_POSTGRES_DB || 'tronfire',
+    TRONFIRE_POSTGRES_USER: process.env.TRONFIRE_POSTGRES_USER || 'tronfire'
   };
   const child = spawn('bash', [script], { cwd: appRoot, env, windowsHide: true });
   child.stdout.on('data', chunk => appendActionLog(job, 'stdout', chunk));
@@ -2523,9 +2555,10 @@ function startHaSync() {
   });
   child.on('close', code => {
     job.exitCode = code;
-    job.status = code === 0 ? 'success' : 'failed';
+    const deferred = code === 12;
+    job.status = code === 0 || deferred ? 'success' : 'failed';
     job.finishedAt = new Date().toISOString();
-    appendEvent(code === 0 ? 'HA_SYNC_FINISHED' : 'HA_SYNC_FAILED', { standbyHost: settings.standbyHost, exitCode: code, stdout: job.stdout, stderr: job.stderr });
+    appendEvent(code === 0 ? 'HA_SYNC_FINISHED' : deferred ? 'HA_SYNC_DEFERRED' : 'HA_SYNC_FAILED', { standbyHost: settings.standbyHost, exitCode: code, stdout: job.stdout, stderr: job.stderr });
   });
   appendEvent('HA_SYNC_STARTED', { standbyHost: settings.standbyHost, sshUser: settings.sshUser, sshPort: settings.sshPort, syncMode: settings.syncMode });
   return publicActionJob(job);
@@ -2538,7 +2571,7 @@ function shouldRunAutoHaSync(settings) {
   const runningJob = [...actionJobs.values()].reverse().find(job => job.app === 'ha-sync' && job.status === 'running');
   if (runningJob) return false;
   const intervalMs = FIXED_HA_SYNC_INTERVAL_MINUTES * 60 * 1000;
-  const lastEvent = readEvents(200).find(event => ['HA_SYNC_STARTED', 'HA_SYNC_FINISHED', 'HA_SYNC_FAILED'].includes(event.type)) || null;
+  const lastEvent = readEvents(200).find(event => ['HA_SYNC_STARTED', 'HA_SYNC_FINISHED', 'HA_SYNC_FAILED', 'HA_SYNC_DEFERRED'].includes(event.type)) || null;
   const lastEventAt = lastEvent?.createdAt ? new Date(lastEvent.createdAt).getTime() : 0;
   const lastRunAt = Math.max(lastEventAt || 0, lastAutoHaSyncStartedAt || 0);
   return !lastRunAt || Date.now() - lastRunAt >= intervalMs;
