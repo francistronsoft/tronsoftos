@@ -113,6 +113,20 @@ detect_default_iface() {
   ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}'
 }
 
+detect_secondary_iface() {
+  local primary_iface="$1"
+  local iface
+  for iface_path in /sys/class/net/*; do
+    iface="$(basename "$iface_path")"
+    [ "$iface" != "lo" ] || continue
+    [ "$iface" != "$primary_iface" ] || continue
+    [ -e "$iface_path/device" ] || continue
+    echo "$iface"
+    return 0
+  done
+  return 1
+}
+
 detect_default_ipv4_cidr() {
   local iface="$1"
   if [ -n "$iface" ]; then
@@ -152,16 +166,14 @@ configure_static_ip() {
 
   if command_exists nmcli; then
     local connection
-    connection="$(nmcli -t -f NAME,DEVICE connection show --active | awk -F: -v dev="$iface" '$2==dev {print $1; exit}')"
+    connection="$(nmcli -t -f NAME,DEVICE connection show | awk -F: -v dev="$iface" '$2==dev {print $1; exit}')"
     if [ -z "$connection" ]; then
-      connection="$(nmcli -t -f NAME connection show | head -n1)"
-    fi
-    if [ -z "$connection" ]; then
-      echo "Nao foi possivel localizar uma conexao do NetworkManager para $iface."
-      return 1
+      connection="tronsoftos-$iface"
+      nmcli connection add type ethernet ifname "$iface" con-name "$connection"
     fi
 
     nmcli connection modify "$connection" \
+      connection.interface-name "$iface" \
       ipv4.addresses "$address_cidr" \
       ipv4.method manual \
       connection.autoconnect yes
@@ -206,8 +218,13 @@ configure_static_ip() {
     systemctl enable systemd-networkd.service >/dev/null 2>&1 || true
     echo "IP fixo gravado em $network_file."
     if [ "$apply_now" = "true" ]; then
-      echo "Reiniciando systemd-networkd agora. Se estiver via SSH, a sessao pode cair se o IP mudar."
-      systemctl restart systemd-networkd.service
+      echo "Aplicando somente a interface $iface pelo systemd-networkd."
+      if command_exists networkctl; then
+        networkctl reload
+        networkctl reconfigure "$iface"
+      else
+        systemctl restart systemd-networkd.service
+      fi
     else
       echo "A configuracao sera aplicada ao reiniciar o systemd-networkd ou o servidor."
     fi
@@ -290,28 +307,35 @@ HA_SYNC_STANDBY_HOST=""
 if [ "$DEPLOYMENT_MODE" = "ha" ]; then
   line
   echo "Rede de sincronismo HA"
-  echo "Use a segunda placa para replicacao entre primary e standby. Ela nao precisa de gateway nem DNS."
-  echo "Padrao sugerido: primary 10.10.10.1/30 e standby 10.10.10.2/30."
+  echo "A segunda placa sera configurada automaticamente, sem gateway nem DNS."
+  echo "Padrao fixo: primary 10.10.10.1/30 e standby 10.10.10.2/30."
   line
-  default_sync_iface="eth1"
-  case "$STATIC_IP_INTERFACE" in
-    ens18) default_sync_iface="ens19" ;;
-    eth0) default_sync_iface="eth1" ;;
-    enp0s3) default_sync_iface="enp0s8" ;;
-  esac
-  default_sync_cidr="$([ "$NODE_ROLE" = "primary" ] && echo "10.10.10.1/30" || echo "10.10.10.2/30")"
-  default_peer_ip="$([ "$NODE_ROLE" = "primary" ] && echo "10.10.10.2" || echo "10.10.10.1")"
-  if yes_no "Deseja configurar a segunda placa de sincronismo agora? (s/n)" "s"; then
-    SYNC_IP_ENABLED="true"
-    SYNC_IP_INTERFACE="$(ask "Interface da sincronizacao HA" "$default_sync_iface")"
-    SYNC_IP_ADDRESS_CIDR="$(ask "IP/CIDR desta placa de sincronismo" "$default_sync_cidr")"
-    if yes_no "Aplicar IP da sincronizacao agora? Pode derrubar a sessao se estiver usando esta interface. (s/n)" "n"; then
-      SYNC_IP_APPLY_NOW="true"
-    fi
-  else
-    echo "Configure manualmente uma rede dedicada entre os servidores antes de validar o HA fisico."
+  SYNC_IP_INTERFACE="${HA_SYNC_INTERFACE:-$(detect_secondary_iface "$STATIC_IP_INTERFACE" || true)}"
+  if [ -z "$SYNC_IP_INTERFACE" ]; then
+    echo "Erro: nao foi encontrada uma segunda placa de rede diferente de $STATIC_IP_INTERFACE." >&2
+    echo "Adicione/habilite a segunda interface antes de instalar o modo HA fisico." >&2
+    exit 78
   fi
-  HA_SYNC_STANDBY_HOST="$(ask "IP de sincronismo do outro servidor" "$default_peer_ip")"
+  if [ "$SYNC_IP_INTERFACE" = "$STATIC_IP_INTERFACE" ]; then
+    echo "Erro: a interface de sincronismo nao pode ser a mesma interface principal ($STATIC_IP_INTERFACE)." >&2
+    exit 78
+  fi
+  if ! ip link show "$SYNC_IP_INTERFACE" >/dev/null 2>&1; then
+    echo "Erro: interface de sincronismo $SYNC_IP_INTERFACE nao existe neste host." >&2
+    exit 78
+  fi
+  SYNC_IP_ENABLED="true"
+  SYNC_IP_APPLY_NOW="true"
+  if [ "$NODE_ROLE" = "primary" ]; then
+    SYNC_IP_ADDRESS_CIDR="10.10.10.1/30"
+    HA_SYNC_STANDBY_HOST="10.10.10.2"
+  else
+    SYNC_IP_ADDRESS_CIDR="10.10.10.2/30"
+    HA_SYNC_STANDBY_HOST="10.10.10.1"
+  fi
+  echo "Interface detectada: $SYNC_IP_INTERFACE"
+  echo "IP local de sincronismo: $SYNC_IP_ADDRESS_CIDR"
+  echo "Peer HA sync: $HA_SYNC_STANDBY_HOST"
 fi
 
 FIREBIRD_MODE="host"
