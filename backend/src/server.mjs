@@ -23,6 +23,7 @@ const clusterLockPath = process.env.TRONSOFTOS_CLUSTER_LOCK || path.join(stateDi
 const clusterSecretsPath = process.env.TRONSOFTOS_CLUSTER_SECRETS || path.join(stateDir, 'cluster-secrets.env');
 const eventLogPath = process.env.TRONSOFTOS_EVENT_LOG || path.join(stateDir, 'events.jsonl');
 const smtpSettingsPath = process.env.TRONSOFTOS_SMTP_SETTINGS || path.join(stateDir, 'smtp-settings.json');
+const smtpAlertStatePath = process.env.TRONSOFTOS_SMTP_ALERT_STATE || path.join(stateDir, 'smtp-alert-state.json');
 const cloudflareSettingsPath = process.env.TRONSOFTOS_CLOUDFLARE_SETTINGS || path.join(stateDir, 'cloudflare-settings.json');
 const rcloneSettingsPath = process.env.TRONSOFTOS_RCLONE_SETTINGS || path.join(stateDir, 'rclone-settings.json');
 const haSyncSettingsPath = process.env.TRONSOFTOS_HA_SYNC_SETTINGS || path.join(stateDir, 'ha-sync-settings.json');
@@ -39,12 +40,14 @@ const actionJobs = new Map();
 const maxActionLogLength = 1024 * 128;
 const dockerConfigDir = process.env.TRONSOFTOS_DOCKER_CONFIG || path.join(stateDir, 'docker-config');
 let rcloneQuotaCache = { key: null, checkedAt: 0, value: null };
+let companyIdentityCache = { checkedAt: 0, value: null };
 let haSyncSchedulerTimer = null;
 let haFailoverWatchdogTimer = null;
 let lastAutoHaSyncStartedAt = 0;
 let primaryDownSince = 0;
 let autoFailoverInProgress = false;
-const smtpAlertSentAt = new Map();
+const smtpAlertStates = new Map(Object.entries(readJson(smtpAlertStatePath, {})));
+let smtpNotificationInFlight = false;
 
 function json(reply, status, body) {
   const payload = JSON.stringify(body, null, 2);
@@ -644,13 +647,14 @@ async function sendSmtpMessageOnSocket(socket, settings, subject, body) {
     await smtpCommand(socket, Buffer.from(settings.password).toString('base64'));
   }
   const recipients = String(settings.to).split(',').map(item => item.trim()).filter(Boolean);
+  const safeSubject = String(subject || '').replace(/[\r\n]+/g, ' ').trim();
   await smtpCommand(socket, `MAIL FROM:<${settings.from.replace(/^.*<|>.*$/g, '')}>`);
   for (const recipient of recipients) await smtpCommand(socket, `RCPT TO:<${recipient.replace(/^.*<|>.*$/g, '')}>`);
   await smtpCommand(socket, 'DATA', /^354/);
   const message = [
     `From: ${settings.from}`,
     `To: ${recipients.join(', ')}`,
-    `Subject: ${settings.subjectPrefix || '[TronSoftOS]'} ${subject}`,
+    `Subject: ${settings.subjectPrefix || '[TronSoftOS]'} ${safeSubject}`,
     'Content-Type: text/plain; charset=utf-8',
     '',
     body.replace(/\n\./g, '\n..'),
@@ -663,27 +667,107 @@ async function sendSmtpMessageOnSocket(socket, settings, subject, body) {
   return true;
 }
 
+function smtpAlertKey(installationLabel, alert) {
+  const stableAlert = String(alert.type || alert.message || 'alerta')
+    .toLowerCase()
+    .replace(/\b\d+(?:[.,]\d+)?\b/g, '#')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return `${installationLabel}:${alert.source || 'TronSoftOS'}:${stableAlert}`;
+}
+
+function persistSmtpAlertStates() {
+  ensureStateDir();
+  fs.writeFileSync(smtpAlertStatePath, `${JSON.stringify(Object.fromEntries(smtpAlertStates), null, 2)}\n`, { mode: 0o600 });
+}
+
+function smtpAlertBody(identity, company, alert, statusLabel) {
+  return [
+    `Status: ${statusLabel}`,
+    `Empresa Sintegra: ${company.companyName || 'Nao identificada'}`,
+    `Banco: ${company.databaseName || 'Nao identificado'}${company.databaseAlias ? ` (${company.databaseAlias})` : ''}`,
+    `Cluster: ${identity.clusterId || 'Nao informado'}`,
+    `No: ${identity.nodeName || 'Nao informado'}`,
+    `Papel: ${identity.nodeRole || 'Nao informado'}`,
+    `Origem: ${alert.source || 'TronSoftOS'}`,
+    `Severidade: ${alert.severity || 'critical'}`,
+    `Mensagem: ${alert.message || 'Alerta critico'}`,
+    `Quando: ${new Date().toISOString()}`
+  ].join('\n');
+}
+
 async function notifyCriticalAlerts(alerts) {
   const settings = readJson(smtpSettingsPath, {});
-  if (settings.enabled !== true) return;
-  const critical = alerts.filter(alert => ['critical', 'critico', 'danger'].includes(String(alert.severity || '').toLowerCase()));
-  for (const alert of critical) {
-    const key = `${alert.source || 'TronSoftOS'}:${alert.type || alert.message}`;
-    const lastSent = smtpAlertSentAt.get(key) || 0;
-    if (Date.now() - lastSent < 30 * 60 * 1000) continue;
-    try {
-      await sendSmtpMessage(settings, alert.message || 'Alerta critico', [
-        `Origem: ${alert.source || 'TronSoftOS'}`,
-        `Severidade: ${alert.severity}`,
-        `Mensagem: ${alert.message}`,
-        `No: ${nodeIdentity().nodeName}`,
-        `Quando: ${new Date().toISOString()}`
-      ].join('\n'));
-      smtpAlertSentAt.set(key, Date.now());
-      appendEvent('SMTP_ALERT_SENT', { key, message: alert.message });
-    } catch (err) {
-      appendEvent('SMTP_ALERT_FAILED', { key, error: err.message });
+  if (settings.enabled !== true || smtpNotificationInFlight) return;
+  smtpNotificationInFlight = true;
+  try {
+    const now = Date.now();
+    const reminderIntervalMs = 60 * 60 * 1000;
+    const recoveryGraceMs = 2 * 60 * 1000;
+    const critical = alerts.filter(alert => ['critical', 'critico', 'danger'].includes(String(alert.severity || '').toLowerCase()));
+    const identity = nodeIdentity();
+    const company = await tronfireCompanyIdentity();
+    const installationLabel = company.companyName || identity.clusterId || identity.nodeName || 'TronSoftOS';
+    const installationKey = identity.clusterId || identity.nodeName || 'TronSoftOS';
+    const activeKeys = new Set();
+
+    for (const alert of critical) {
+      const key = smtpAlertKey(installationKey, alert);
+      activeKeys.add(key);
+      const current = smtpAlertStates.get(key) || {};
+      const retryIntervalMs = 5 * 60 * 1000;
+      const reminderDue = !current.lastSentAt || now - Number(current.lastSentAt) >= reminderIntervalMs;
+      const retryAllowed = !current.lastAttemptAt || now - Number(current.lastAttemptAt) >= retryIntervalMs;
+      const shouldSend = reminderDue && retryAllowed;
+      const notificationKind = current.lastSentAt ? 'LEMBRETE' : 'NOVO ALERTA';
+      const nextState = {
+        ...current,
+        alert,
+        identity,
+        company,
+        installationLabel,
+        absentSince: null,
+        lastObservedAt: now
+      };
+      if (!shouldSend) {
+        smtpAlertStates.set(key, nextState);
+        continue;
+      }
+      try {
+        await sendSmtpMessage(settings, `[${installationLabel}] ${notificationKind}: ${alert.message || 'Alerta critico'}`, smtpAlertBody(identity, company, alert, notificationKind));
+        smtpAlertStates.set(key, { ...nextState, lastSentAt: now, lastAttemptAt: now });
+        appendEvent('SMTP_ALERT_SENT', { key, kind: notificationKind, message: alert.message });
+      } catch (err) {
+        smtpAlertStates.set(key, { ...nextState, lastAttemptAt: now });
+        appendEvent('SMTP_ALERT_FAILED', { key, kind: notificationKind, error: err.message });
+      }
     }
+
+    for (const [key, state] of smtpAlertStates.entries()) {
+      if (activeKeys.has(key) || !state.lastSentAt) continue;
+      if (!state.absentSince) {
+        smtpAlertStates.set(key, { ...state, absentSince: now });
+        continue;
+      }
+      if (now - Number(state.absentSince) < recoveryGraceMs) continue;
+      if (state.recoveryLastAttemptAt && now - Number(state.recoveryLastAttemptAt) < 5 * 60 * 1000) continue;
+      const recoveredAlert = state.alert || { message: 'Alerta normalizado', severity: 'critical', source: 'TronSoftOS' };
+      try {
+        await sendSmtpMessage(
+          settings,
+          `[${state.installationLabel || installationLabel}] RECUPERADO: ${recoveredAlert.message || 'Alerta normalizado'}`,
+          smtpAlertBody(state.identity || identity, state.company || company, recoveredAlert, 'RECUPERADO')
+        );
+        smtpAlertStates.delete(key);
+        appendEvent('SMTP_ALERT_RECOVERED', { key, message: recoveredAlert.message });
+      } catch (err) {
+        smtpAlertStates.set(key, { ...state, recoveryLastAttemptAt: now });
+        appendEvent('SMTP_ALERT_FAILED', { key, kind: 'RECUPERADO', error: err.message });
+      }
+    }
+    persistSmtpAlertStates();
+  } finally {
+    smtpNotificationInFlight = false;
   }
 }
 
@@ -1422,6 +1506,35 @@ async function tronfireAlerts() {
     })) : [];
   } catch {
     return [];
+  }
+}
+
+async function tronfireCompanyIdentity() {
+  if (companyIdentityCache.value && Date.now() - companyIdentityCache.checkedAt < 10 * 60 * 1000) {
+    return companyIdentityCache.value;
+  }
+  const fallback = {
+    companyName: null,
+    databaseName: null,
+    databaseAlias: null
+  };
+  const token = internalTokenValue();
+  if (!token) return fallback;
+  try {
+    const target = tronfireProxyTarget();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const response = await fetch(new URL('/api/internal/company-identity', target), {
+      signal: controller.signal,
+      headers: { 'x-tronsoftos-token': token }
+    });
+    clearTimeout(timeout);
+    if (!response.ok) return fallback;
+    const value = { ...fallback, ...await response.json() };
+    companyIdentityCache = { checkedAt: Date.now(), value };
+    return value;
+  } catch {
+    return companyIdentityCache.value || fallback;
   }
 }
 

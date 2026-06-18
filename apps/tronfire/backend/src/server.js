@@ -13,7 +13,7 @@ import cors from '@fastify/cors';
 import { prisma } from './prisma.js';
 import { createSession, makeToken, requireAuth, requireAdmin, requireOperator, verifyPassword, hashPassword, sha256 } from './security.js';
 import { audit } from './audit.js';
-import { runPreflight } from './preflight.js';
+import { databaseCompanyIdentity, runPreflight } from './preflight.js';
 import { docker, dockerExec } from './shell.js';
 import {
   readCloudflareTunnelSettings,
@@ -959,6 +959,11 @@ app.get('/api/metrics/dashboard', { preHandler: requireAuth }, async (req) => lo
 app.get('/api/internal/metrics/dashboard', async (req) => {
   assertInternalTronsoftos(req);
   return loadDashboardMetrics(reqQueryRange(req));
+});
+
+app.get('/api/internal/company-identity', async (req) => {
+  assertInternalTronsoftos(req);
+  return databaseCompanyIdentity();
 });
 
 app.get('/api/alerts', { preHandler: requireAuth }, async (req) => {

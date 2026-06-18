@@ -51,7 +51,7 @@ async function queryDatabaseValue(db, sql) {
   return parseIsqlValue(stdout);
 }
 
-async function databaseDiagnostics() {
+export async function databaseDiagnostics() {
   const dbs = await prisma.managedDatabase.findMany({ where: { type: { not: 'ARQUIVADO' } }, orderBy: [{ isPrimary: 'desc' }, { name: 'asc' }] });
   const diagnostics = [];
   for (const db of dbs) {
@@ -87,6 +87,29 @@ async function databaseDiagnostics() {
     }
   }
   return diagnostics;
+}
+
+export async function databaseCompanyIdentity() {
+  const db = await prisma.managedDatabase.findFirst({
+    where: { type: { not: 'ARQUIVADO' } },
+    orderBy: [{ isPrimary: 'desc' }, { name: 'asc' }]
+  });
+  if (!db) return { companyName: null, databaseName: null, databaseAlias: null };
+  try {
+    const companyName = await queryDatabaseValue(db, 'select first 1 NOME from EMPRESA_SINTEGRA;');
+    return {
+      companyName: companyName || null,
+      databaseName: db.name,
+      databaseAlias: db.alias
+    };
+  } catch (err) {
+    return {
+      companyName: null,
+      databaseName: db.name,
+      databaseAlias: db.alias,
+      error: err.message
+    };
+  }
 }
 
 export async function runPreflight() {
