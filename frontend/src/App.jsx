@@ -13,6 +13,8 @@ import {
   GitBranch,
   HardDrive,
   LayoutDashboard,
+  LogIn,
+  LogOut,
   Network,
   Play,
   Power,
@@ -234,7 +236,7 @@ function Stat({ label, value, detail, icon: Icon, tone = 'slate' }) {
   );
 }
 
-function Field({ label, value, onChange, placeholder, type = 'text', readOnly = false }) {
+function Field({ label, value, onChange, placeholder, type = 'text', readOnly = false, autoComplete }) {
   return (
     <label className="block">
       <span className="text-xs font-medium uppercase text-slate-500">{label}</span>
@@ -243,6 +245,7 @@ function Field({ label, value, onChange, placeholder, type = 'text', readOnly = 
         value={value}
         placeholder={placeholder}
         readOnly={readOnly}
+        autoComplete={autoComplete}
         onChange={event => onChange?.(event.target.value)}
         className={`mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100 ${readOnly ? 'bg-slate-50 text-slate-500' : ''}`}
       />
@@ -2003,7 +2006,67 @@ function TronFireView() {
   );
 }
 
-export default function App() {
+function LoginView({ onAuthenticated }) {
+  const [username, setUsername] = useState('tronsoft');
+  const [password, setPassword] = useState('');
+  const loginMutation = useMutation({
+    mutationFn: () => postApi('/api/auth/login', { username, password }),
+    onSuccess: data => onAuthenticated(data.user)
+  });
+
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-slate-100 px-4">
+      <div className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-6 shadow-soft">
+        <div className="mb-6 flex items-center gap-3">
+          <div className="flex h-11 w-11 items-center justify-center rounded-md bg-panel-950 text-sky-300">
+            <ShieldCheck className="h-6 w-6" />
+          </div>
+          <div>
+            <div className="text-xl font-semibold text-slate-950">
+              <span>tron</span><span className="text-sky-600">soft</span><span className="ml-1 font-black">OS</span>
+            </div>
+            <div className="text-sm text-slate-500">Acesso tecnico</div>
+          </div>
+        </div>
+        <form
+          className="space-y-4"
+          onSubmit={event => {
+            event.preventDefault();
+            loginMutation.mutate();
+          }}
+        >
+          <Field label="Usuario" value={username} onChange={setUsername} autoComplete="username" />
+          <label className="block">
+            <span className="text-xs font-medium uppercase text-slate-500">Senha</span>
+            <input
+              type="password"
+              value={password}
+              onChange={event => setPassword(event.target.value)}
+              autoComplete="current-password"
+              autoFocus
+              className="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-100"
+            />
+          </label>
+          {loginMutation.isError ? (
+            <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              {loginMutation.error.message}
+            </div>
+          ) : null}
+          <button
+            type="submit"
+            disabled={loginMutation.isPending || !username || !password}
+            className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-panel-950 px-4 py-2.5 text-sm font-medium text-white hover:bg-panel-800 disabled:opacity-50"
+          >
+            <LogIn className="h-4 w-4" />
+            {loginMutation.isPending ? 'Entrando...' : 'Entrar'}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function AuthenticatedApp({ user, onLogout }) {
   const [active, setActive] = useState('dashboard');
   const [actionJobId, setActionJobId] = useState(null);
   const queryClient = useQueryClient();
@@ -2091,6 +2154,14 @@ export default function App() {
           <div className="flex items-center gap-3">
             {dashboardQuery.isError ? <StatusPill value="offline" /> : <StatusPill value="online" />}
             <StatusPill value={dashboard.cluster.nodeRole} />
+            <button
+              type="button"
+              onClick={onLogout}
+              title={`Sair (${user?.name || user?.username || 'usuario'})`}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 hover:text-slate-950"
+            >
+              <LogOut className="h-4 w-4" />
+            </button>
           </div>
         </header>
         {haMaintenanceActive ? (
@@ -2117,4 +2188,40 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+export default function App() {
+  const queryClient = useQueryClient();
+  const authQuery = useQuery({
+    queryKey: ['auth'],
+    queryFn: async () => {
+      const response = await fetch('/api/auth/me');
+      if (response.status === 401) return null;
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    },
+    retry: false,
+    staleTime: 60_000
+  });
+  const logoutMutation = useMutation({
+    mutationFn: () => postApi('/api/auth/logout'),
+    onSettled: () => {
+      queryClient.clear();
+      queryClient.setQueryData(['auth'], null);
+    }
+  });
+
+  if (authQuery.isPending) {
+    return <div className="flex min-h-screen items-center justify-center bg-slate-100 text-sm text-slate-500">Verificando acesso...</div>;
+  }
+  if (!authQuery.data?.user) {
+    return (
+      <LoginView
+        onAuthenticated={user => {
+          queryClient.setQueryData(['auth'], { user });
+        }}
+      />
+    );
+  }
+  return <AuthenticatedApp user={authQuery.data.user} onLogout={() => logoutMutation.mutate()} />;
 }

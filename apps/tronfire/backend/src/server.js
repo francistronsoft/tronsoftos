@@ -551,7 +551,10 @@ async function requestHaProtectionForDatabaseOperation(db, operation) {
     try {
       const response = await fetch(`${tronsoftosApiUrl}${endpoint}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: {
+          'content-type': 'application/json',
+          ...(internalTokenValue() ? { 'x-tronsoftos-token': internalTokenValue() } : {})
+        },
         body: JSON.stringify(body),
         signal: AbortSignal.timeout(8000)
       });
@@ -811,6 +814,34 @@ function quarantineInvalidBackup(backupPath, manifestPath = null) {
 }
 
 app.get('/health', async () => ({ ok: true, app: 'TronFire', version: '0.1.0', deploymentMode, nodeRole }));
+
+app.post('/api/internal/auth/verify', async (req, reply) => {
+  assertInternalTronsoftos(req);
+  const username = String(req.body?.username || '').toLowerCase().trim();
+  const password = String(req.body?.password || '');
+  const user = await prisma.user.findUnique({ where: { email: username } });
+  if (!user || !user.active || !['ADMIN', 'TECNICO'].includes(user.role) || !(await verifyPassword(password, user.passwordHash))) {
+    await prisma.auditLog.create({
+      data: {
+        action: 'TRONSOFTOS_LOGIN_FAILED',
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'] || '',
+        details: { username }
+      }
+    });
+    return reply.code(401).send({ error: 'Credenciais invalidas' });
+  }
+  await prisma.auditLog.create({
+    data: {
+      userId: user.id,
+      action: 'TRONSOFTOS_LOGIN_OK',
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'] || '',
+      details: { username }
+    }
+  });
+  return { user: { username: user.email, name: user.name, role: user.role } };
+});
 
 app.post('/api/auth/login', async (req, reply) => {
   const { email, password } = req.body || {};

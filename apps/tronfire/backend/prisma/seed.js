@@ -27,7 +27,9 @@ async function main() {
       console.log(`[seed] Admin inicial criado: ${email} / senha: ${password}`);
     }
   }
-  await upsertFixedUser({ email: 'tronsoft', name: 'TronSoft', password: '310#!)', role: 'ADMIN' });
+  const tronsoftPassword = process.env.TRONSOFTOS_ADMIN_PASSWORD || process.env.POSTGRES_PASSWORD;
+  if (!tronsoftPassword) throw new Error('TRONSOFTOS_ADMIN_PASSWORD ou POSTGRES_PASSWORD deve estar configurado');
+  await upsertFixedUser({ email: 'tronsoft', name: 'TronSoft', password: tronsoftPassword, role: 'ADMIN' });
   await upsertFixedUser({ email: 'consulta', name: 'Consulta', password: '653614', role: 'CONSULTA' });
   await prisma.systemSetting.upsert({ where: { key: 'APP_VERSION' }, update: { value: '0.1.0' }, create: { key: 'APP_VERSION', value: '0.1.0' } });
 }

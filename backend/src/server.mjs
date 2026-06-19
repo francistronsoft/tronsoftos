@@ -36,7 +36,12 @@ const haSyncLogDir = process.env.TRONSOFTOS_HA_SYNC_LOG_DIR || path.join(appRoot
 const FIXED_HA_SYNC_INTERVAL_MINUTES = 3;
 const HA_SYNC_CRITICAL_LAG_MINUTES = 20;
 const DEFAULT_HA_SYNC_MODE = 'physical';
+const SESSION_COOKIE = 'tronsoftos_session';
+const SESSION_DURATION_SECONDS = 12 * 60 * 60;
+const LOGIN_WINDOW_MS = 10 * 60 * 1000;
+const LOGIN_MAX_FAILURES = 5;
 const actionJobs = new Map();
+const loginFailures = new Map();
 const maxActionLogLength = 1024 * 128;
 const dockerConfigDir = process.env.TRONSOFTOS_DOCKER_CONFIG || path.join(stateDir, 'docker-config');
 let rcloneQuotaCache = { key: null, checkedAt: 0, value: null };
@@ -69,6 +74,98 @@ function readJson(filePath, fallback) {
 
 function ensureStateDir() {
   fs.mkdirSync(stateDir, { recursive: true });
+}
+
+function parseCookies(req) {
+  return String(req.headers.cookie || '')
+    .split(';')
+    .map(part => part.trim())
+    .filter(Boolean)
+    .reduce((cookies, part) => {
+      const separator = part.indexOf('=');
+      if (separator > 0) {
+        try {
+          cookies[part.slice(0, separator)] = decodeURIComponent(part.slice(separator + 1));
+        } catch {
+          cookies[part.slice(0, separator)] = '';
+        }
+      }
+      return cookies;
+    }, {});
+}
+
+function timingSafeEqualText(left, right) {
+  const leftBuffer = Buffer.from(String(left || ''));
+  const rightBuffer = Buffer.from(String(right || ''));
+  return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function sessionSecret() {
+  return internalTokenValue() || parseEnvFile(path.join(appRoot, 'apps/tronfire/.env')).SESSION_SECRET || '';
+}
+
+function signSession(payload) {
+  const secret = sessionSecret();
+  if (!secret) throw Object.assign(new Error('Segredo de sessao nao configurado'), { statusCode: 503 });
+  const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const signature = crypto.createHmac('sha256', secret).update(encoded).digest('base64url');
+  return `${encoded}.${signature}`;
+}
+
+function sessionFromRequest(req) {
+  const token = parseCookies(req)[SESSION_COOKIE];
+  const secret = sessionSecret();
+  if (!token || !secret) return null;
+  const [encoded, signature] = token.split('.');
+  if (!encoded || !signature) return null;
+  const expected = crypto.createHmac('sha256', secret).update(encoded).digest('base64url');
+  if (!timingSafeEqualText(signature, expected)) return null;
+  try {
+    const session = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
+    if (!session?.username || Number(session.expiresAt || 0) <= Date.now()) return null;
+    return session;
+  } catch {
+    return null;
+  }
+}
+
+function cookieHeader(req, token, maxAge = SESSION_DURATION_SECONDS) {
+  const secure = String(req.headers['x-forwarded-proto'] || '').toLowerCase() === 'https';
+  return `${SESSION_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure ? '; Secure' : ''}`;
+}
+
+function requestHasInternalToken(req) {
+  const configured = internalTokenValue();
+  return Boolean(configured && timingSafeEqualText(req.headers['x-tronsoftos-token'], configured));
+}
+
+function loginFailureKey(req, username) {
+  return `${req.socket.remoteAddress || 'unknown'}:${String(username || '').toLowerCase().trim()}`;
+}
+
+function loginThrottle(req, username) {
+  const key = loginFailureKey(req, username);
+  const current = loginFailures.get(key);
+  if (!current || Date.now() - current.startedAt > LOGIN_WINDOW_MS) {
+    loginFailures.delete(key);
+    return null;
+  }
+  if (current.count < LOGIN_MAX_FAILURES) return null;
+  return Math.max(1, Math.ceil((LOGIN_WINDOW_MS - (Date.now() - current.startedAt)) / 1000));
+}
+
+function recordLoginFailure(req, username) {
+  const key = loginFailureKey(req, username);
+  const current = loginFailures.get(key);
+  if (!current || Date.now() - current.startedAt > LOGIN_WINDOW_MS) {
+    loginFailures.set(key, { count: 1, startedAt: Date.now() });
+  } else {
+    current.count += 1;
+  }
+}
+
+function clearLoginFailures(req, username) {
+  loginFailures.delete(loginFailureKey(req, username));
 }
 
 function buildInfo() {
@@ -2713,7 +2810,7 @@ function startHaSync() {
     HA_SYNC_REMOTE_BACKUP_DIR: settings.remoteBackupDir || '/opt/tronfire-storage/firebird/backups',
     HA_SYNC_REMOTE_RESTORE_DIR: settings.remoteRestoreDir || '/opt/tronfire-storage/firebird/restore-work',
     HA_SYNC_REMOTE_CATALOG_DIR: settings.remoteCatalogDir || '/tmp/tronfire-catalog',
-    HA_SYNC_STANDBY_TRONFIRE_URL: process.env.HA_SYNC_STANDBY_TRONFIRE_URL || `http://${settings.standbyHost}:${process.env.TRONFIRE_PANEL_PORT || 8081}`,
+    HA_SYNC_STANDBY_TRONFIRE_URL: process.env.HA_SYNC_STANDBY_TRONFIRE_URL || `http://127.0.0.1:${process.env.TRONFIRE_PANEL_PORT || 8081}`,
     FIREBIRD_BACKUP_DIR: settings.backupDir || '/opt/tronfire-storage/firebird/backups',
     FIREBIRD_DATA_DIR: process.env.FIREBIRD_DATA_DIR || '/opt/tronfire-storage/firebird/data',
     FIREBIRD_BIN: process.env.FIREBIRD_BIN || '/usr/local/firebird/bin',
@@ -3158,9 +3255,74 @@ function proxyTronfire(req, reply) {
   req.pipe(request);
 }
 
+async function verifyTronsoftosCredentials(username, password) {
+  const token = internalTokenValue();
+  if (!token) throw Object.assign(new Error('Token interno nao configurado'), { statusCode: 503 });
+  const target = tronfireProxyTarget();
+  const response = await fetch(new URL('/api/internal/auth/verify', target), {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-tronsoftos-token': token },
+    body: JSON.stringify({ username, password })
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload.error || 'Credenciais invalidas');
+    error.statusCode = response.status;
+    throw error;
+  }
+  return payload.user;
+}
+
+async function handleLogin(req, reply) {
+  const body = await readBody(req);
+  const username = String(body.username || '').toLowerCase().trim();
+  const password = String(body.password || '');
+  const retryAfter = loginThrottle(req, username);
+  if (retryAfter) {
+    reply.setHeader('retry-after', String(retryAfter));
+    return json(reply, 429, { error: `Muitas tentativas. Tente novamente em ${retryAfter} segundos.` });
+  }
+  try {
+    const user = await verifyTronsoftosCredentials(username, password);
+    clearLoginFailures(req, username);
+    const session = {
+      username: user.username,
+      name: user.name,
+      role: user.role,
+      expiresAt: Date.now() + SESSION_DURATION_SECONDS * 1000,
+      nonce: crypto.randomUUID()
+    };
+    reply.setHeader('set-cookie', cookieHeader(req, signSession(session)));
+    appendEvent('LOGIN_OK', { username: user.username, remoteAddress: req.socket.remoteAddress || null });
+    return json(reply, 200, { user });
+  } catch (err) {
+    if (err.statusCode === 401) {
+      recordLoginFailure(req, username);
+      appendEvent('LOGIN_FAILED', { username, remoteAddress: req.socket.remoteAddress || null });
+      return json(reply, 401, { error: 'Usuario ou senha invalidos' });
+    }
+    throw err;
+  }
+}
+
 async function handleApi(req, reply, url) {
   if (req.method === 'GET' && url.pathname === '/health') {
     return json(reply, 200, { ok: true, app: 'TronSoftOS', ...buildInfo(), node: nodeIdentity() });
+  }
+  if (req.method === 'POST' && url.pathname === '/api/auth/login') return handleLogin(req, reply);
+  if (req.method === 'POST' && url.pathname === '/api/auth/logout') {
+    reply.setHeader('set-cookie', cookieHeader(req, '', 0));
+    return json(reply, 200, { ok: true });
+  }
+  if (req.method === 'GET' && url.pathname === '/api/auth/me') {
+    const session = sessionFromRequest(req);
+    return session
+      ? json(reply, 200, { user: { username: session.username, name: session.name, role: session.role } })
+      : json(reply, 401, { error: 'UNAUTHORIZED' });
+  }
+  if (req.method === 'GET' && url.pathname === '/api/cluster/guard') return json(reply, 200, clusterGuard());
+  if (!sessionFromRequest(req) && !requestHasInternalToken(req)) {
+    return json(reply, 401, { error: 'UNAUTHORIZED' });
   }
   if (req.method === 'GET' && url.pathname === '/api/dashboard') return json(reply, 200, await dashboard());
   if (req.method === 'GET' && url.pathname === '/api/diagnostics') return json(reply, 200, await diagnostics());
@@ -3173,7 +3335,6 @@ async function handleApi(req, reply, url) {
     return json(reply, 200, publicActionJob(job));
   }
   if (req.method === 'GET' && url.pathname === '/api/cluster') return json(reply, 200, clusterStatus());
-  if (req.method === 'GET' && url.pathname === '/api/cluster/guard') return json(reply, 200, clusterGuard());
   if (req.method === 'GET' && url.pathname === '/api/cluster/lock') return json(reply, 200, clusterLock());
   if (req.method === 'PATCH' && url.pathname === '/api/cluster/lock') return json(reply, 200, writeClusterLock(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/cluster/promotion/block') return json(reply, 200, blockClusterPromotion((await readBody(req).catch(() => ({}))).reason));
@@ -3243,6 +3404,13 @@ const server = http.createServer(async (req, reply) => {
       return reply.end();
     }
     if (url.pathname.startsWith('/tronfire/')) {
+      if (!sessionFromRequest(req)) {
+        if (req.method === 'GET' && String(req.headers.accept || '').includes('text/html')) {
+          reply.writeHead(302, { location: '/' });
+          return reply.end();
+        }
+        return json(reply, 401, { error: 'UNAUTHORIZED' });
+      }
       return proxyTronfire(req, reply);
     }
     if (url.pathname === '/health' || url.pathname.startsWith('/api/')) {
