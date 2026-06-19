@@ -42,6 +42,7 @@ const dockerConfigDir = process.env.TRONSOFTOS_DOCKER_CONFIG || path.join(stateD
 let rcloneQuotaCache = { key: null, checkedAt: 0, value: null };
 let companyIdentityCache = { checkedAt: 0, value: null };
 let haSyncSchedulerTimer = null;
+let haSyncSchedulerBusy = false;
 let haFailoverWatchdogTimer = null;
 let lastAutoHaSyncStartedAt = 0;
 let primaryDownSince = 0;
@@ -357,6 +358,9 @@ function rawHaSyncSettings() {
   return {
     enabled: true,
     autoEnabled: true,
+    sshValidatedAt: null,
+    sshValidatedHost: '',
+    sshValidatedUser: '',
     syncMode: process.env.HA_SYNC_MODE || DEFAULT_HA_SYNC_MODE,
     intervalMinutes: FIXED_HA_SYNC_INTERVAL_MINUTES,
     standbyHost: process.env.HA_SYNC_STANDBY_HOST || '',
@@ -378,6 +382,12 @@ function publicHaSyncSettings(settings = rawHaSyncSettings()) {
   return {
     enabled: settings.enabled !== false,
     autoEnabled: settings.autoEnabled !== false,
+    sshValidated: Boolean(
+      settings.sshValidatedAt
+      && settings.sshValidatedHost === settings.standbyHost
+      && settings.sshValidatedUser === (settings.sshUser || 'tronsoft')
+    ),
+    sshValidatedAt: settings.sshValidatedAt || null,
     syncMode,
     intervalMinutes: FIXED_HA_SYNC_INTERVAL_MINUTES,
     standbyHost: settings.standbyHost || '',
@@ -509,14 +519,20 @@ function normalizeHaSyncSettings(body) {
       ? String(body.syncMode || current.syncMode || DEFAULT_HA_SYNC_MODE).toLowerCase()
       : DEFAULT_HA_SYNC_MODE,
     intervalMinutes: FIXED_HA_SYNC_INTERVAL_MINUTES,
-    standbyHost: String(body.standbyHost || '').trim(),
+    standbyHost: String(body.standbyHost || current.standbyHost || '').trim(),
     sshUser: String(body.sshUser || current.sshUser || 'tronsoft').trim(),
     sshPort: Number(body.sshPort || current.sshPort || 22),
     remoteBackupDir: String(body.remoteBackupDir || current.remoteBackupDir || '/opt/tronfire-storage/firebird/backups').trim(),
     remoteRestoreDir: String(body.remoteRestoreDir || current.remoteRestoreDir || '/opt/tronfire-storage/firebird/restore-work').trim(),
     remoteCatalogDir: String(body.remoteCatalogDir || current.remoteCatalogDir || '/tmp/tronfire-catalog').trim(),
     backupDir: String(body.backupDir || current.backupDir || '/opt/tronfire-storage/firebird/backups').trim(),
-    catalogDir: String(body.catalogDir || current.catalogDir || path.join(stateDir, 'tronfire-catalog')).trim()
+    catalogDir: String(body.catalogDir || current.catalogDir || path.join(stateDir, 'tronfire-catalog')).trim(),
+    sshValidatedAt: current.sshValidatedHost === String(body.standbyHost || current.standbyHost || '').trim()
+      && current.sshValidatedUser === String(body.sshUser || current.sshUser || 'tronsoft').trim()
+      ? current.sshValidatedAt || null
+      : null,
+    sshValidatedHost: current.sshValidatedHost || '',
+    sshValidatedUser: current.sshValidatedUser || ''
   };
   if (next.enabled && !next.standbyHost) throw new Error('host standby nao informado');
   if (!/^[A-Za-z0-9_.@-]{1,80}$/.test(next.sshUser)) throw new Error('usuario SSH invalido');
@@ -537,6 +553,50 @@ function writeHaSyncSettings(body) {
   fs.writeFileSync(haSyncSettingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
   appendEvent('HA_SYNC_SETTINGS_UPDATED', { enabled: settings.enabled, standbyHost: settings.standbyHost, sshUser: settings.sshUser, sshPort: settings.sshPort, syncMode: settings.syncMode });
   return publicHaSyncSettings(settings);
+}
+
+async function testHaSyncSsh(body = {}) {
+  const guard = clusterGuard();
+  if (nodeIdentity().deploymentMode === 'ha' && guard.canServeProduction !== true) {
+    throw new Error('Teste SSH do Sync HA deve ser executado no no primary/ativo');
+  }
+  const settings = normalizeHaSyncSettings(body);
+  const identityFile = path.join(stateDir, 'ssh/id_ed25519');
+  const knownHosts = path.join(stateDir, 'known_hosts');
+  if (!fs.existsSync(identityFile)) throw new Error(`chave SSH nao encontrada: ${identityFile}`);
+  const target = `${settings.sshUser}@${settings.standbyHost}`;
+  try {
+    const out = await run('ssh', [
+      '-p', String(settings.sshPort),
+      '-i', identityFile,
+      '-o', 'IdentitiesOnly=yes',
+      '-o', 'BatchMode=yes',
+      '-o', 'ConnectTimeout=8',
+      '-o', 'StrictHostKeyChecking=accept-new',
+      '-o', `UserKnownHostsFile=${knownHosts}`,
+      target,
+      'printf "TRONSOFTOS_SSH_OK\\n"; hostname'
+    ], { timeout: 15_000, maxBuffer: 256 * 1024 });
+    if (!out.stdout.includes('TRONSOFTOS_SSH_OK')) throw new Error('resposta SSH de validacao ausente');
+    const validated = {
+      ...settings,
+      sshValidatedAt: new Date().toISOString(),
+      sshValidatedHost: settings.standbyHost,
+      sshValidatedUser: settings.sshUser
+    };
+    ensureStateDir();
+    fs.writeFileSync(haSyncSettingsPath, `${JSON.stringify(validated, null, 2)}\n`, { mode: 0o600 });
+    appendEvent('HA_SYNC_SSH_VALIDATED', { standbyHost: settings.standbyHost, sshUser: settings.sshUser, sshPort: settings.sshPort });
+    return {
+      ok: true,
+      target,
+      hostname: out.stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean).at(-1) || settings.standbyHost,
+      validatedAt: validated.sshValidatedAt
+    };
+  } catch (err) {
+    appendEvent('HA_SYNC_SSH_VALIDATION_FAILED', { standbyHost: settings.standbyHost, sshUser: settings.sshUser, sshPort: settings.sshPort, error: err.message });
+    throw new Error(`Pareamento SSH invalido para ${target}. Importe novamente o arquivo de pareamento no standby e repita o teste. Detalhe: ${err.stderr || err.message}`);
+  }
 }
 
 function publicSmtpSettings(settings) {
@@ -1412,6 +1472,9 @@ function normalizePairingContent(content) {
 
 function exportPairingContent() {
   const base = fs.existsSync(clusterSecretsPath) ? parseEnvText(fs.readFileSync(clusterSecretsPath, 'utf8')) : {};
+  const currentPublicKeyPath = path.join(stateDir, 'ssh/id_ed25519.pub');
+  const currentPublicKey = fs.existsSync(currentPublicKeyPath) ? fs.readFileSync(currentPublicKeyPath, 'utf8').trim() : '';
+  if (!currentPublicKey) throw new Error(`chave publica SSH nao encontrada: ${currentPublicKeyPath}`);
   const primaryHost = String(process.env.HOST_STATIC_IP_ADDRESS_CIDR || process.env.TRONFIRE_LAN_HOST || '').split('/')[0] || '';
   const primaryHealthUrl = process.env.HA_PRIMARY_HEALTH_URL || (primaryHost ? `http://${primaryHost}:${port}/health` : process.env.TRONSOFTOS_HEALTH_URL || '');
   const current = {
@@ -1420,7 +1483,7 @@ function exportPairingContent() {
     TRONSOFTOS_INTERNAL_TOKEN: base.TRONSOFTOS_INTERNAL_TOKEN || process.env.TRONSOFTOS_INTERNAL_TOKEN || '',
     POSTGRES_PASSWORD: base.POSTGRES_PASSWORD || process.env.POSTGRES_PASSWORD || '',
     FIREBIRD_PASSWORD: base.FIREBIRD_PASSWORD || process.env.FIREBIRD_PASSWORD || '',
-    TRONSOFTOS_SSH_PUBLIC_KEY: base.TRONSOFTOS_SSH_PUBLIC_KEY || process.env.TRONSOFTOS_SSH_PUBLIC_KEY || '',
+    TRONSOFTOS_SSH_PUBLIC_KEY: currentPublicKey,
     HA_VIP: process.env.HA_VIP || base.HA_VIP || '',
     HA_VIP_CIDR: process.env.HA_VIP_CIDR || base.HA_VIP_CIDR || ((process.env.HA_VIP || base.HA_VIP) ? `${process.env.HA_VIP || base.HA_VIP}/24` : ''),
     HA_ROUTER_ID: process.env.HA_ROUTER_ID || base.HA_ROUTER_ID || '',
@@ -2343,6 +2406,9 @@ async function dashboard() {
     alerts.push({ severity: 'warning', message: `Nos HA em versoes diferentes: local ${localVersion}, standby ${standbyVersion}` });
   }
   if (cluster.mode === 'ha' && !cluster.lock) alerts.push({ severity: 'warning', message: 'Cluster HA sem cluster-lock' });
+  if (identity.nodeRole === 'primary' && cluster.sync?.standbyHost && cluster.sync?.sshValidated !== true) {
+    alerts.push({ severity: 'warning', message: 'Pareamento SSH do standby pendente: o TronSoftOS tentara validar automaticamente' });
+  }
   if (cluster.sync?.status === 'failed') {
     alerts.push({
       severity: 'warning',
@@ -2613,6 +2679,7 @@ function startHaSync() {
   const settings = publicHaSyncSettings(rawHaSyncSettings());
   if (settings.enabled !== true) throw new Error('sync HA desabilitado');
   if (!settings.standbyHost) throw new Error('host standby nao configurado');
+  if (!settings.sshValidated) throw new Error('pareamento SSH do standby ainda nao foi validado; aguarde a verificacao automatica');
   const runningJob = [...actionJobs.values()].reverse().find(job => job.app === 'ha-sync' && job.status === 'running');
   if (runningJob) return publicActionJob(runningJob);
   const script = path.join(appRoot, 'scripts/ha-sync-to-standby.sh');
@@ -2679,6 +2746,7 @@ function startHaSync() {
 
 function shouldRunAutoHaSync(settings) {
   if (!settings.enabled || !settings.autoEnabled || !settings.standbyHost) return false;
+  if (!settings.sshValidated) return false;
   const identity = nodeIdentity();
   if (identity.deploymentMode === 'ha' && clusterGuard().canServeProduction !== true) return false;
   const runningJob = [...actionJobs.values()].reverse().find(job => job.app === 'ha-sync' && job.status === 'running');
@@ -2692,17 +2760,30 @@ function shouldRunAutoHaSync(settings) {
 
 function startHaSyncScheduler() {
   if (haSyncSchedulerTimer) return;
-  haSyncSchedulerTimer = setInterval(() => {
+  const tick = async () => {
+    if (haSyncSchedulerBusy) return;
+    haSyncSchedulerBusy = true;
     try {
-      const settings = publicHaSyncSettings();
+      let settings = publicHaSyncSettings();
+      const identity = nodeIdentity();
+      if (!settings.enabled || !settings.autoEnabled || !settings.standbyHost) return;
+      if (identity.deploymentMode === 'ha' && clusterGuard().canServeProduction !== true) return;
+      if (!settings.sshValidated) {
+        await testHaSyncSsh(settings);
+        settings = publicHaSyncSettings();
+      }
       if (!shouldRunAutoHaSync(settings)) return;
       lastAutoHaSyncStartedAt = Date.now();
       appendEvent('HA_SYNC_AUTO_TRIGGERED', { standbyHost: settings.standbyHost, intervalMinutes: settings.intervalMinutes, syncMode: settings.syncMode });
       startHaSync();
     } catch (err) {
       appendEvent('HA_SYNC_AUTO_SKIPPED', { error: err.message });
+    } finally {
+      haSyncSchedulerBusy = false;
     }
-  }, 60 * 1000);
+  };
+  haSyncSchedulerTimer = setInterval(tick, 60 * 1000);
+  setTimeout(tick, 5000).unref?.();
   if (typeof haSyncSchedulerTimer.unref === 'function') haSyncSchedulerTimer.unref();
 }
 
@@ -3102,6 +3183,7 @@ async function handleApi(req, reply, url) {
   if (req.method === 'GET' && url.pathname === '/api/cluster/sync') return json(reply, 200, publicHaSyncSettings());
   if (req.method === 'GET' && url.pathname === '/api/cluster/sync/logs') return json(reply, 200, haSyncLogs(url.searchParams.get('file') || ''));
   if (req.method === 'PATCH' && url.pathname === '/api/cluster/sync') return json(reply, 200, writeHaSyncSettings(await readBody(req)));
+  if (req.method === 'POST' && url.pathname === '/api/cluster/sync/test-ssh') return json(reply, 200, await testHaSyncSsh(await readBody(req).catch(() => ({}))));
   if (req.method === 'POST' && url.pathname === '/api/cluster/sync/run') return json(reply, 202, { ok: true, job: startHaSync() });
   if (req.method === 'GET' && url.pathname === '/api/cluster/failover') return json(reply, 200, haFailoverStatus());
   if (req.method === 'PATCH' && url.pathname === '/api/cluster/failover') return json(reply, 200, writeHaFailoverSettings(await readBody(req)));

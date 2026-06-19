@@ -584,7 +584,7 @@ function ClusterView({ dashboard }) {
   const identityQuery = useQuery({ queryKey: ['node-identity'], queryFn: () => api('/api/node-identity') });
   const lockQuery = useQuery({ queryKey: ['cluster-lock'], queryFn: () => api('/api/cluster/lock') });
   const guardQuery = useQuery({ queryKey: ['cluster-guard'], queryFn: () => api('/api/cluster/guard'), refetchInterval: 5000 });
-  const syncQuery = useQuery({ queryKey: ['ha-sync-settings'], queryFn: () => api('/api/cluster/sync') });
+  const syncQuery = useQuery({ queryKey: ['ha-sync-settings'], queryFn: () => api('/api/cluster/sync'), refetchInterval: 10000 });
   const [networkProposal, setNetworkProposal] = useState('');
   const networkImpactQuery = useQuery({
     queryKey: ['cluster-network-impact', networkProposal],
@@ -1301,7 +1301,7 @@ function ClusterView({ dashboard }) {
 
       {clusterTab === 'sync' ? (
         canManageSync ? (
-      <Card title="Sync HA" icon={RefreshCw} action={<StatusPill value={syncValues.standbyHost ? 'automatico' : 'configurar'} />}>
+      <Card title="Sync HA" icon={RefreshCw} action={<StatusPill value={sync.sshValidated ? 'automatico' : syncValues.standbyHost ? 'SSH pendente' : 'configurar'} />}>
         <form
           className="grid gap-3 md:grid-cols-2"
           onSubmit={event => {
@@ -1312,7 +1312,7 @@ function ClusterView({ dashboard }) {
           <div className="md:col-span-2 rounded-md border border-slate-200 bg-slate-50 p-3">
             <div className="grid gap-3 md:grid-cols-[1fr_220px]">
               <div>
-                <div className="text-sm font-medium text-slate-950">Sincronizacao automatica ativa</div>
+                <div className="text-sm font-medium text-slate-950">{sync.sshValidated ? 'Sincronizacao automatica ativa' : 'Sincronizacao aguardando validacao SSH'}</div>
                 <div className="mt-1 text-xs text-slate-500">
                   O modo fisico rapido usa nbackup + rsync pela rede de sync a cada 3 minutos. O modo seguro usa backup validado + restore no standby.
                 </div>
@@ -1323,7 +1323,9 @@ function ClusterView({ dashboard }) {
               </div>
             </div>
             <div className="mt-2 text-xs text-slate-500">
-              O automatico roda somente no primary/ativo e nao inicia outro sync se ja houver um job em execucao. Esse ciclo continuo mantem o standby pronto para failover.
+              {sync.sshValidated
+                ? 'O automatico roda somente no primary/ativo e nao inicia outro sync se ja houver um job em execucao. Esse ciclo continuo mantem o standby pronto para failover.'
+                : 'Importe o pareamento no standby. O TronSoftOS testa a chave automaticamente e libera o agendamento assim que o acesso SSH for aceito.'}
             </div>
           </div>
           <label className="block">
@@ -1349,10 +1351,11 @@ function ClusterView({ dashboard }) {
               <Save className="h-4 w-4" />
               Salvar sync
             </button>
-            <button type="button" disabled={runSyncMutation.isPending || syncJobQuery.data?.status === 'running'} onClick={() => runSyncMutation.mutate()} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
+            <button type="button" disabled={runSyncMutation.isPending || syncJobQuery.data?.status === 'running' || sync.sshValidated !== true} onClick={() => runSyncMutation.mutate()} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
               <RefreshCw className="h-4 w-4" />
               Sincronizar agora
             </button>
+            <StatusPill value={sync.sshValidated ? 'SSH validado' : 'SSH pendente'} />
           </div>
           {syncMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">Configuracao de sync salva.</div> : null}
           {runSyncMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">Sync iniciado.</div> : null}
