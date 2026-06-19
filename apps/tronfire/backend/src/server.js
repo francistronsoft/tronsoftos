@@ -35,7 +35,7 @@ const clusterSecretsPath = process.env.TRONSOFTOS_CLUSTER_SECRETS || path.join(p
 const firebirdExecMode = String(process.env.FIREBIRD_EXEC_MODE || 'container').toLowerCase();
 const tronsoftosApiUrl = String(process.env.TRONSOFTOS_API_URL || 'http://host.docker.internal:8080').replace(/\/+$/, '');
 const defaultProductionAlias = 'erp_tronsoft';
-const fixedBackupFrequencyMinutes = 15;
+const fixedBackupFrequencyMinutes = 20;
 const fixedBackupRetentionDays = 30;
 
 await app.register(cors, { origin: true, credentials: true });
