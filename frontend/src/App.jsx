@@ -1504,7 +1504,9 @@ function BackupsView({ dashboard }) {
               <li>Baixe o rclone em <a className="font-medium text-sky-700 hover:underline" href="https://rclone.org/downloads/" target="_blank" rel="noreferrer">rclone.org/downloads</a>.</li>
               <li>No Windows, extraia o ZIP em uma pasta simples, por exemplo <code className="rounded bg-white px-1 py-0.5 text-xs">C:\rclone</code>.</li>
               <li>Abra o Prompt de Comando nessa pasta e execute <code className="rounded bg-white px-1 py-0.5 text-xs">rclone config</code>.</li>
-              <li>Crie um remote do tipo <code className="rounded bg-white px-1 py-0.5 text-xs">drive</code>, faça login com a conta Google e autorize o acesso.</li>
+              <li>No menu, digite <code className="rounded bg-white px-1 py-0.5 text-xs">n</code> para criar um remote e informe um nome, por exemplo <code className="rounded bg-white px-1 py-0.5 text-xs">gdrive</code>.</li>
+              <li>Escolha <code className="rounded bg-white px-1 py-0.5 text-xs">Google Drive</code>, deixe client_id e client_secret vazios e aceite a configuracao automatica.</li>
+              <li>Quando o navegador abrir, entre na conta Google, autorize o acesso, confirme com <code className="rounded bg-white px-1 py-0.5 text-xs">y</code> e saia com <code className="rounded bg-white px-1 py-0.5 text-xs">q</code>.</li>
               <li>Ao finalizar, abra o arquivo <code className="rounded bg-white px-1 py-0.5 text-xs">%APPDATA%\rclone\rclone.conf</code> e cole o conteudo no campo ao lado.</li>
               <li>Salve, teste a conexao e rode um upload teste antes de habilitar em producao.</li>
             </ol>

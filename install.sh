@@ -299,6 +299,10 @@ sed -i "s|/opt/tronsoftos|$APP_DIR|g" /etc/systemd/system/tronsoftos.service
 sed -i "s|/opt/tronsoftos|$APP_DIR|g" /etc/systemd/system/tronsoftos-rclone-backup.service
 
 chown -R "$USER_NAME:$GROUP_NAME" "$APP_DIR"
+mkdir -p "$APP_DIR/config/rclone"
+chown -R "$USER_NAME:$GROUP_NAME" "$APP_DIR/config/rclone"
+chmod 700 "$APP_DIR/config/rclone"
+[ ! -f "$APP_DIR/config/rclone/rclone.conf" ] || chmod 600 "$APP_DIR/config/rclone/rclone.conf"
 for managed_storage_dir in /opt/tronfire-storage/firebird /opt/tronfire-storage/troncomanda /opt/tronfire-storage/config-backups /opt/tronfire-storage/update-backups; do
   if [ -d "$managed_storage_dir" ]; then
     chown -R "$USER_NAME:$GROUP_NAME" "$managed_storage_dir"

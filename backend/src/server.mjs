@@ -977,8 +977,16 @@ function writeRcloneSettings(body) {
   ensureStateDir();
   const settings = normalizeRcloneSettings(body);
   if (typeof body.configContent === 'string' && body.configContent.trim()) {
-    fs.mkdirSync(path.dirname(settings.config), { recursive: true });
-    fs.writeFileSync(settings.config, body.configContent.trimEnd() + '\n', { mode: 0o600 });
+    const configDir = path.dirname(settings.config);
+    try {
+      fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(settings.config, body.configContent.trimEnd() + '\n', { mode: 0o600 });
+      fs.chmodSync(settings.config, 0o600);
+    } catch (err) {
+      const error = new Error(`Nao foi possivel salvar o rclone.conf em ${settings.config}: ${err.message}. Verifique se a pasta pertence ao usuario tronsoftos.`);
+      error.statusCode = 500;
+      throw error;
+    }
   }
   fs.writeFileSync(rcloneSettingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
   appendEvent('RCLONE_SETTINGS_UPDATED', { enabled: settings.enabled, remote: settings.remote, path: settings.path, uploadOnlyRole: settings.uploadOnlyRole });
@@ -1275,6 +1283,8 @@ function startRcloneRemoteBackupDownload(body = {}) {
 async function rcloneTest() {
   const settings = rawRcloneSettings();
   if (!settings.remote) throw new Error('remote rclone nao configurado');
+  if (!fs.existsSync(settings.bin || '/usr/bin/rclone')) throw new Error(`binario rclone nao encontrado: ${settings.bin || '/usr/bin/rclone'}`);
+  if (!fs.existsSync(settings.config || defaultRcloneConfigPath())) throw new Error(`rclone.conf nao encontrado: ${settings.config || defaultRcloneConfigPath()}`);
   const out = await run(settings.bin || '/usr/bin/rclone', ['lsd', rcloneTarget(settings), '--config', settings.config || defaultRcloneConfigPath()], {
     timeout: 60_000,
     maxBuffer: 1024 * 1024 * 2
@@ -1286,6 +1296,8 @@ async function rcloneTest() {
 async function rcloneUploadTest() {
   const settings = rawRcloneSettings();
   if (!settings.remote) throw new Error('remote rclone nao configurado');
+  if (!fs.existsSync(settings.bin || '/usr/bin/rclone')) throw new Error(`binario rclone nao encontrado: ${settings.bin || '/usr/bin/rclone'}`);
+  if (!fs.existsSync(settings.config || defaultRcloneConfigPath())) throw new Error(`rclone.conf nao encontrado: ${settings.config || defaultRcloneConfigPath()}`);
   ensureStateDir();
   const testPath = path.join(stateDir, `rclone-upload-test-${Date.now()}.txt`);
   fs.writeFileSync(testPath, `TronSoftOS rclone test ${new Date().toISOString()}\n`);
@@ -1304,7 +1316,7 @@ async function rcloneUploadTest() {
 
 async function rcloneAbout() {
   const settings = rawRcloneSettings();
-  if (!settings.remote || !settings.configConfigured) return null;
+  if (!settings.remote || !fs.existsSync(settings.config || defaultRcloneConfigPath())) return null;
   const cacheKey = `${settings.bin || '/usr/bin/rclone'}|${settings.config || defaultRcloneConfigPath()}|${rcloneTarget(settings)}`;
   if (rcloneQuotaCache.key === cacheKey && Date.now() - rcloneQuotaCache.checkedAt < 5 * 60 * 1000) {
     return rcloneQuotaCache.value;
