@@ -64,6 +64,7 @@ const loginPage = document.getElementById('loginPage');
 const appPage = document.getElementById('appPage');
 const content = document.getElementById('content');
 let currentUser = null;
+let activeDatabaseConnectionsTimer = null;
 
 function applyTheme(theme) {
   const mode = theme === 'dark' ? 'dark' : 'light';
@@ -513,7 +514,7 @@ async function dashboard() {
     <div class="row row-cards zbx-board mb-3">
       <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Bancos</div><div class="h1 mb-0">${data.databases.length}</div></div></div></div>
       <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Producao</div><div class="h3 mb-0 text-truncate">${escapeHtml(prod?.name || 'Nao definido')}</div></div></div></div>
-      <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Alertas ativos</div><div class="h1 mb-0">${data.alerts.length}</div></div></div></div>
+      <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Conexoes producao</div><div class="h1 mb-0">${data.productionConnections?.total ?? '-'}</div><div class="text-muted small">${data.productionConnections?.error ? 'Consulta indisponivel' : escapeHtml(data.productionConnections?.databaseAlias || 'Sem banco')}</div></div></div></div>
       <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Uptime Firebird</div><div class="h1 mb-0">${formatDuration(uptime.uptimeSeconds)}</div></div></div></div>
     </div>
     <div class="row row-cards">
@@ -600,6 +601,62 @@ function connectionPanel(info) {
     </div>`;
 }
 
+function databaseConnectionsPanel(data) {
+  if (data?.error) {
+    return `<div class="card mb-3"><div class="card-header"><h3 class="card-title">Conexoes ativas</h3></div>
+      <div class="card-body"><div class="alert alert-warning mb-0">${escapeHtml(data.error)}</div></div></div>`;
+  }
+  const attachments = data?.attachments || [];
+  return `<div class="card mb-3" id="databaseConnectionsPanel">
+    <div class="card-header d-flex align-items-center justify-content-between">
+      <div>
+        <h3 class="card-title">Conexoes ativas</h3>
+        <div class="text-muted small">Atualizacao automatica a cada 10 segundos. Consulta somente leitura.</div>
+      </div>
+      <span class="badge bg-primary">${escapeHtml(data?.total ?? 0)}</span>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-sm mb-0">
+        <thead><tr><th>IP / origem</th><th>Executavel</th><th>PID</th><th>Usuario</th><th>Conectado em</th><th>Estado</th></tr></thead>
+        <tbody>
+          ${attachments.length ? attachments.map(item => `<tr>
+            <td><code>${escapeHtml(item.remoteAddress || 'local/nao informado')}</code></td>
+            <td>${escapeHtml(item.remoteProcess || 'Nao informado pelo cliente')}</td>
+            <td>${escapeHtml(item.remotePid || '-')}</td>
+            <td>${escapeHtml(item.user || '-')}</td>
+            <td>${item.connectedAt ? escapeHtml(item.connectedAt) : '-'}</td>
+            <td><span class="badge bg-${item.state === 'ACTIVE' ? 'success' : 'secondary'}">${escapeHtml(item.state)}</span></td>
+          </tr>`).join('') : '<tr><td colspan="6" class="text-muted">Nenhuma conexao de usuario identificada.</td></tr>'}
+        </tbody>
+      </table>
+    </div>
+    <div class="card-footer text-muted small">Coletado em ${data?.collectedAt ? new Date(data.collectedAt).toLocaleString() : '-'}. A conexao usada pelo proprio monitor nao entra na contagem.</div>
+  </div>`;
+}
+
+function stopDatabaseConnectionsPolling() {
+  if (activeDatabaseConnectionsTimer) clearInterval(activeDatabaseConnectionsTimer);
+  activeDatabaseConnectionsTimer = null;
+}
+
+function startDatabaseConnectionsPolling(databaseId, slot) {
+  stopDatabaseConnectionsPolling();
+  let loading = false;
+  const refresh = async () => {
+    if (loading || !slot.isConnected) return;
+    loading = true;
+    try {
+      slot.innerHTML = databaseConnectionsPanel(await api(`/api/databases/${databaseId}/connections`));
+    } catch (err) {
+      slot.innerHTML = databaseConnectionsPanel({ error: err.message });
+    } finally {
+      loading = false;
+    }
+  };
+  refresh();
+  activeDatabaseConnectionsTimer = setInterval(refresh, 10_000);
+}
+
 function databaseDetailsPanel(db, diagnostic, haStatus) {
   const status = databaseStatusView(db, diagnostic);
   const diagnosticPath = diagnostic?.path || db.filePath;
@@ -634,6 +691,7 @@ function databaseDetailsPanel(db, diagnostic, haStatus) {
           <div class="col-md-3"><div class="subheader">Retencao</div><div>${escapeHtml(db.retentionDays)} dias</div></div>
           ${diagnostic?.error ? `<div class="col-12"><div class="alert alert-danger mb-0">${escapeHtml(diagnostic.error)}</div></div>` : ''}
         </div>
+        <div id="databaseConnectionsSlot" class="mt-3"></div>
         <div class="mt-3 btn-list">
           <button class="btn btn-sm btn-outline-dark" data-detail-connection="${db.id}">Conexao</button>
           <button class="btn btn-sm btn-outline-primary" data-detail-primary="${db.id}">Marcar producao</button>
@@ -769,6 +827,7 @@ async function databases() {
     const db = dbs.find(item => item.id === b.dataset.details);
     if (!db) return;
     databaseDetailsSlot.innerHTML = databaseDetailsPanel(db, diagnosticById.get(db.id), haStatus);
+    startDatabaseConnectionsPolling(db.id, databaseDetailsSlot.querySelector('#databaseConnectionsSlot'));
     databaseDetailsSlot.scrollIntoView({ behavior: 'smooth', block: 'start' });
     const bindCopy = root => root.querySelectorAll('[data-copy]').forEach(copy => copy.onclick = async () => {
       await navigator.clipboard.writeText(copy.dataset.copy);
@@ -1352,6 +1411,7 @@ async function preflight() {
 }
 
 async function route() {
+  stopDatabaseConnectionsPolling();
   const hash = location.hash || '#dashboard';
   const baseHash = hash.split('?')[0];
   try {

@@ -1211,6 +1211,10 @@ function rcloneTarget(settings) {
   return remotePath ? `${remote}:${remotePath}` : `${remote}:`;
 }
 
+function rcloneRemoteRoot(settings) {
+  return `${String(settings.remote || '').replace(/:+$/g, '')}:`;
+}
+
 function normalizeRemoteBackupPath(value) {
   const remotePath = String(value || '').trim().replace(/\\/g, '/').replace(/^\/+/, '');
   if (!remotePath || remotePath.includes('..') || remotePath.startsWith('-')) throw new Error('backup remoto invalido');
@@ -1285,12 +1289,18 @@ async function rcloneTest() {
   if (!settings.remote) throw new Error('remote rclone nao configurado');
   if (!fs.existsSync(settings.bin || '/usr/bin/rclone')) throw new Error(`binario rclone nao encontrado: ${settings.bin || '/usr/bin/rclone'}`);
   if (!fs.existsSync(settings.config || defaultRcloneConfigPath())) throw new Error(`rclone.conf nao encontrado: ${settings.config || defaultRcloneConfigPath()}`);
-  const out = await run(settings.bin || '/usr/bin/rclone', ['lsd', rcloneTarget(settings), '--config', settings.config || defaultRcloneConfigPath()], {
+  const out = await run(settings.bin || '/usr/bin/rclone', ['lsd', rcloneRemoteRoot(settings), '--config', settings.config || defaultRcloneConfigPath()], {
     timeout: 60_000,
     maxBuffer: 1024 * 1024 * 2
   });
   appendEvent('RCLONE_TEST_OK', { remote: settings.remote, path: settings.path });
-  return { ok: true, stdout: out.stdout, stderr: out.stderr, target: rcloneTarget(settings) };
+  return {
+    ok: true,
+    stdout: out.stdout,
+    stderr: out.stderr,
+    remote: rcloneRemoteRoot(settings),
+    target: rcloneTarget(settings)
+  };
 }
 
 async function rcloneUploadTest() {

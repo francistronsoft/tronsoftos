@@ -438,6 +438,75 @@ function connectionInfoForDatabase(db, req) {
   };
 }
 
+function firebirdAttachmentText(value) {
+  const text = String(value ?? '').trim();
+  return text || null;
+}
+
+function parseFirebirdAttachments(stdout) {
+  return String(stdout || '')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line.startsWith('TRONATT|'))
+    .map(line => {
+      const [attachmentId, user, remoteAddress, remoteProcess, remotePid, connectedAt, state] = line.slice('TRONATT|'.length).split('|');
+      return {
+        attachmentId: Number(attachmentId) || null,
+        user: firebirdAttachmentText(user),
+        remoteAddress: firebirdAttachmentText(remoteAddress),
+        remoteProcess: firebirdAttachmentText(remoteProcess),
+        remotePid: Number(remotePid) || null,
+        connectedAt: firebirdAttachmentText(connectedAt),
+        state: Number(state) === 1 ? 'ACTIVE' : 'IDLE'
+      };
+    });
+}
+
+async function firebirdAttachmentsForDatabase(db) {
+  const databasePath = effectiveDatabasePath(db);
+  const connect = firebirdDbConnect(databasePath);
+  const firebirdBin = process.env.FIREBIRD_BIN || '/usr/local/firebird/bin';
+  const password = process.env.FIREBIRD_PASSWORD || 'masterkey';
+  const sql = [
+    'SET HEADING OFF;',
+    'SET LIST OFF;',
+    'SELECT',
+    "  'TRONATT|' ||",
+    "  CAST(MON$ATTACHMENT_ID AS VARCHAR(20)) || '|' ||",
+    "  COALESCE(REPLACE(TRIM(MON$USER), '|', '/'), '') || '|' ||",
+    "  COALESCE(REPLACE(TRIM(MON$REMOTE_ADDRESS), '|', '/'), '') || '|' ||",
+    "  COALESCE(REPLACE(TRIM(MON$REMOTE_PROCESS), '|', '/'), '') || '|' ||",
+    "  COALESCE(CAST(MON$REMOTE_PID AS VARCHAR(20)), '') || '|' ||",
+    "  COALESCE(CAST(MON$TIMESTAMP AS VARCHAR(30)), '') || '|' ||",
+    '  CAST(MON$STATE AS VARCHAR(10))',
+    'FROM MON$ATTACHMENTS',
+    'WHERE MON$ATTACHMENT_ID <> CURRENT_CONNECTION',
+    'ORDER BY MON$TIMESTAMP;',
+    'COMMIT;',
+    'QUIT;'
+  ].join('\n');
+  const cmd = [
+    `printf %s ${shQuote(`${sql}\n`)}`,
+    '|',
+    shQuote(`${firebirdBin}/isql`),
+    '-q',
+    '-user SYSDBA',
+    `-password ${shQuote(password)}`,
+    shQuote(connect)
+  ].join(' ');
+  const out = await runFirebirdShellScript(cmd, 60_000);
+  const attachments = parseFirebirdAttachments(out.stdout);
+  return {
+    databaseId: db.id,
+    databaseName: db.name,
+    databaseAlias: db.alias,
+    pathRole: databasePath === db.filePath ? 'production' : 'standby_read_only',
+    total: attachments.length,
+    collectedAt: new Date().toISOString(),
+    attachments
+  };
+}
+
 function metricRangeStart(range) {
   const now = Date.now();
   const hours = {
@@ -972,11 +1041,28 @@ app.get('/api/dashboard', { preHandler: requireAuth }, async (req) => {
     prisma.backupJob.findMany({ orderBy: { createdAt: 'desc' }, take: 5, include: { database: true } }),
     loadDashboardMetrics(reqQueryRange(req))
   ]);
+  const productionDatabase = dbs.find(db => db.isPrimary) || dbs.find(db => db.type === 'PRODUCAO') || null;
+  let productionConnections = null;
+  if (productionDatabase) {
+    try {
+      productionConnections = await firebirdAttachmentsForDatabase(productionDatabase);
+    } catch (err) {
+      productionConnections = {
+        databaseId: productionDatabase.id,
+        databaseName: productionDatabase.name,
+        databaseAlias: productionDatabase.alias,
+        total: null,
+        collectedAt: new Date().toISOString(),
+        error: shellErrorText(err)
+      };
+    }
+  }
   return {
     databases: dbs,
     alerts,
     backups: backups.map(j => ({ ...j, backupSize: j.backupSize?.toString() })),
     metrics,
+    productionConnections,
     ha: { deploymentMode, nodeRole }
   };
 });
@@ -1138,6 +1224,11 @@ app.get('/api/databases', { preHandler: requireOperator }, async () => prisma.ma
 app.get('/api/databases/:id/connection', { preHandler: requireOperator }, async (req) => {
   const db = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: req.params.id } });
   return connectionInfoForDatabase(db, req);
+});
+
+app.get('/api/databases/:id/connections', { preHandler: requireOperator }, async (req) => {
+  const db = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: req.params.id } });
+  return firebirdAttachmentsForDatabase(db);
 });
 
 app.post('/api/databases', { preHandler: requireOperator }, async (req, reply) => {

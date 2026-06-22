@@ -1494,7 +1494,7 @@ function BackupsView({ dashboard }) {
               Em HA, mantenha upload permitido no papel primary. Quando o standby for promovido, ele passa a enviar os backups.
             </div>
             {saveMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">Configuracao salva.</div> : null}
-            {testMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">Conexao OK: {testMutation.data.target}</div> : null}
+            {testMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">Conexao com {testMutation.data.remote || rclone.remote} OK. Destino configurado: {testMutation.data.target}</div> : null}
             {uploadTestMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">Upload OK: {uploadTestMutation.data.target}</div> : null}
             {saveMutation.isError || testMutation.isError || uploadTestMutation.isError ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 md:col-span-2">{saveMutation.error?.message || testMutation.error?.message || uploadTestMutation.error?.message}</div> : null}
           </form>
