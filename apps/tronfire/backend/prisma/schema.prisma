@@ -92,6 +92,8 @@ model ManagedDatabase {
   createdAt               DateTime     @default(now())
   updatedAt               DateTime     @updatedAt
   backups                 BackupJob[]
+  connectionSnapshots     FirebirdConnectionSnapshot[]
+  firebirdSessions        FirebirdSession[]
 }
 
 model BackupJob {
@@ -142,6 +144,40 @@ model MetricSnapshot {
 
   @@index([scope, target, createdAt])
   @@index([databaseId, createdAt])
+}
+
+model FirebirdConnectionSnapshot {
+  id               String          @id @default(cuid())
+  databaseId       String
+  totalConnections Int
+  sourceNode       String?
+  collectedAt      DateTime        @default(now())
+  database         ManagedDatabase @relation(fields: [databaseId], references: [id], onDelete: Cascade)
+
+  @@index([databaseId, collectedAt])
+}
+
+model FirebirdSession {
+  id             String          @id @default(cuid())
+  sessionKey     String          @unique
+  databaseId     String
+  attachmentId   Int?
+  user           String?
+  remoteAddress  String?
+  remoteProcess  String?
+  remotePid      Int?
+  connectedAt    DateTime?
+  firstSeenAt    DateTime        @default(now())
+  lastSeenAt     DateTime
+  disconnectedAt DateTime?
+  lastState      String?
+  sourceNode     String?
+  database       ManagedDatabase @relation(fields: [databaseId], references: [id], onDelete: Cascade)
+
+  @@index([databaseId, lastSeenAt])
+  @@index([databaseId, disconnectedAt])
+  @@index([remoteAddress])
+  @@index([remoteProcess])
 }
 
 model Alert {

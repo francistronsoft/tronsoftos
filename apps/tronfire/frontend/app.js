@@ -657,6 +657,128 @@ function startDatabaseConnectionsPolling(databaseId, slot) {
   activeDatabaseConnectionsTimer = setInterval(refresh, 10_000);
 }
 
+function databaseConnectionHistoryPanel(data) {
+  const snapshots = (data?.snapshots || []).map(item => ({
+    t: new Date(item.collectedAt).getTime(),
+    v: Number(item.totalConnections || 0)
+  }));
+  const summary = data?.summary || {};
+  const sessions = data?.sessions || [];
+  const topList = (items, empty) => items?.length
+    ? items.map(item => `<div class="d-flex justify-content-between border-bottom py-1"><span class="text-truncate">${escapeHtml(item.value)}</span><strong>${item.count}</strong></div>`).join('')
+    : `<div class="text-muted">${empty}</div>`;
+  return `
+    ${data?.collectionActive === false ? '<div class="alert alert-info">Coleta suspensa: este no nao esta servindo producao.</div>' : ''}
+    <div class="row row-cards mb-3">
+      <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Pico</div><div class="h2">${summary.maximumConnections ?? 0}</div></div></div></div>
+      <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Media</div><div class="h2">${summary.averageConnections ?? 0}</div></div></div></div>
+      <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Sessoes observadas</div><div class="h2">${summary.observedSessions ?? 0}</div></div></div></div>
+      <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Encerradas</div><div class="h2">${summary.disconnectedSessions ?? 0}</div></div></div></div>
+    </div>
+    <div class="card mb-3"><div class="card-body">
+      <div class="zbx-title">Quantidade de conexoes por horario</div>
+      ${lineChart(snapshots)}
+      <div class="zbx-subtitle mt-2">Retencao: ${escapeHtml(data?.retentionDays || 30)} dias. Amostras: ${summary.samples ?? 0}.</div>
+    </div></div>
+    <div class="row row-cards mb-3">
+      <div class="col-lg-6"><div class="card h-100"><div class="card-header"><h3 class="card-title">IPs mais frequentes</h3></div><div class="card-body">${topList(data?.topRemoteAddresses, 'Sem dados')}</div></div></div>
+      <div class="col-lg-6"><div class="card h-100"><div class="card-header"><h3 class="card-title">Executaveis mais frequentes</h3></div><div class="card-body">${topList(data?.topRemoteProcesses, 'Sem dados')}</div></div></div>
+    </div>
+    <div class="card"><div class="card-header"><h3 class="card-title">Sessoes do periodo</h3></div><div class="table-responsive">
+      <table class="table table-sm mb-0"><thead><tr><th>IP</th><th>Executavel</th><th>Usuario</th><th>Primeira coleta</th><th>Ultima coleta</th><th>Duracao</th><th>Status</th></tr></thead>
+      <tbody>${sessions.length ? sessions.map(item => `<tr>
+        <td><code>${escapeHtml(item.remoteAddress || 'Nao informado')}</code></td>
+        <td>${escapeHtml(item.remoteProcess || 'Nao informado')}</td>
+        <td>${escapeHtml(item.user || '-')}</td>
+        <td>${item.firstSeenAt ? new Date(item.firstSeenAt).toLocaleString() : '-'}</td>
+        <td>${item.lastSeenAt ? new Date(item.lastSeenAt).toLocaleString() : '-'}</td>
+        <td>${formatDuration(item.durationSeconds || 0)}</td>
+        <td><span class="badge bg-${item.disconnectedAt ? 'secondary' : 'success'}">${item.disconnectedAt ? 'ENCERRADA' : 'ATIVA'}</span></td>
+      </tr>`).join('') : '<tr><td colspan="7" class="text-muted">Nenhuma sessao registrada no periodo.</td></tr>'}</tbody></table>
+    </div></div>`;
+}
+
+function databaseSessionsShell(db) {
+  return `<div class="card mb-3">
+    <div class="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
+      <div><h3 class="card-title">Sessoes Firebird - ${escapeHtml(db.name)}</h3><div class="text-muted small">Monitoramento somente leitura do banco ${escapeHtml(db.alias)}.</div></div>
+      <button class="btn btn-sm btn-outline-secondary" data-close-sessions>Fechar</button>
+    </div>
+    <div class="card-body">
+      <div class="btn-group mb-3" role="group">
+        <button class="btn btn-sm btn-primary" data-session-tab="active">Ativas agora</button>
+        <button class="btn btn-sm btn-outline-primary" data-session-tab="history">Historico</button>
+      </div>
+      <div id="databaseSessionsContent"></div>
+    </div>
+  </div>`;
+}
+
+function bindDatabaseSessionsPanel(db, slot) {
+  stopDatabaseConnectionsPolling();
+  slot.innerHTML = databaseSessionsShell(db);
+  const contentSlot = slot.querySelector('#databaseSessionsContent');
+  const buttons = Array.from(slot.querySelectorAll('[data-session-tab]'));
+  const setTab = tab => {
+    buttons.forEach(button => {
+      const selected = button.dataset.sessionTab === tab;
+      button.classList.toggle('btn-primary', selected);
+      button.classList.toggle('btn-outline-primary', !selected);
+    });
+  };
+  const showActive = () => {
+    setTab('active');
+    startDatabaseConnectionsPolling(db.id, contentSlot);
+  };
+  const showHistory = async () => {
+    stopDatabaseConnectionsPolling();
+    setTab('history');
+    contentSlot.innerHTML = `<div class="d-flex flex-wrap align-items-end gap-2 mb-3">
+      <div class="btn-group" role="group">
+        <button class="btn btn-sm btn-primary" data-history-range="day">24h</button>
+        <button class="btn btn-sm btn-outline-primary" data-history-range="week">7d</button>
+        <button class="btn btn-sm btn-outline-primary" data-history-range="month">30d</button>
+      </div>
+      <label class="small">De<input type="datetime-local" class="form-control form-control-sm" data-history-from></label>
+      <label class="small">Ate<input type="datetime-local" class="form-control form-control-sm" data-history-to></label>
+      <button class="btn btn-sm btn-outline-primary" data-history-custom>Consultar</button>
+    </div><div id="databaseHistoryResult"><div class="text-muted">Carregando historico...</div></div>`;
+    const resultSlot = contentSlot.querySelector('#databaseHistoryResult');
+    const loadHistory = async query => {
+      resultSlot.innerHTML = '<div class="text-muted">Carregando historico...</div>';
+      try {
+        resultSlot.innerHTML = databaseConnectionHistoryPanel(await api(`/api/databases/${db.id}/connections/history?${query}`));
+      } catch (err) {
+        resultSlot.innerHTML = `<div class="alert alert-warning">${escapeHtml(err.message)}</div>`;
+      }
+    };
+    contentSlot.querySelectorAll('[data-history-range]').forEach(button => button.onclick = () => {
+      contentSlot.querySelectorAll('[data-history-range]').forEach(item => {
+        const selected = item === button;
+        item.classList.toggle('btn-primary', selected);
+        item.classList.toggle('btn-outline-primary', !selected);
+      });
+      loadHistory(`range=${encodeURIComponent(button.dataset.historyRange)}`);
+    });
+    contentSlot.querySelector('[data-history-custom]').onclick = () => {
+      const from = contentSlot.querySelector('[data-history-from]').value;
+      const to = contentSlot.querySelector('[data-history-to]').value;
+      const params = new URLSearchParams();
+      if (from) params.set('from', new Date(from).toISOString());
+      if (to) params.set('to', new Date(to).toISOString());
+      loadHistory(params.toString());
+    };
+    loadHistory('range=day');
+  };
+  slot.querySelector('[data-session-tab="active"]').onclick = showActive;
+  slot.querySelector('[data-session-tab="history"]').onclick = showHistory;
+  slot.querySelector('[data-close-sessions]').onclick = () => {
+    stopDatabaseConnectionsPolling();
+    slot.innerHTML = '';
+  };
+  showActive();
+}
+
 function databaseDetailsPanel(db, diagnostic, haStatus) {
   const status = databaseStatusView(db, diagnostic);
   const diagnosticPath = diagnostic?.path || db.filePath;
@@ -691,9 +813,9 @@ function databaseDetailsPanel(db, diagnostic, haStatus) {
           <div class="col-md-3"><div class="subheader">Retencao</div><div>${escapeHtml(db.retentionDays)} dias</div></div>
           ${diagnostic?.error ? `<div class="col-12"><div class="alert alert-danger mb-0">${escapeHtml(diagnostic.error)}</div></div>` : ''}
         </div>
-        <div id="databaseConnectionsSlot" class="mt-3"></div>
         <div class="mt-3 btn-list">
           <button class="btn btn-sm btn-outline-dark" data-detail-connection="${db.id}">Conexao</button>
+          <button class="btn btn-sm btn-outline-primary" data-detail-sessions="${db.id}">Sessoes Firebird</button>
           <button class="btn btn-sm btn-outline-primary" data-detail-primary="${db.id}">Marcar producao</button>
           <button class="btn btn-sm btn-outline-secondary" data-detail-validate="${db.id}">Validar</button>
           <button class="btn btn-sm btn-outline-info" data-detail-online="${db.id}">gfix -online</button>
@@ -701,6 +823,7 @@ function databaseDetailsPanel(db, diagnostic, haStatus) {
           <button class="btn btn-sm btn-outline-danger" data-detail-maintenance="${db.id}">Manutencao automatica</button>
         </div>
         <div id="detailConnectionSlot" class="mt-3"></div>
+        <div id="detailSessionsSlot" class="mt-3"></div>
       </div>
     </div>`;
 }
@@ -827,7 +950,6 @@ async function databases() {
     const db = dbs.find(item => item.id === b.dataset.details);
     if (!db) return;
     databaseDetailsSlot.innerHTML = databaseDetailsPanel(db, diagnosticById.get(db.id), haStatus);
-    startDatabaseConnectionsPolling(db.id, databaseDetailsSlot.querySelector('#databaseConnectionsSlot'));
     databaseDetailsSlot.scrollIntoView({ behavior: 'smooth', block: 'start' });
     const bindCopy = root => root.querySelectorAll('[data-copy]').forEach(copy => copy.onclick = async () => {
       await navigator.clipboard.writeText(copy.dataset.copy);
@@ -838,6 +960,9 @@ async function databases() {
       const info = await api(`/api/databases/${btn.dataset.detailConnection}/connection`);
       detailConnectionSlot.innerHTML = connectionPanel(info);
       bindCopy(detailConnectionSlot);
+    });
+    databaseDetailsSlot.querySelectorAll('[data-detail-sessions]').forEach(btn => btn.onclick = () => {
+      bindDatabaseSessionsPanel(db, databaseDetailsSlot.querySelector('#detailSessionsSlot'));
     });
     databaseDetailsSlot.querySelectorAll('[data-detail-primary]').forEach(btn => btn.onclick = async () => {
       await api(`/api/databases/${btn.dataset.detailPrimary}/mark-primary`, { method:'POST' });

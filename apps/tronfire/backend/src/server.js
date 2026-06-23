@@ -129,6 +129,18 @@ function isPrimaryNode() {
   return nodeRole === 'primary';
 }
 
+function isServingProductionNode() {
+  if (!isPrimaryNode()) return false;
+  if (!isHaMode()) return true;
+  try {
+    const lock = JSON.parse(fs.readFileSync(clusterLockPath, 'utf8'));
+    const currentNode = String(process.env.TRONSOFTOS_NODE_NAME || '').trim();
+    return !lock.active_node || !currentNode || lock.active_node === currentNode;
+  } catch {
+    return true;
+  }
+}
+
 function standbyReadPathForDatabase(db) {
   if (!isHaMode() || !['standby', 'recovery'].includes(nodeRole)) return '';
   if (!['READY', 'RESTORING'].includes(String(db.standbyStatus || '').toUpperCase())) return '';
@@ -504,6 +516,100 @@ async function firebirdAttachmentsForDatabase(db) {
     total: attachments.length,
     collectedAt: new Date().toISOString(),
     attachments
+  };
+}
+
+function firebirdHistoryRange(query = {}) {
+  const now = new Date();
+  const range = ['day', 'week', 'month'].includes(query.range) ? query.range : 'day';
+  const hours = { day: 24, week: 24 * 7, month: 24 * 30 }[range];
+  const requestedFrom = query.from ? new Date(query.from) : null;
+  const requestedTo = query.to ? new Date(query.to) : null;
+  const from = requestedFrom && !Number.isNaN(requestedFrom.getTime())
+    ? requestedFrom
+    : new Date(now.getTime() - hours * 60 * 60 * 1000);
+  const to = requestedTo && !Number.isNaN(requestedTo.getTime()) ? requestedTo : now;
+  if (from >= to) throw new Error('Periodo de historico invalido');
+  const earliest = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  return {
+    range,
+    from: from < earliest ? earliest : from,
+    to: to > now ? now : to
+  };
+}
+
+function countBy(items, keySelector, emptyLabel) {
+  const counts = new Map();
+  for (const item of items) {
+    const key = keySelector(item) || emptyLabel;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .map(([value, count]) => ({ value, count }))
+    .sort((left, right) => right.count - left.count || String(left.value).localeCompare(String(right.value)))
+    .slice(0, 10);
+}
+
+async function firebirdConnectionHistory(db, query = {}) {
+  const period = firebirdHistoryRange(query);
+  const remoteAddress = String(query.remoteAddress || '').trim();
+  const remoteProcess = String(query.remoteProcess || '').trim();
+  const sessionWhere = {
+    databaseId: db.id,
+    firstSeenAt: { lte: period.to },
+    lastSeenAt: { gte: period.from },
+    ...(remoteAddress ? { remoteAddress: { contains: remoteAddress, mode: 'insensitive' } } : {}),
+    ...(remoteProcess ? { remoteProcess: { contains: remoteProcess, mode: 'insensitive' } } : {})
+  };
+  const [snapshots, sessions] = await Promise.all([
+    prisma.firebirdConnectionSnapshot.findMany({
+      where: { databaseId: db.id, collectedAt: { gte: period.from, lte: period.to } },
+      orderBy: { collectedAt: 'asc' },
+      take: 50_000
+    }),
+    prisma.firebirdSession.findMany({
+      where: sessionWhere,
+      orderBy: { lastSeenAt: 'desc' },
+      take: 5_000
+    })
+  ]);
+  const totals = snapshots.map(item => item.totalConnections);
+  const average = totals.length ? totals.reduce((sum, value) => sum + value, 0) / totals.length : 0;
+  return {
+    databaseId: db.id,
+    databaseName: db.name,
+    databaseAlias: db.alias,
+    period,
+    collectionActive: isServingProductionNode(),
+    retentionDays: 30,
+    summary: {
+      samples: snapshots.length,
+      maximumConnections: totals.length ? Math.max(...totals) : 0,
+      averageConnections: Math.round(average * 10) / 10,
+      observedSessions: sessions.length,
+      disconnectedSessions: sessions.filter(item => item.disconnectedAt).length
+    },
+    topRemoteAddresses: countBy(sessions, item => item.remoteAddress, 'Nao informado'),
+    topRemoteProcesses: countBy(sessions, item => item.remoteProcess, 'Nao informado'),
+    snapshots: snapshots.map(item => ({
+      collectedAt: item.collectedAt,
+      totalConnections: item.totalConnections,
+      sourceNode: item.sourceNode
+    })),
+    sessions: sessions.map(item => ({
+      id: item.id,
+      user: item.user,
+      remoteAddress: item.remoteAddress,
+      remoteProcess: item.remoteProcess,
+      remotePid: item.remotePid,
+      connectedAt: item.connectedAt,
+      firstSeenAt: item.firstSeenAt,
+      lastSeenAt: item.lastSeenAt,
+      disconnectedAt: item.disconnectedAt,
+      lastState: item.lastState,
+      sourceNode: item.sourceNode,
+      durationSeconds: Math.max(0, Math.round(((item.disconnectedAt || item.lastSeenAt) - item.firstSeenAt) / 1000))
+    }))
   };
 }
 
@@ -1229,6 +1335,11 @@ app.get('/api/databases/:id/connection', { preHandler: requireOperator }, async 
 app.get('/api/databases/:id/connections', { preHandler: requireOperator }, async (req) => {
   const db = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: req.params.id } });
   return firebirdAttachmentsForDatabase(db);
+});
+
+app.get('/api/databases/:id/connections/history', { preHandler: requireOperator }, async (req) => {
+  const db = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: req.params.id } });
+  return firebirdConnectionHistory(db, req.query || {});
 });
 
 app.post('/api/databases', { preHandler: requireOperator }, async (req, reply) => {

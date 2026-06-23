@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import cron from 'node-cron';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import { PrismaClient } from '@prisma/client';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -11,15 +12,19 @@ const FIREBIRD_BIN = process.env.FIREBIRD_BIN || '/usr/local/firebird/bin';
 const FIREBIRD_CONTAINER = process.env.FIREBIRD_CONTAINER || 'tronfire_firebird25';
 const FIREBIRD_PASSWORD = process.env.FIREBIRD_PASSWORD || 'masterkey';
 const FIREBIRD_EXEC_MODE = String(process.env.FIREBIRD_EXEC_MODE || 'container').toLowerCase();
+const TRONFIRE_DEPLOYMENT_MODE = String(process.env.TRONFIRE_DEPLOYMENT_MODE || 'simple').toLowerCase();
 const TRONFIRE_NODE_ROLE = String(process.env.TRONFIRE_NODE_ROLE || 'primary').toLowerCase();
+const TRONSOFTOS_NODE_NAME = String(process.env.TRONSOFTOS_NODE_NAME || '').trim();
 const FIREBIRD_HOST = process.env.FIREBIRD_HOST || 'host.docker.internal';
 const HOST_PROC_ROOT = process.env.HOST_PROC_ROOT || '/host/proc';
 const HOST_SYS_ROOT = process.env.HOST_SYS_ROOT || '/host/sys';
 const FIREBIRD_HOST_TARGET = 'firebird_host';
 const TRONSOFTOS_STATE_DIR = process.env.TRONSOFTOS_STATE_DIR || '/opt/tronsoftos/state';
 const HA_SYNC_ACTIVE_FILE = process.env.TRONSOFTOS_HA_SYNC_ACTIVE_FILE || `${TRONSOFTOS_STATE_DIR}/ha-sync.active`;
-const FIXED_BACKUP_FREQUENCY_MINUTES = 15;
+const CLUSTER_LOCK_FILE = process.env.TRONSOFTOS_CLUSTER_LOCK || `${TRONSOFTOS_STATE_DIR}/cluster-lock.json`;
+const FIXED_BACKUP_FREQUENCY_MINUTES = 20;
 const FIXED_BACKUP_RETENTION_DAYS = 30;
+const FIREBIRD_SESSION_RETENTION_DAYS = 30;
 const FIREBIRD_PROCESS_NAMES = new Set(['fbguard', 'fbserver', 'fb_inet_server', 'fb_smp_server', 'firebird']);
 const METRIC_CONTAINERS = [
   'tronfire_firebird25',
@@ -29,6 +34,7 @@ const METRIC_CONTAINERS = [
   'tronfire_worker'
 ].filter(name => FIREBIRD_EXEC_MODE === 'container' || name !== FIREBIRD_CONTAINER);
 let backupRunning = false;
+let sessionCollectionRunning = false;
 
 function haSyncActive() {
   try {
@@ -73,6 +79,17 @@ function isPrimaryNode() {
   return TRONFIRE_NODE_ROLE === 'primary';
 }
 
+function isServingProductionNode() {
+  if (!isPrimaryNode()) return false;
+  if (TRONFIRE_DEPLOYMENT_MODE !== 'ha') return true;
+  try {
+    const lock = JSON.parse(fs.readFileSync(CLUSTER_LOCK_FILE, 'utf8'));
+    return !lock.active_node || !TRONSOFTOS_NODE_NAME || lock.active_node === TRONSOFTOS_NODE_NAME;
+  } catch {
+    return true;
+  }
+}
+
 function databaseOperationActive(db, now = new Date()) {
   if (String(db.operationStatus || 'IDLE').toUpperCase() !== 'RUNNING') return false;
   if (!db.operationExpiresAt) return true;
@@ -104,6 +121,142 @@ function firebirdDbConnect(filePath) {
   const value = String(filePath || '').trim();
   if (FIREBIRD_EXEC_MODE === 'host' || FIREBIRD_EXEC_MODE === 'direct') return `${FIREBIRD_HOST}:${value}`;
   return value;
+}
+
+function firebirdSessionDate(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  const parsed = new Date(text.replace(' ', 'T'));
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function parseFirebirdSessions(stdout) {
+  return String(stdout || '')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line.startsWith('TRONATT|'))
+    .map(line => {
+      const [attachmentId, user, remoteAddress, remoteProcess, remotePid, connectedAt, state] = line.slice('TRONATT|'.length).split('|');
+      return {
+        attachmentId: Number(attachmentId) || null,
+        user: String(user || '').trim() || null,
+        remoteAddress: String(remoteAddress || '').trim() || null,
+        remoteProcess: String(remoteProcess || '').trim() || null,
+        remotePid: Number(remotePid) || null,
+        connectedAtText: String(connectedAt || '').trim(),
+        connectedAt: firebirdSessionDate(connectedAt),
+        state: Number(state) === 1 ? 'ACTIVE' : 'IDLE'
+      };
+    });
+}
+
+async function queryFirebirdSessions(db) {
+  const sql = [
+    'SET HEADING OFF;',
+    'SET LIST OFF;',
+    'SELECT',
+    "  'TRONATT|' ||",
+    "  CAST(MON$ATTACHMENT_ID AS VARCHAR(20)) || '|' ||",
+    "  COALESCE(REPLACE(TRIM(MON$USER), '|', '/'), '') || '|' ||",
+    "  COALESCE(REPLACE(TRIM(MON$REMOTE_ADDRESS), '|', '/'), '') || '|' ||",
+    "  COALESCE(REPLACE(TRIM(MON$REMOTE_PROCESS), '|', '/'), '') || '|' ||",
+    "  COALESCE(CAST(MON$REMOTE_PID AS VARCHAR(20)), '') || '|' ||",
+    "  COALESCE(CAST(MON$TIMESTAMP AS VARCHAR(30)), '') || '|' ||",
+    '  CAST(MON$STATE AS VARCHAR(10))',
+    'FROM MON$ATTACHMENTS',
+    'WHERE MON$ATTACHMENT_ID <> CURRENT_CONNECTION',
+    'ORDER BY MON$TIMESTAMP;',
+    'COMMIT;',
+    'QUIT;'
+  ].join('\n');
+  const cmd = [
+    `printf %s ${shQuote(`${sql}\n`)}`,
+    '|',
+    shQuote(`${FIREBIRD_BIN}/isql`),
+    '-q',
+    '-user SYSDBA',
+    `-password ${shQuote(FIREBIRD_PASSWORD)}`,
+    shQuote(firebirdDbConnect(db.filePath))
+  ].join(' ');
+  const { stdout } = await dockerExec(['sh', '-lc', cmd], 60_000);
+  return parseFirebirdSessions(stdout);
+}
+
+async function collectFirebirdSessionHistory() {
+  if (!isServingProductionNode() || sessionCollectionRunning) return;
+  sessionCollectionRunning = true;
+  try {
+    const db = await prisma.managedDatabase.findFirst({
+      where: {
+        type: { not: 'ARQUIVADO' },
+        OR: [{ isPrimary: true }, { type: 'PRODUCAO' }]
+      },
+      orderBy: [{ isPrimary: 'desc' }, { updatedAt: 'asc' }]
+    });
+    if (!db) return;
+    const sessions = await queryFirebirdSessions(db);
+    const now = new Date();
+    const sourceNode = process.env.TRONSOFTOS_NODE_NAME || null;
+    const sessionKeys = [];
+
+    await prisma.firebirdConnectionSnapshot.create({
+      data: { databaseId: db.id, totalConnections: sessions.length, sourceNode, collectedAt: now }
+    });
+
+    for (const session of sessions) {
+      const rawKey = [db.id, sourceNode || '', session.attachmentId || '', session.connectedAtText, session.remoteAddress || '', session.remotePid || ''].join('|');
+      const sessionKey = crypto.createHash('sha256').update(rawKey).digest('hex');
+      sessionKeys.push(sessionKey);
+      await prisma.firebirdSession.upsert({
+        where: { sessionKey },
+        create: {
+          sessionKey,
+          databaseId: db.id,
+          attachmentId: session.attachmentId,
+          user: session.user,
+          remoteAddress: session.remoteAddress,
+          remoteProcess: session.remoteProcess,
+          remotePid: session.remotePid,
+          connectedAt: session.connectedAt,
+          firstSeenAt: now,
+          lastSeenAt: now,
+          disconnectedAt: null,
+          lastState: session.state,
+          sourceNode
+        },
+        update: {
+          user: session.user,
+          remoteAddress: session.remoteAddress,
+          remoteProcess: session.remoteProcess,
+          remotePid: session.remotePid,
+          connectedAt: session.connectedAt,
+          lastSeenAt: now,
+          disconnectedAt: null,
+          lastState: session.state,
+          sourceNode
+        }
+      });
+    }
+
+    await prisma.firebirdSession.updateMany({
+      where: {
+        databaseId: db.id,
+        disconnectedAt: null,
+        ...(sessionKeys.length ? { sessionKey: { notIn: sessionKeys } } : {})
+      },
+      data: { disconnectedAt: now }
+    });
+
+    const cutoff = new Date(now.getTime() - FIREBIRD_SESSION_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+    await Promise.all([
+      prisma.firebirdConnectionSnapshot.deleteMany({ where: { collectedAt: { lt: cutoff } } }),
+      prisma.firebirdSession.deleteMany({ where: { lastSeenAt: { lt: cutoff } } })
+    ]);
+  } catch (err) {
+    console.error('[worker] firebird session history error', err.message);
+  } finally {
+    sessionCollectionRunning = false;
+  }
 }
 
 function firebirdCreateTarget(filePath) {
@@ -770,7 +923,12 @@ cron.schedule('* * * * *', async () => {
   await runAutomaticBackups();
 });
 
+cron.schedule('* * * * *', async () => {
+  await collectFirebirdSessionHistory();
+});
+
 console.log('[worker] TronFire worker iniciado');
 setTimeout(() => {
   collectMetrics().catch(err => console.error('[worker] initial metrics error', err.message));
+  collectFirebirdSessionHistory().catch(err => console.error('[worker] initial session history error', err.message));
 }, 5000);
