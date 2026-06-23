@@ -231,6 +231,22 @@ function readHostTemperatureCelsius() {
   } catch {
     // Some VMs and hosts do not expose thermal sensors to containers.
   }
+  try {
+    const hwmonRoot = `${HOST_SYS_ROOT}/class/hwmon`;
+    for (const item of fs.readdirSync(hwmonRoot, { withFileTypes: true })) {
+      if (!item.isDirectory() && !item.isSymbolicLink()) continue;
+      const deviceRoot = `${hwmonRoot}/${item.name}`;
+      for (const fileName of fs.readdirSync(deviceRoot)) {
+        if (!/^temp\d+_input$/.test(fileName)) continue;
+        const raw = Number(fs.readFileSync(`${deviceRoot}/${fileName}`, 'utf8').trim());
+        if (!Number.isFinite(raw)) continue;
+        const celsius = raw > 1000 ? raw / 1000 : raw;
+        if (celsius >= 0 && celsius <= 130) values.push(celsius);
+      }
+    }
+  } catch {
+    // hwmon is optional and commonly absent inside virtual machines.
+  }
   return values.length ? Math.round(Math.max(...values) * 10) / 10 : null;
 }
 

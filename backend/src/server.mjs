@@ -1838,12 +1838,17 @@ async function remoteTronfireHaStatus(host) {
   if (!targetHost) return null;
   const base = /^https?:\/\//i.test(targetHost) ? targetHost : `http://${targetHost}:${port}`;
   try {
+    const token = internalTokenValue();
+    if (!token) return { ok: false, url: base, error: 'token interno nao configurado' };
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3500);
-    const response = await fetch(new URL('/tronfire/api/ha/status', base), { signal: controller.signal });
+    const response = await fetch(new URL('/api/cluster/standby-status', base), {
+      signal: controller.signal,
+      headers: { 'x-tronsoftos-token': token }
+    });
     clearTimeout(timeout);
     if (!response.ok) return { ok: false, url: base, status: response.status };
-    return { ...summarizeTronfireHaStatus(await response.json()), url: base };
+    return { ...await response.json(), url: base };
   } catch (err) {
     return { ok: false, url: base, error: err.message };
   }
@@ -3357,6 +3362,12 @@ async function handleApi(req, reply, url) {
     return json(reply, 200, publicActionJob(job));
   }
   if (req.method === 'GET' && url.pathname === '/api/cluster') return json(reply, 200, clusterStatus());
+  if (req.method === 'GET' && url.pathname === '/api/cluster/standby-status') {
+    const status = await tronfireHaStatus();
+    return status
+      ? json(reply, 200, summarizeTronfireHaStatus(status))
+      : json(reply, 503, { error: 'status HA do TronFire indisponivel' });
+  }
   if (req.method === 'GET' && url.pathname === '/api/cluster/lock') return json(reply, 200, clusterLock());
   if (req.method === 'PATCH' && url.pathname === '/api/cluster/lock') return json(reply, 200, writeClusterLock(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/cluster/promotion/block') return json(reply, 200, blockClusterPromotion((await readBody(req).catch(() => ({}))).reason));
