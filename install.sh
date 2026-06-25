@@ -219,6 +219,13 @@ rsync -a --delete \
   --exclude '.git' \
   --exclude 'node_modules' \
   --exclude 'frontend/node_modules' \
+  --exclude '.ssh/' \
+  --exclude 'state/' \
+  --exclude 'logs/' \
+  --exclude 'config/rclone/' \
+  --exclude 'config/managed-apps.json' \
+  --exclude 'apps/tronfire/.env' \
+  --exclude 'apps/troncomanda/.env' \
   ./ "$APP_DIR/"
 
 if [ ! -f "$ENV_FILE" ]; then

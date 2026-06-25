@@ -13,6 +13,7 @@ KNOWN_HOSTS="${TRONSOFTOS_UPDATE_KNOWN_HOSTS:-$APP_DIR/state/known_hosts}"
 INTERNAL_TOKEN="${TRONSOFTOS_INTERNAL_TOKEN:-}"
 TRONSOFTOS_PORT="${TRONSOFTOS_PORT:-8080}"
 MAINTENANCE_STATE="${TRONSOFTOS_MAINTENANCE_STATE:-$APP_DIR/state/maintenance-state.json}"
+STORAGE_ROOT="${STORAGE_ROOT:-/opt/tronfire-storage}"
 
 log() {
   printf '[update] %s\n' "$*"
@@ -50,6 +51,71 @@ clear_local_maintenance() {
   "clearedAt": "$(date -Is)",
   "updatedAt": "$(date -Is)"
 }
+
+path_file_count() {
+  local target="$1"
+  if [ ! -e "$target" ]; then
+    printf 'MISSING'
+    return 0
+  fi
+  find "$target" -xdev -type f 2>/dev/null | wc -l | tr -d ' '
+}
+
+path_total_bytes() {
+  local target="$1"
+  if [ ! -e "$target" ]; then
+    printf '0'
+    return 0
+  fi
+  du -sb "$target" 2>/dev/null | awk '{print $1}'
+}
+
+persistent_paths() {
+  printf '%s\n' \
+    "$STORAGE_ROOT/firebird/data" \
+    "$STORAGE_ROOT/firebird/backups" \
+    "$STORAGE_ROOT/firebird/uploads" \
+    "$STORAGE_ROOT/firebird/standby" \
+    "$STORAGE_ROOT/postgres" \
+    "$STORAGE_ROOT/redis" \
+    "$STORAGE_ROOT/config-backups" \
+    "$STORAGE_ROOT/update-backups" \
+    "$APP_DIR/state" \
+    "$APP_DIR/config/rclone"
+}
+
+capture_persistent_snapshot() {
+  local output="$1"
+  : > "$output"
+  while IFS= read -r target; do
+    printf '%s\t%s\t%s\n' "$target" "$(path_file_count "$target")" "$(path_total_bytes "$target")" >> "$output"
+  done < <(persistent_paths)
+}
+
+verify_persistent_snapshot() {
+  local before="$1"
+  local failures=0
+  while IFS=$'\t' read -r target before_count before_bytes; do
+    [ -n "$target" ] || continue
+    local after_count after_bytes
+    after_count="$(path_file_count "$target")"
+    after_bytes="$(path_total_bytes "$target")"
+    if [ "$before_count" != "MISSING" ] && [ "$after_count" = "MISSING" ]; then
+      echo "Diretorio persistente desapareceu durante a atualizacao: $target" >&2
+      failures=$((failures + 1))
+      continue
+    fi
+    if [ "$before_count" != "MISSING" ] && [ "$after_count" -lt "$before_count" ]; then
+      echo "Diretorio persistente perdeu arquivos durante a atualizacao: $target ($before_count -> $after_count)" >&2
+      failures=$((failures + 1))
+    fi
+    if [ "$before_bytes" -gt 0 ] && [ "$after_bytes" -lt "$before_bytes" ]; then
+      echo "Diretorio persistente reduziu tamanho durante a atualizacao: $target ($before_bytes -> $after_bytes bytes)" >&2
+      failures=$((failures + 1))
+    fi
+  done < "$before"
+  [ "$failures" -eq 0 ] || exit 73
+}
 EOF
 }
 
@@ -59,6 +125,10 @@ if [ "$BRANCH" != "dev" ]; then
 fi
 
 cd "$APP_DIR"
+snapshot_file="$(mktemp)"
+trap 'rm -f "$snapshot_file"' EXIT
+log "registrando fotografia de seguranca dos dados persistentes"
+capture_persistent_snapshot "$snapshot_file"
 
 if [ -n "$STANDBY_HOST" ]; then
   [ -n "$INTERNAL_TOKEN" ] || { echo "TRONSOFTOS_INTERNAL_TOKEN nao configurado; nao e seguro atualizar primary sem bloquear o standby" >&2; exit 71; }
@@ -82,6 +152,9 @@ git pull --ff-only "$REMOTE" "$BRANCH"
 
 log "executando instalador"
 bash "$APP_DIR/install.sh"
+
+log "validando preservacao de bancos, backups, historicos e configuracoes"
+verify_persistent_snapshot "$snapshot_file"
 
 if [ -n "$STANDBY_HOST" ]; then
   log "liberando promocao automatica no standby ${STANDBY_HOST}"
