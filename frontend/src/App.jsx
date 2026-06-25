@@ -51,6 +51,7 @@ const navItems = [
   { id: 'cluster', label: 'Cluster HA', icon: GitBranch },
   { id: 'backups', label: 'Backups', icon: UploadCloud },
   { id: 'cloudflare', label: 'Cloudflare', icon: Cloud },
+  { id: 'updates', label: 'Atualizacoes', icon: RefreshCw },
   { id: 'maintenance', label: 'Manutencao', icon: Power }
 ];
 
@@ -1664,27 +1665,98 @@ function CloudflareView({ dashboard }) {
   );
 }
 
-function UpdatesView() {
+function UpdatesView({ dashboard }) {
+  const queryClient = useQueryClient();
+  const [jobId, setJobId] = useState(null);
+  const updateMutation = useMutation({
+    mutationFn: payload => postApi('/api/maintenance/update', payload),
+    onSuccess: data => {
+      setJobId(data.job?.id || null);
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    }
+  });
+  const jobQuery = useQuery({
+    queryKey: ['update-job', jobId],
+    queryFn: () => api(`/api/actions/${jobId}`),
+    enabled: !!jobId,
+    refetchInterval: query => query.state.data?.status === 'running' ? 1200 : false
+  });
+  const build = dashboard.build || dashboard.cluster?.build || {};
+  const role = dashboard.cluster?.nodeRole || dashboard.cluster?.identity?.nodeRole || '-';
+  const mode = dashboard.cluster?.mode || '-';
+  const standbyHost = dashboard.cluster?.sync?.standbyHost || '';
+  const maintenanceBlock = dashboard.cluster?.failover?.maintenanceBlock || {};
+  const busy = updateMutation.isPending || jobQuery.data?.status === 'running';
   return (
-    <div className="grid gap-5 xl:grid-cols-2">
-      <Card title="Plano de atualizacao" icon={RefreshCw}>
-        <ol className="space-y-3 text-sm text-slate-700">
-          {['Backup de configuracao', 'Export catalogo TronFire', 'Backup Firebird', 'Atualizar standby primeiro em HA', 'Aplicar migrations', 'Validar health checks'].map(item => (
-            <li key={item} className="flex items-center gap-2"><span className="status-dot bg-slate-300" />{item}</li>
-          ))}
-        </ol>
-      </Card>
-      <Card title="Compatibilidade" icon={Database}>
-        <div className="h-64">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={[{ name: 'TronSoftOS', version: 1 }, { name: 'TronFire', version: 1 }, { name: 'TronComanda', version: 0 }]}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-              <XAxis dataKey="name" fontSize={12} />
-              <YAxis fontSize={12} allowDecimals={false} />
-              <Tooltip />
-              <Bar dataKey="version" fill="#0284c7" radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
+    <div className="space-y-5">
+      <div className="grid gap-4 lg:grid-cols-4">
+        <Stat label="Versao atual" value={build.version || '-'} detail={build.buildNumber ? `Build ${build.buildNumber}` : 'build nao informado'} icon={GitBranch} tone="slate" />
+        <Stat label="Branch atual" value={build.branch || '-'} detail={build.installedAt ? `instalado ${formatDateTime(build.installedAt)}` : 'instalacao nao informada'} icon={GitBranch} tone="sky" />
+        <Stat label="Papel local" value={role} detail={mode} icon={ShieldCheck} tone={role === 'primary' ? 'green' : 'sky'} />
+        <Stat label="Standby HA" value={standbyHost || '-'} detail={standbyHost ? 'sera bloqueado ao atualizar primary' : 'nao configurado'} icon={Server} tone={standbyHost ? 'green' : 'amber'} />
+      </div>
+
+      {jobQuery.data ? <ActionTerminal job={jobQuery.data} /> : null}
+
+      <div className="grid gap-5 xl:grid-cols-2">
+        <Card title="Atualizar branch dev" icon={RefreshCw} action={<StatusPill value={busy ? 'running' : 'dev'} />}>
+          <div className="space-y-3 text-sm text-slate-700">
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-amber-800">
+              Em HA, atualize primeiro o standby. Ao atualizar o primary, o TronSoftOS bloqueia a promocao automatica no standby por manutencao planejada e libera novamente ao concluir.
+            </div>
+            <ol className="space-y-2">
+              {[
+                'Entrar em manutencao local',
+                'Bloquear promocao automatica no standby quando este no for primary',
+                'Baixar e aplicar a branch dev',
+                'Executar install.sh e migrations do TronFire',
+                'Liberar o standby e reiniciar o servico TronSoftOS'
+              ].map(item => (
+                <li key={item} className="flex items-center gap-2"><span className="status-dot bg-slate-300" />{item}</li>
+              ))}
+            </ol>
+            <ConfirmAction
+              label="Atualizar para dev"
+              icon={RefreshCw}
+              confirmation="ATUALIZAR DEV"
+              tone="amber"
+              disabled={busy}
+              onConfirm={({ confirmation }) => updateMutation.mutate({ confirmation, branch: 'dev', timeoutMinutes: 30 })}
+            />
+            {updateMutation.isError ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{updateMutation.error.message}</div> : null}
+          </div>
+        </Card>
+        <Card title="Trava de failover" icon={ShieldCheck} action={<StatusPill value={maintenanceBlock.active ? (maintenanceBlock.expired ? 'critical' : 'warning') : 'disabled'} />}>
+          <div className="grid gap-3 text-sm">
+            {[
+              ['Status', maintenanceBlock.active ? 'ativo' : 'inativo'],
+              ['Motivo', maintenanceBlock.reason || '-'],
+              ['Inicio', maintenanceBlock.startedAt ? formatDateTime(maintenanceBlock.startedAt) : '-'],
+              ['Limite', maintenanceBlock.expiresAt ? formatDateTime(maintenanceBlock.expiresAt) : '-'],
+              ['Restante', maintenanceBlock.active && maintenanceBlock.remainingSeconds !== null ? `${maintenanceBlock.remainingSeconds}s` : '-']
+            ].map(([label, value]) => (
+              <div key={label} className="flex items-center justify-between gap-4 border-b border-slate-100 pb-2">
+                <span className="text-slate-500">{label}</span>
+                <span className="text-right font-medium text-slate-950">{value}</span>
+              </div>
+            ))}
+          </div>
+          <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+            Se o prazo vencer, o standby continua sem promover automaticamente e gera alerta critico para decisao manual do tecnico.
+          </div>
+        </Card>
+      </div>
+      <Card title="Ordem recomendada em HA" icon={Database}>
+        <div className="grid gap-3 text-sm text-slate-700 md:grid-cols-2">
+          <div className="rounded-md border border-slate-200 bg-white p-3">
+            <div className="font-semibold text-slate-950">1. Standby</div>
+            <div>Atualize o standby primeiro e confirme que voltou online na mesma branch/build.</div>
+          </div>
+          <div className="rounded-md border border-slate-200 bg-white p-3">
+            <div className="font-semibold text-slate-950">2. Primary</div>
+            <div>Atualize o primary depois. O standby recebe trava temporaria de failover durante a manutencao.</div>
+          </div>
         </div>
       </Card>
     </div>
@@ -2116,6 +2188,7 @@ function AuthenticatedApp({ user, onLogout }) {
     cluster: <ClusterView dashboard={dashboard} />,
     backups: <BackupsView dashboard={dashboard} />,
     cloudflare: <CloudflareView dashboard={dashboard} />,
+    updates: <UpdatesView dashboard={dashboard} />,
     maintenance: <MaintenanceView dashboard={dashboard} />
   }[active];
 

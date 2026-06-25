@@ -36,6 +36,8 @@ const haSyncLogDir = process.env.TRONSOFTOS_HA_SYNC_LOG_DIR || path.join(appRoot
 const FIXED_HA_SYNC_INTERVAL_MINUTES = 3;
 const HA_SYNC_CRITICAL_LAG_MINUTES = 20;
 const DEFAULT_HA_SYNC_MODE = 'physical';
+const UPDATE_MAINTENANCE_TIMEOUT_MINUTES = 30;
+const UPDATE_ALLOWED_BRANCHES = new Set(['dev']);
 const SESSION_COOKIE = 'tronsoftos_session';
 const SESSION_DURATION_SECONDS = 12 * 60 * 60;
 const LOGIN_WINDOW_MS = 10 * 60 * 1000;
@@ -1816,8 +1818,9 @@ function haFailoverStatus() {
   const settings = publicHaFailoverSettings();
   const identity = nodeIdentity();
   const guard = clusterGuard();
+  const maintenanceBlock = failoverMaintenanceBlock();
   const elapsedSeconds = primaryDownSince ? Math.max(0, Math.floor((Date.now() - primaryDownSince) / 1000)) : 0;
-  const remainingSeconds = primaryDownSince ? Math.max(0, settings.timeoutSeconds - elapsedSeconds) : null;
+  const remainingSeconds = primaryDownSince && !maintenanceBlock.active ? Math.max(0, settings.timeoutSeconds - elapsedSeconds) : null;
   return {
     ...settings,
     mode: identity.deploymentMode,
@@ -1828,6 +1831,7 @@ function haFailoverStatus() {
     remainingSeconds,
     inProgress: autoFailoverInProgress,
     canPromote: guard.canPromote,
+    maintenanceBlock,
     guardStatus: guard.status,
     guardReason: guard.reason
   };
@@ -2545,11 +2549,22 @@ async function dashboard() {
       message: 'Sync HA adiado: backup do TronFire em andamento; nova tentativa automatica ocorrera no proximo ciclo'
     });
   }
-  if (cluster.failover?.primaryDownSince) {
-    const standbyBlocked = cluster.failover.enabled && cluster.sync?.enabled && cluster.sync?.standbyReady === false;
+  if (cluster.failover?.maintenanceBlock?.active) {
     alerts.push({
-      severity: cluster.failover.enabled && !standbyBlocked ? 'critical' : 'warning',
-      message: cluster.failover.enabled
+      severity: cluster.failover.maintenanceBlock.expired ? 'critical' : 'warning',
+      message: cluster.failover.maintenanceBlock.expired
+        ? 'Primary em manutencao planejada excedeu o tempo limite. Failover automatico bloqueado; acao tecnica necessaria.'
+        : `Failover automatico suspenso por manutencao planejada ate ${formatIsoForAlert(cluster.failover.maintenanceBlock.expiresAt)}`
+    });
+  }
+  if (cluster.failover?.primaryDownSince) {
+    const maintenanceBlocked = cluster.failover.maintenanceBlock?.active === true;
+    const standbyBlocked = !maintenanceBlocked && cluster.failover.enabled && cluster.sync?.enabled && cluster.sync?.standbyReady === false;
+    alerts.push({
+      severity: cluster.failover.enabled && !standbyBlocked && !maintenanceBlocked ? 'critical' : 'warning',
+      message: maintenanceBlocked
+        ? 'Primary indisponivel, mas failover automatico esta bloqueado por manutencao planejada'
+        : cluster.failover.enabled
         ? standbyBlocked
           ? 'Primary indisponivel: promocao automatica bloqueada porque o standby nao esta pronto'
           : `Primary indisponivel: failover automatico em ${cluster.failover.remainingSeconds ?? 0}s`
@@ -2932,9 +2947,19 @@ async function maybeAutoFailover() {
     return;
   }
 
-  if (await primaryHealthOk(settings.primaryHealthUrl)) {
+  const primaryOk = await primaryHealthOk(settings.primaryHealthUrl);
+  if (primaryOk) {
     if (primaryDownSince) appendEvent('HA_FAILOVER_PRIMARY_RECOVERED', { primaryHealthUrl: settings.primaryHealthUrl });
     primaryDownSince = 0;
+    return;
+  }
+
+  const maintenanceBlock = failoverMaintenanceBlock();
+  if (maintenanceBlock.active) {
+    if (!primaryDownSince) {
+      primaryDownSince = Date.now();
+      appendEvent('HA_FAILOVER_BLOCKED_BY_MAINTENANCE', { primaryHealthUrl: settings.primaryHealthUrl, maintenance: maintenanceBlock });
+    }
     return;
   }
 
@@ -3036,6 +3061,15 @@ function shQuote(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 
+function formatIsoForAlert(value) {
+  if (!value) return 'horario nao informado';
+  try {
+    return new Date(value).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+  } catch {
+    return String(value);
+  }
+}
+
 function requireConfirmation(body, expected) {
   const confirmation = String(body.confirmation || '').trim();
   if (confirmation !== expected) throw new Error(`confirmacao invalida; digite ${expected}`);
@@ -3048,6 +3082,7 @@ function maintenanceState() {
     reason: '',
     standbyHost: null,
     startedAt: null,
+    expiresAt: null,
     clearedAt: null
   });
 }
@@ -3064,6 +3099,49 @@ function writeMaintenanceState(next) {
   return state;
 }
 
+function maintenanceExpiresAt(timeoutMinutes = UPDATE_MAINTENANCE_TIMEOUT_MINUTES) {
+  return new Date(Date.now() + Math.max(1, Number(timeoutMinutes || UPDATE_MAINTENANCE_TIMEOUT_MINUTES)) * 60_000).toISOString();
+}
+
+function failoverMaintenanceBlock() {
+  const state = maintenanceState();
+  const mode = String(state.mode || '');
+  const active = state.active === true && ['failover-update', 'update', 'ha-update'].includes(mode);
+  if (!active) return { active: false };
+  const expiresAtMs = state.expiresAt ? new Date(state.expiresAt).getTime() : 0;
+  const expired = expiresAtMs > 0 && Date.now() > expiresAtMs;
+  return {
+    active: true,
+    expired,
+    reason: state.reason || 'manutencao planejada',
+    startedAt: state.startedAt || null,
+    expiresAt: state.expiresAt || null,
+    remainingSeconds: expiresAtMs ? Math.max(0, Math.ceil((expiresAtMs - Date.now()) / 1000)) : null
+  };
+}
+
+function writeFailoverMaintenanceBlock(body = {}) {
+  const timeoutMinutes = Number(body.timeoutMinutes || UPDATE_MAINTENANCE_TIMEOUT_MINUTES);
+  return writeMaintenanceState({
+    active: true,
+    mode: 'failover-update',
+    reason: String(body.reason || 'Atualizacao planejada do primary: failover automatico suspenso').trim(),
+    standbyHost: body.primaryHost ? String(body.primaryHost).trim() : null,
+    startedAt: new Date().toISOString(),
+    expiresAt: body.expiresAt || maintenanceExpiresAt(timeoutMinutes),
+    clearedAt: null
+  });
+}
+
+function clearFailoverMaintenanceBlock(body = {}) {
+  return writeMaintenanceState({
+    active: false,
+    mode: 'failover-update',
+    reason: String(body.reason || 'Atualizacao planejada finalizada: failover automatico liberado').trim(),
+    clearedAt: new Date().toISOString()
+  });
+}
+
 async function maintenanceStatus() {
   let localKeepalived = 'unknown';
   try {
@@ -3076,6 +3154,7 @@ async function maintenanceStatus() {
     generatedAt: new Date().toISOString(),
     cluster: clusterStatus(),
     maintenance: maintenanceState(),
+    failoverMaintenance: failoverMaintenanceBlock(),
     guard: clusterGuard(),
     sync: publicHaSyncSettings(),
     local: {
@@ -3137,6 +3216,44 @@ function startStandbyKeepalived(action, body = {}) {
       remoteCommand
     ]
   });
+}
+
+function startTronsoftosUpdate(body = {}) {
+  const branch = String(body.branch || 'dev').trim();
+  requireConfirmation(body, 'ATUALIZAR DEV');
+  if (!UPDATE_ALLOWED_BRANCHES.has(branch)) throw new Error(`branch nao permitida para atualizacao pelo painel: ${branch}`);
+  const identity = nodeIdentity();
+  const settings = rawHaSyncSettings();
+  const timeoutMinutes = Number(body.timeoutMinutes || UPDATE_MAINTENANCE_TIMEOUT_MINUTES);
+  const script = path.join(appRoot, 'scripts/update-tronsoftos.sh');
+  if (!fs.existsSync(script)) throw new Error(`script de atualizacao nao encontrado: ${script}`);
+
+  writeMaintenanceState({
+    active: true,
+    mode: 'update',
+    reason: `Atualizacao planejada para branch ${branch}`,
+    standbyHost: identity.deploymentMode === 'ha' && identity.nodeRole === 'primary' ? settings.standbyHost || null : null,
+    startedAt: new Date().toISOString(),
+    expiresAt: maintenanceExpiresAt(timeoutMinutes),
+    clearedAt: null
+  });
+
+  const cmd = privilegedCommandArgs('bash', [script, branch]);
+  const env = {
+    ...process.env,
+    TRONSOFTOS_APP_DIR: appRoot,
+    TRONSOFTOS_UPDATE_TIMEOUT_MINUTES: String(timeoutMinutes),
+    TRONSOFTOS_UPDATE_STANDBY_HOST: identity.deploymentMode === 'ha' && identity.nodeRole === 'primary' ? settings.standbyHost || '' : '',
+    TRONSOFTOS_UPDATE_SSH_USER: settings.sshUser || 'tronsoft',
+    TRONSOFTOS_UPDATE_SSH_PORT: String(settings.sshPort || 22),
+    TRONSOFTOS_UPDATE_SSH_KEY: path.join(stateDir, 'ssh/id_ed25519'),
+    TRONSOFTOS_UPDATE_KNOWN_HOSTS: path.join(stateDir, 'known_hosts'),
+    TRONSOFTOS_INTERNAL_TOKEN: internalTokenValue(),
+    TRONSOFTOS_MAINTENANCE_STATE: maintenanceStatePath,
+    TRONSOFTOS_PORT: String(port)
+  };
+  appendEvent('TRONSOFTOS_UPDATE_STARTED', { branch, nodeRole: identity.nodeRole, standbyHost: env.TRONSOFTOS_UPDATE_STANDBY_HOST || null });
+  return startCommandJob({ app: 'tronsoftos', action: `update-${branch}`, ...cmd, env, eventPrefix: 'TRONSOFTOS_UPDATE' });
 }
 
 function startHostPower(action, body = {}) {
@@ -3403,6 +3520,9 @@ async function handleApi(req, reply, url) {
   if (req.method === 'PATCH' && url.pathname === '/api/settings/smtp') return json(reply, 200, writeSmtpSettings(await readBody(req)));
   if (req.method === 'GET' && url.pathname === '/api/events') return json(reply, 200, { events: readEvents(Number(url.searchParams.get('limit') || 100)) });
   if (req.method === 'GET' && url.pathname === '/api/maintenance') return json(reply, 200, await maintenanceStatus());
+  if (req.method === 'POST' && url.pathname === '/api/maintenance/update') return json(reply, 202, { ok: true, job: startTronsoftosUpdate(await readBody(req)) });
+  if (req.method === 'POST' && url.pathname === '/api/maintenance/failover-block') return json(reply, 200, writeFailoverMaintenanceBlock(await readBody(req).catch(() => ({}))));
+  if (req.method === 'POST' && url.pathname === '/api/maintenance/failover-clear') return json(reply, 200, clearFailoverMaintenanceBlock(await readBody(req).catch(() => ({}))));
   if (req.method === 'POST' && url.pathname === '/api/maintenance/standby/keepalived/stop') return json(reply, 202, { ok: true, job: startStandbyKeepalived('stop', await readBody(req)) });
   if (req.method === 'POST' && url.pathname === '/api/maintenance/standby/keepalived/start') return json(reply, 202, { ok: true, job: startStandbyKeepalived('start', await readBody(req)) });
   if (req.method === 'POST' && url.pathname === '/api/maintenance/local/keepalived/stop') return json(reply, 202, { ok: true, job: startLocalKeepalived('stop', await readBody(req)) });
