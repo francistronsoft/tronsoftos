@@ -119,6 +119,23 @@ verify_persistent_snapshot() {
   [ "$failures" -eq 0 ] || exit 73
 }
 
+backup_and_reset_local_source_changes() {
+  if git diff --quiet && git diff --cached --quiet; then
+    return 0
+  fi
+
+  local backup_dir
+  backup_dir="$STORAGE_ROOT/update-backups/local-changes-$(date +%Y%m%d%H%M%S)"
+  mkdir -p "$backup_dir"
+  git status --porcelain=v1 > "$backup_dir/git-status.txt" || true
+  git diff > "$backup_dir/local-changes.patch" || true
+  git diff --cached > "$backup_dir/staged-changes.patch" || true
+
+  log "alteracoes locais no codigo gerenciado foram salvas em ${backup_dir}"
+  log "restaurando codigo gerenciado para permitir fast-forward"
+  git reset --hard HEAD
+}
+
 if [ "$BRANCH" != "dev" ]; then
   echo "Branch nao permitida para atualizacao pelo painel: $BRANCH" >&2
   exit 64
@@ -142,6 +159,7 @@ if [ -n "$STANDBY_HOST" ]; then
 fi
 
 log "buscando branch ${BRANCH}"
+backup_and_reset_local_source_changes
 git fetch "$REMOTE" "${BRANCH}:refs/remotes/${REMOTE}/${BRANCH}"
 if git show-ref --verify --quiet "refs/heads/${BRANCH}"; then
   git switch "$BRANCH"
