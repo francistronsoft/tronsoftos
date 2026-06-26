@@ -2152,6 +2152,8 @@ function AuthenticatedApp({ user, onLogout }) {
       return 'light';
     }
   });
+  const [easterEggClicks, setEasterEggClicks] = useState(0);
+  const [easterEggVisible, setEasterEggVisible] = useState(false);
   const queryClient = useQueryClient();
   const dashboardQuery = useQuery({
     queryKey: ['dashboard'],
@@ -2199,6 +2201,23 @@ function AuthenticatedApp({ user, onLogout }) {
     }
   }, [theme]);
 
+  useEffect(() => {
+    if (!easterEggVisible) return undefined;
+    const timer = setTimeout(() => setEasterEggVisible(false), 4500);
+    return () => clearTimeout(timer);
+  }, [easterEggVisible]);
+
+  function activateEasterEgg() {
+    setEasterEggClicks(current => {
+      const next = current + 1;
+      if (next >= 5) {
+        setEasterEggVisible(true);
+        return 0;
+      }
+      return next;
+    });
+  }
+
   const View = {
     dashboard: <DashboardView dashboard={dashboard} />,
     apps: <AppsView dashboard={dashboard} actionPending={appActionPending} actionJob={actionJobQuery.data} onAction={(app, action) => actionMutation.mutate({ app, action })} />,
@@ -2242,7 +2261,17 @@ function AuthenticatedApp({ user, onLogout }) {
         <header className="sticky top-0 z-10 flex min-h-16 items-center justify-between border-b border-slate-200 bg-white/95 px-4 backdrop-blur lg:px-6">
           <div>
             <div className="text-xs font-medium uppercase text-slate-500">{dashboard.cluster.mode}</div>
-            <h1 className="text-xl font-semibold text-slate-950">{activeItem.label}</h1>
+            <div className="flex items-center gap-2">
+              <h1 className="text-xl font-semibold text-slate-950">{activeItem.label}</h1>
+              <button
+                type="button"
+                onClick={activateEasterEgg}
+                aria-label="Status interno"
+                className="inline-flex h-5 w-5 items-center justify-center rounded-full text-slate-300 transition hover:text-sky-500"
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-current" />
+              </button>
+            </div>
           </div>
           <div className="flex items-center gap-3">
             {dashboardQuery.isError ? <StatusPill value="offline" /> : <StatusPill value="online" />}
@@ -2266,6 +2295,11 @@ function AuthenticatedApp({ user, onLogout }) {
             </button>
           </div>
         </header>
+        {easterEggVisible ? (
+          <div className="fixed right-4 top-20 z-30 rounded-md border border-sky-200 bg-white px-4 py-3 text-sm font-semibold text-slate-950 shadow-soft lg:right-6">
+            você tem medo!
+          </div>
+        ) : null}
         {haMaintenanceActive ? (
           <div className="sticky top-16 z-10 border-b border-amber-300 bg-amber-100 px-4 py-3 text-sm text-amber-950 shadow-sm lg:px-6">
             <div className="flex flex-wrap items-center justify-between gap-3">
