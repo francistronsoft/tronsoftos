@@ -9,6 +9,12 @@
   color: #111827;
 }
 
+.theme-dark {
+  color-scheme: dark;
+  background: #0f172a;
+  color: #e5e7eb;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -38,4 +44,37 @@ select {
 
 .react-flow__attribution {
   display: none;
+}
+
+.theme-dark .bg-slate-100 { background-color: #0f172a !important; }
+.theme-dark .bg-slate-50 { background-color: #1f2937 !important; }
+.theme-dark .bg-white { background-color: #111827 !important; }
+.theme-dark .bg-white\/95 { background-color: rgb(17 24 39 / 0.95) !important; }
+.theme-dark .border-slate-100 { border-color: #1f2937 !important; }
+.theme-dark .border-slate-200,
+.theme-dark .border-slate-300 { border-color: #334155 !important; }
+.theme-dark .text-slate-950,
+.theme-dark .text-slate-900 { color: #f8fafc !important; }
+.theme-dark .text-slate-700,
+.theme-dark .text-slate-600 { color: #cbd5e1 !important; }
+.theme-dark .text-slate-500 { color: #94a3b8 !important; }
+.theme-dark .text-slate-400 { color: #64748b !important; }
+.theme-dark input,
+.theme-dark select {
+  background-color: #0f172a;
+  border-color: #334155;
+  color: #e5e7eb;
+}
+.theme-dark input::placeholder {
+  color: #64748b;
+}
+.theme-dark .hover\:bg-slate-50:hover,
+.theme-dark .hover\:bg-slate-100:hover {
+  background-color: #1e293b !important;
+}
+.theme-dark .hover\:text-slate-950:hover {
+  color: #f8fafc !important;
+}
+.theme-dark .shadow-soft {
+  box-shadow: 0 18px 45px rgb(0 0 0 / 0.22);
 }

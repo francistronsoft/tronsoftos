@@ -15,6 +15,7 @@ import {
   LayoutDashboard,
   LogIn,
   LogOut,
+  Moon,
   Network,
   Play,
   Power,
@@ -24,6 +25,7 @@ import {
   Settings,
   ShieldCheck,
   Square,
+  Sun,
   Terminal,
   Thermometer,
   UploadCloud,
@@ -2143,6 +2145,13 @@ function LoginView({ onAuthenticated }) {
 function AuthenticatedApp({ user, onLogout }) {
   const [active, setActive] = useState('dashboard');
   const [actionJobId, setActionJobId] = useState(null);
+  const [theme, setTheme] = useState(() => {
+    try {
+      return localStorage.getItem('tronsoftos-theme') || 'light';
+    } catch {
+      return 'light';
+    }
+  });
   const queryClient = useQueryClient();
   const dashboardQuery = useQuery({
     queryKey: ['dashboard'],
@@ -2180,6 +2189,15 @@ function AuthenticatedApp({ user, onLogout }) {
       queryClient.invalidateQueries({ queryKey: ['events'] });
     }
   });
+  const darkMode = theme === 'dark';
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('tronsoftos-theme', theme);
+    } catch {
+      // Theme preference is optional.
+    }
+  }, [theme]);
 
   const View = {
     dashboard: <DashboardView dashboard={dashboard} />,
@@ -2193,7 +2211,7 @@ function AuthenticatedApp({ user, onLogout }) {
   }[active];
 
   return (
-    <div className="min-h-screen bg-slate-100 text-slate-950">
+    <div className={`min-h-screen bg-slate-100 text-slate-950 ${darkMode ? 'theme-dark' : 'theme-light'}`}>
       <aside className="fixed inset-y-0 left-0 z-20 hidden w-64 border-r border-panel-800 bg-panel-950 text-white lg:block">
         <div className="flex h-16 items-center gap-3 border-b border-white/10 px-5">
           <div className="relative h-9 w-9 rounded-full border-2 border-sky-300">
@@ -2229,6 +2247,15 @@ function AuthenticatedApp({ user, onLogout }) {
           <div className="flex items-center gap-3">
             {dashboardQuery.isError ? <StatusPill value="offline" /> : <StatusPill value="online" />}
             <StatusPill value={dashboard.cluster.nodeRole} />
+            <button
+              type="button"
+              onClick={() => setTheme(darkMode ? 'light' : 'dark')}
+              title={darkMode ? 'Ativar tema claro' : 'Ativar tema escuro'}
+              aria-label={darkMode ? 'Ativar tema claro' : 'Ativar tema escuro'}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 hover:text-slate-950"
+            >
+              {darkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            </button>
             <button
               type="button"
               onClick={onLogout}
