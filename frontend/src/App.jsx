@@ -2301,7 +2301,7 @@ function AuthenticatedApp({ user, onLogout }) {
           </div>
         </header>
         {easterEggVisible ? (
-          <div className="fixed right-4 top-20 z-30 rounded-md border border-sky-200 bg-white px-4 py-3 text-sm font-semibold text-slate-950 shadow-soft lg:right-6">
+          <div className="fixed right-4 top-20 z-30 rounded-md border border-amber-300 bg-amber-100 px-4 py-3 text-sm font-semibold text-amber-950 shadow-soft lg:right-6">
             você tem medo!
           </div>
         ) : null}
