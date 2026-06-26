@@ -51,6 +51,8 @@ clear_local_maintenance() {
   "clearedAt": "$(date -Is)",
   "updatedAt": "$(date -Is)"
 }
+EOF
+}
 
 path_file_count() {
   local target="$1"
@@ -115,8 +117,6 @@ verify_persistent_snapshot() {
     fi
   done < "$before"
   [ "$failures" -eq 0 ] || exit 73
-}
-EOF
 }
 
 if [ "$BRANCH" != "dev" ]; then

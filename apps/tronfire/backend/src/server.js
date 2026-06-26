@@ -37,6 +37,11 @@ const tronsoftosApiUrl = String(process.env.TRONSOFTOS_API_URL || 'http://host.d
 const defaultProductionAlias = 'erp_tronsoft';
 const fixedBackupFrequencyMinutes = 20;
 const fixedBackupRetentionDays = 30;
+const configuredRunningBackupTtlMinutes = Number(process.env.TRONFIRE_BACKUP_RUNNING_TTL_MINUTES || 360);
+const runningBackupTtlMinutes = Number.isFinite(configuredRunningBackupTtlMinutes)
+  ? Math.max(configuredRunningBackupTtlMinutes, 30)
+  : 360;
+const runningBackupTtlMs = runningBackupTtlMinutes * 60 * 1000;
 
 await app.register(cors, { origin: true, credentials: true });
 await app.register(cookie, { secret: process.env.SESSION_SECRET || 'dev-secret-change-me' });
@@ -655,6 +660,72 @@ async function createAlertOnce(type, severity, message) {
   }
 }
 
+async function backupToolProcesses() {
+  try {
+    const { stdout } = await runFirebirdShellScript('ps -eo pid,args 2>/dev/null || ps aux 2>/dev/null', 10_000);
+    return String(stdout || '')
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(line => /\b(gbak|gzip|nbackup|gfix)\b/i.test(line));
+  } catch {
+    return [];
+  }
+}
+
+function staleRunningBackupWhere(databaseId = null) {
+  const cutoff = new Date(Date.now() - runningBackupTtlMs);
+  return {
+    status: 'RUNNING',
+    ...(databaseId ? { databaseId } : {}),
+    OR: [
+      { startedAt: null },
+      { startedAt: { lt: cutoff } }
+    ]
+  };
+}
+
+async function markStaleRunningBackupsFailed(databaseId = null, reason = 'stale-running-backup-cleanup') {
+  const staleJobs = await prisma.backupJob.findMany({
+    where: staleRunningBackupWhere(databaseId),
+    include: { database: true },
+    orderBy: { startedAt: 'asc' }
+  });
+  if (!staleJobs.length) return [];
+
+  const processes = await backupToolProcesses();
+  if (processes.length) {
+    await createAlertOnce(
+      'BACKUP_RUNNING_STALE_WITH_PROCESS',
+      'WARNING',
+      `Backup RUNNING antigo preservado porque ainda ha processo Firebird ativo (${processes.length})`
+    );
+    return [];
+  }
+
+  const finishedAt = new Date();
+  const updated = [];
+  for (const job of staleJobs) {
+    const ageMinutes = job.startedAt ? Math.round((Date.now() - new Date(job.startedAt).getTime()) / 60000) : null;
+    const message = [
+      `Marcado automaticamente como FAILED: backup RUNNING sem processo ativo por mais de ${runningBackupTtlMinutes} min`,
+      `origem=${reason}`,
+      ageMinutes !== null ? `idade=${ageMinutes} min` : 'idade=desconhecida'
+    ].join(' | ');
+    const currentError = String(job.errorMessage || '').trim();
+    const errorMessage = currentError ? `${currentError}\n${message}` : message;
+    updated.push(await prisma.backupJob.update({
+      where: { id: job.id },
+      data: { status: 'FAILED', finishedAt, errorMessage }
+    }));
+    await createAlertOnce(
+      `BACKUP_RUNNING_ORPHANED_${job.database?.alias || job.databaseId}`,
+      'WARNING',
+      `Backup antigo em andamento foi encerrado automaticamente: ${job.database?.name || job.databaseId}`
+    );
+  }
+  return updated;
+}
+
 function parseJsonSetting(value) {
   try {
     return JSON.parse(value || '{}');
@@ -785,6 +856,7 @@ async function acquireDatabaseOperationLock(req, db, operation, reply, options =
       operation: databaseOperationPayload(current)
     }) && null;
   }
+  await markStaleRunningBackupsFailed(db.id, `before-${operation.toLowerCase()}`);
   const runningBackup = await prisma.backupJob.findFirst({
     where: { databaseId: db.id, status: 'RUNNING' },
     orderBy: { startedAt: 'desc' }
@@ -2134,6 +2206,10 @@ app.get('/api/audit', { preHandler: requireAdmin }, async () => prisma.auditLog.
 app.setErrorHandler((error, req, reply) => {
   req.log.error(error);
   reply.code(error.statusCode || 500).send({ error: error.message || 'Erro interno' });
+});
+
+await markStaleRunningBackupsFailed(null, 'backend-startup').catch(err => {
+  app.log.warn({ err }, 'falha ao limpar backups RUNNING antigos na inicializacao');
 });
 
 await app.listen({ host: '0.0.0.0', port: 8080 });

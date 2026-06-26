@@ -25,6 +25,11 @@ const CLUSTER_LOCK_FILE = process.env.TRONSOFTOS_CLUSTER_LOCK || `${TRONSOFTOS_S
 const FIXED_BACKUP_FREQUENCY_MINUTES = 20;
 const FIXED_BACKUP_RETENTION_DAYS = 30;
 const FIREBIRD_SESSION_RETENTION_DAYS = 30;
+const CONFIGURED_RUNNING_BACKUP_TTL_MINUTES = Number(process.env.TRONFIRE_BACKUP_RUNNING_TTL_MINUTES || 360);
+const RUNNING_BACKUP_TTL_MINUTES = Number.isFinite(CONFIGURED_RUNNING_BACKUP_TTL_MINUTES)
+  ? Math.max(CONFIGURED_RUNNING_BACKUP_TTL_MINUTES, 30)
+  : 360;
+const RUNNING_BACKUP_TTL_MS = RUNNING_BACKUP_TTL_MINUTES * 60 * 1000;
 const FIREBIRD_PROCESS_NAMES = new Set(['fbguard', 'fbserver', 'fb_inet_server', 'fb_smp_server', 'firebird']);
 const METRIC_CONTAINERS = [
   'tronfire_firebird25',
@@ -441,6 +446,73 @@ async function createAlertOnce(type, severity, message) {
   }
 }
 
+async function backupToolProcesses() {
+  try {
+    const { stdout } = await dockerExec(['sh', '-lc', 'ps -eo pid,args 2>/dev/null || ps aux 2>/dev/null'], 10_000);
+    return String(stdout || '')
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(line => /\b(gbak|gzip|nbackup|gfix)\b/i.test(line));
+  } catch {
+    return [];
+  }
+}
+
+function staleRunningBackupWhere(databaseId = null) {
+  const cutoff = new Date(Date.now() - RUNNING_BACKUP_TTL_MS);
+  return {
+    status: 'RUNNING',
+    ...(databaseId ? { databaseId } : {}),
+    OR: [
+      { startedAt: null },
+      { startedAt: { lt: cutoff } }
+    ]
+  };
+}
+
+async function markStaleRunningBackupsFailed(databaseId = null, reason = 'stale-running-backup-cleanup') {
+  const staleJobs = await prisma.backupJob.findMany({
+    where: staleRunningBackupWhere(databaseId),
+    include: { database: true },
+    orderBy: { startedAt: 'asc' }
+  });
+  if (!staleJobs.length) return [];
+
+  const processes = await backupToolProcesses();
+  if (processes.length) {
+    await createAlertOnce(
+      'BACKUP_RUNNING_STALE_WITH_PROCESS',
+      'WARNING',
+      `Backup RUNNING antigo preservado porque ainda ha processo Firebird ativo (${processes.length})`
+    );
+    return [];
+  }
+
+  const finishedAt = new Date();
+  const updated = [];
+  for (const job of staleJobs) {
+    const ageMinutes = job.startedAt ? Math.round((Date.now() - new Date(job.startedAt).getTime()) / 60000) : null;
+    const message = [
+      `Marcado automaticamente como FAILED: backup RUNNING sem processo ativo por mais de ${RUNNING_BACKUP_TTL_MINUTES} min`,
+      `origem=${reason}`,
+      ageMinutes !== null ? `idade=${ageMinutes} min` : 'idade=desconhecida'
+    ].join(' | ');
+    const currentError = String(job.errorMessage || '').trim();
+    const errorMessage = currentError ? `${currentError}\n${message}` : message;
+    updated.push(await prisma.backupJob.update({
+      where: { id: job.id },
+      data: { status: 'FAILED', finishedAt, errorMessage }
+    }));
+    await createAlertOnce(
+      `BACKUP_RUNNING_ORPHANED_${job.database?.alias || job.databaseId}`,
+      'WARNING',
+      `Backup antigo em andamento foi encerrado automaticamente: ${job.database?.name || job.databaseId}`
+    );
+    console.warn(`[worker] backup RUNNING antigo marcado como FAILED: ${job.id} ${job.database?.alias || job.databaseId}`);
+  }
+  return updated;
+}
+
 async function collectContainerMetrics() {
   if (!METRIC_CONTAINERS.length) return;
   try {
@@ -847,6 +919,7 @@ async function runAutomaticBackups() {
         break;
       }
       await cleanupRetention(db);
+      await markStaleRunningBackupsFailed(db.id, 'before-automatic-backup');
       const running = await prisma.backupJob.count({ where: { databaseId: db.id, status: 'RUNNING' } });
       if (running > 0) continue;
       const frequencyMs = FIXED_BACKUP_FREQUENCY_MINUTES * 60 * 1000;
@@ -880,6 +953,7 @@ async function checkDatabases() {
     try {
       const currentDb = await clearExpiredDatabaseOperation(db);
       if (databaseOperationActive(currentDb)) continue;
+      await markStaleRunningBackupsFailed(db.id, 'before-database-check');
       const runningBackup = await prisma.backupJob.count({ where: { databaseId: db.id, status: 'RUNNING' } });
       if (runningBackup > 0) continue;
       const logPath = `/firebird/logs/check_${db.alias}.log`;
@@ -929,6 +1003,7 @@ cron.schedule('* * * * *', async () => {
 
 console.log('[worker] TronFire worker iniciado');
 setTimeout(() => {
+  markStaleRunningBackupsFailed(null, 'worker-startup').catch(err => console.error('[worker] stale backup cleanup error', err.message));
   collectMetrics().catch(err => console.error('[worker] initial metrics error', err.message));
   collectFirebirdSessionHistory().catch(err => console.error('[worker] initial session history error', err.message));
 }, 5000);
