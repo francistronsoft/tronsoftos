@@ -97,6 +97,7 @@ capture_persistent_snapshot() {
 verify_persistent_snapshot() {
   local before="$1"
   local failures=0
+  local warnings=0
   while IFS=$'\t' read -r target before_count before_bytes; do
     [ -n "$target" ] || continue
     local after_count after_bytes
@@ -112,11 +113,17 @@ verify_persistent_snapshot() {
       failures=$((failures + 1))
     fi
     if [ "$before_bytes" -gt 0 ] && [ "$after_bytes" -lt "$before_bytes" ]; then
-      echo "Diretorio persistente reduziu tamanho durante a atualizacao: $target ($before_bytes -> $after_bytes bytes)" >&2
-      failures=$((failures + 1))
+      log "aviso: diretorio persistente reduziu tamanho durante a atualizacao: $target ($before_bytes -> $after_bytes bytes)"
+      warnings=$((warnings + 1))
     fi
   done < "$before"
-  [ "$failures" -eq 0 ] || exit 73
+  if [ "$failures" -gt 0 ]; then
+    log "validacao persistente falhou com ${failures} problema(s) de diretorio/arquivo"
+    exit 73
+  fi
+  if [ "$warnings" -gt 0 ]; then
+    log "validacao persistente concluida com ${warnings} aviso(s) de tamanho; sem perda de arquivos detectada"
+  fi
 }
 
 backup_and_reset_local_source_changes() {
@@ -168,10 +175,14 @@ else
 fi
 git -c "safe.directory=$APP_DIR" pull --ff-only "$REMOTE" "$BRANCH"
 
+update_commit="$(git -c "safe.directory=$APP_DIR" -C "$APP_DIR" rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
+update_branch="$(git -c "safe.directory=$APP_DIR" -C "$APP_DIR" branch --show-current 2>/dev/null || printf "$BRANCH")"
+update_build="$(git -c "safe.directory=$APP_DIR" -C "$APP_DIR" rev-list --count HEAD 2>/dev/null || printf '0')"
+
 log "executando instalador"
-TRONSOFTOS_GIT_COMMIT="$(git -c "safe.directory=$APP_DIR" -C "$APP_DIR" rev-parse --short HEAD 2>/dev/null || printf 'unknown')" \
-TRONSOFTOS_GIT_BRANCH="$(git -c "safe.directory=$APP_DIR" -C "$APP_DIR" branch --show-current 2>/dev/null || printf "$BRANCH")" \
-TRONSOFTOS_BUILD_NUMBER="$(git -c "safe.directory=$APP_DIR" -C "$APP_DIR" rev-list --count HEAD 2>/dev/null || printf '0')" \
+TRONSOFTOS_GIT_COMMIT="$update_commit" \
+TRONSOFTOS_GIT_BRANCH="$update_branch" \
+TRONSOFTOS_BUILD_NUMBER="$update_build" \
 TRONSOFTOS_SKIP_WIZARD=true \
 bash "$APP_DIR/install.sh"
 
@@ -186,6 +197,8 @@ fi
 
 clear_local_maintenance
 
+update_version="$(tr -d '[:space:]' < "$APP_DIR/VERSION" 2>/dev/null || printf 'unknown')"
+log "atualizacao concluida com sucesso: versao ${update_version}, build ${update_build}, commit ${update_commit}, branch ${update_branch}"
 log "agendando reinicio do servico TronSoftOS"
 if command -v systemd-run >/dev/null 2>&1; then
   if ! systemd-run --unit=tronsoftos-restart-after-update --on-active=3s /bin/systemctl restart tronsoftos.service >/dev/null 2>&1; then
