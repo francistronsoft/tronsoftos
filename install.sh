@@ -237,9 +237,9 @@ if [ ! -f "$APP_DIR/config/managed-apps.json" ]; then
 fi
 
 VERSION_VALUE="$(cat "$APP_DIR/VERSION" 2>/dev/null || printf '0.1.0')"
-GIT_COMMIT="$(git -C "$APP_DIR" rev-parse --short HEAD 2>/dev/null || printf 'unknown')"
-GIT_BRANCH="$(git -C "$APP_DIR" branch --show-current 2>/dev/null || printf 'unknown')"
-BUILD_NUMBER="$(git -C "$APP_DIR" rev-list --count HEAD 2>/dev/null || printf '0')"
+GIT_COMMIT="${TRONSOFTOS_GIT_COMMIT:-$(git -C "$APP_DIR" rev-parse --short HEAD 2>/dev/null || printf 'unknown')}"
+GIT_BRANCH="${TRONSOFTOS_GIT_BRANCH:-$(git -C "$APP_DIR" branch --show-current 2>/dev/null || printf 'unknown')}"
+BUILD_NUMBER="${TRONSOFTOS_BUILD_NUMBER:-$(git -C "$APP_DIR" rev-list --count HEAD 2>/dev/null || printf '0')}"
 cat > "$APP_DIR/state/build-info.json" <<EOF
 {
   "version": "$VERSION_VALUE",
