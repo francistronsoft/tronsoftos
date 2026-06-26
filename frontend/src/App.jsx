@@ -2210,7 +2210,7 @@ function AuthenticatedApp({ user, onLogout }) {
   function activateEasterEgg() {
     setEasterEggClicks(current => {
       const next = current + 1;
-      if (next >= 5) {
+      if (next >= 10) {
         setEasterEggVisible(true);
         return 0;
       }
