@@ -120,20 +120,20 @@ verify_persistent_snapshot() {
 }
 
 backup_and_reset_local_source_changes() {
-  if git diff --quiet && git diff --cached --quiet; then
+  if git -c "safe.directory=$APP_DIR" diff --quiet && git -c "safe.directory=$APP_DIR" diff --cached --quiet; then
     return 0
   fi
 
   local backup_dir
   backup_dir="$STORAGE_ROOT/update-backups/local-changes-$(date +%Y%m%d%H%M%S)"
   mkdir -p "$backup_dir"
-  git status --porcelain=v1 > "$backup_dir/git-status.txt" || true
-  git diff > "$backup_dir/local-changes.patch" || true
-  git diff --cached > "$backup_dir/staged-changes.patch" || true
+  git -c "safe.directory=$APP_DIR" status --porcelain=v1 > "$backup_dir/git-status.txt" || true
+  git -c "safe.directory=$APP_DIR" diff > "$backup_dir/local-changes.patch" || true
+  git -c "safe.directory=$APP_DIR" diff --cached > "$backup_dir/staged-changes.patch" || true
 
   log "alteracoes locais no codigo gerenciado foram salvas em ${backup_dir}"
   log "restaurando codigo gerenciado para permitir fast-forward"
-  git reset --hard HEAD
+  git -c "safe.directory=$APP_DIR" reset --hard HEAD
 }
 
 if [ "$BRANCH" != "dev" ]; then
@@ -160,18 +160,18 @@ fi
 
 log "buscando branch ${BRANCH}"
 backup_and_reset_local_source_changes
-git fetch "$REMOTE" "${BRANCH}:refs/remotes/${REMOTE}/${BRANCH}"
-if git show-ref --verify --quiet "refs/heads/${BRANCH}"; then
-  git switch "$BRANCH"
+git -c "safe.directory=$APP_DIR" fetch "$REMOTE" "${BRANCH}:refs/remotes/${REMOTE}/${BRANCH}"
+if git -c "safe.directory=$APP_DIR" show-ref --verify --quiet "refs/heads/${BRANCH}"; then
+  git -c "safe.directory=$APP_DIR" switch "$BRANCH"
 else
-  git switch -c "$BRANCH" --track "${REMOTE}/${BRANCH}"
+  git -c "safe.directory=$APP_DIR" switch -c "$BRANCH" --track "${REMOTE}/${BRANCH}"
 fi
-git pull --ff-only "$REMOTE" "$BRANCH"
+git -c "safe.directory=$APP_DIR" pull --ff-only "$REMOTE" "$BRANCH"
 
 log "executando instalador"
-TRONSOFTOS_GIT_COMMIT="$(git -C "$APP_DIR" rev-parse --short HEAD 2>/dev/null || printf 'unknown')" \
-TRONSOFTOS_GIT_BRANCH="$(git -C "$APP_DIR" branch --show-current 2>/dev/null || printf "$BRANCH")" \
-TRONSOFTOS_BUILD_NUMBER="$(git -C "$APP_DIR" rev-list --count HEAD 2>/dev/null || printf '0')" \
+TRONSOFTOS_GIT_COMMIT="$(git -c "safe.directory=$APP_DIR" -C "$APP_DIR" rev-parse --short HEAD 2>/dev/null || printf 'unknown')" \
+TRONSOFTOS_GIT_BRANCH="$(git -c "safe.directory=$APP_DIR" -C "$APP_DIR" branch --show-current 2>/dev/null || printf "$BRANCH")" \
+TRONSOFTOS_BUILD_NUMBER="$(git -c "safe.directory=$APP_DIR" -C "$APP_DIR" rev-list --count HEAD 2>/dev/null || printf '0')" \
 TRONSOFTOS_SKIP_WIZARD=true \
 bash "$APP_DIR/install.sh"
 
