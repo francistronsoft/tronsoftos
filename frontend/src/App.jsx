@@ -2233,10 +2233,15 @@ function AuthenticatedApp({ user, onLogout }) {
     <div className={`min-h-screen bg-slate-100 text-slate-950 ${darkMode ? 'theme-dark' : 'theme-light'}`}>
       <aside className="fixed inset-y-0 left-0 z-20 hidden w-64 border-r border-panel-800 bg-panel-950 text-white lg:block">
         <div className="flex h-16 items-center gap-3 border-b border-white/10 px-5">
-          <div className="relative h-9 w-9 rounded-full border-2 border-sky-300">
+          <button
+            type="button"
+            onClick={activateEasterEgg}
+            aria-label="Status interno"
+            className="relative h-9 w-9 shrink-0 rounded-full border-2 border-sky-300 transition hover:border-sky-200 focus:outline-none focus:ring-2 focus:ring-sky-300/60"
+          >
             <span className="absolute left-1/2 top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-sky-400" />
             <span className="absolute left-1 top-1 h-5 w-5 rounded-full border-l-2 border-t-2 border-sky-300" />
-          </div>
+          </button>
           <div>
             <div className="text-lg font-semibold leading-none tracking-normal">
               <span className="text-slate-100">tron</span><span className="text-sky-300">soft</span><span className="ml-1 font-black text-white">OS</span>
