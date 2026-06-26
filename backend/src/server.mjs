@@ -3238,7 +3238,7 @@ function startTronsoftosUpdate(body = {}) {
     clearedAt: null
   });
 
-  const cmd = privilegedCommandArgs('bash', [script, branch]);
+  const cmd = privilegedCommandArgs('/usr/bin/bash', [script, branch]);
   const env = {
     ...process.env,
     TRONSOFTOS_APP_DIR: appRoot,
