@@ -151,7 +151,7 @@ fi
 git pull --ff-only "$REMOTE" "$BRANCH"
 
 log "executando instalador"
-bash "$APP_DIR/install.sh"
+TRONSOFTOS_SKIP_WIZARD=true bash "$APP_DIR/install.sh"
 
 log "validando preservacao de bancos, backups, historicos e configuracoes"
 verify_persistent_snapshot "$snapshot_file"
