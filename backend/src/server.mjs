@@ -1667,6 +1667,26 @@ async function fetchHealth(url) {
   }
 }
 
+async function fetchJson(url, timeoutMs = 2500) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    const text = await response.text();
+    let body = null;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      body = null;
+    }
+    return { ok: response.ok, status: response.status, url, body };
+  } catch (err) {
+    return { ok: false, status: 'offline', url, error: err.message, body: null };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function tronfireAlerts() {
   const token = internalTokenValue();
   if (!token) return [];
@@ -1982,6 +2002,64 @@ function clusterStatus() {
     },
     sync: haSyncStatus(),
     failover: haFailoverStatus()
+  };
+}
+
+async function localVipPresence(vip) {
+  if (!vip) return { present: false, interface: null, cidr: null };
+  try {
+    const { stdout } = await run('ip', ['-j', '-4', 'addr', 'show', 'scope', 'global'], { timeout: 10_000, maxBuffer: 1024 * 1024 * 2 });
+    const interfaces = JSON.parse(stdout);
+    for (const item of interfaces) {
+      const match = (item.addr_info || []).find(addr => addr.local === vip);
+      if (match) {
+        return {
+          present: true,
+          interface: item.ifname || null,
+          cidr: `${match.local}/${match.prefixlen}`
+        };
+      }
+    }
+  } catch (err) {
+    return { present: false, interface: null, cidr: null, error: err.message };
+  }
+  return { present: false, interface: null, cidr: null };
+}
+
+async function vipStatus(cluster) {
+  const vip = cluster.vip || process.env.HA_VIP || null;
+  const port = process.env.TRONSOFTOS_PORT || '8080';
+  const local = await localVipPresence(vip);
+  const healthUrl = vip ? `http://${vip}:${port}/health` : null;
+  const health = healthUrl ? await fetchJson(healthUrl, 3000) : { ok: null, status: 'not-configured', url: null, body: null };
+  const node = health.body?.node || {};
+  const expectedLocalPresence = cluster.nodeRole === 'primary';
+  const healthRole = node.nodeRole || null;
+  const ok = Boolean(vip)
+    && health.ok === true
+    && healthRole === 'primary'
+    && (cluster.nodeRole === 'primary' ? local.present === true : local.present === false);
+  return {
+    vip,
+    port: Number(port) || port,
+    healthUrl,
+    localPresent: local.present === true,
+    localInterface: local.interface,
+    localCidr: local.cidr,
+    localError: local.error || null,
+    expectedLocalPresence,
+    reachable: health.ok === true,
+    status: health.status,
+    ok,
+    holder: health.body ? {
+      nodeName: node.nodeName || null,
+      nodeRole: node.nodeRole || null,
+      nodeId: node.nodeId || null,
+      clusterId: node.clusterId || null,
+      buildNumber: health.body.buildNumber || null,
+      version: health.body.version || null
+    } : null,
+    error: health.error || null
   };
 }
 
@@ -2506,6 +2584,7 @@ function exportPairingFile(reply) {
 async function dashboard() {
   const [apps, localTronfireHa, systemMetrics] = await Promise.all([appsStatus(), tronfireHaStatus(), tronfireSystemMetrics()]);
   const cluster = clusterStatus();
+  cluster.vipStatus = await vipStatus(cluster);
   const identity = cluster.identity || nodeIdentity();
   if (cluster.mode === 'ha' && cluster.sync?.standbyHost) {
     cluster.standbyHealth = await remoteTronsoftosHealth(cluster.sync.standbyHost);
@@ -3106,7 +3185,7 @@ function maintenanceExpiresAt(timeoutMinutes = UPDATE_MAINTENANCE_TIMEOUT_MINUTE
 function failoverMaintenanceBlock() {
   const state = maintenanceState();
   const mode = String(state.mode || '');
-  const active = state.active === true && ['failover-update', 'update', 'ha-update'].includes(mode);
+  const active = state.active === true && ['failover-update', 'update', 'ha-update', 'failback'].includes(mode);
   if (!active) return { active: false };
   const expiresAtMs = state.expiresAt ? new Date(state.expiresAt).getTime() : 0;
   const expired = expiresAtMs > 0 && Date.now() > expiresAtMs;
@@ -3142,6 +3221,120 @@ function clearFailoverMaintenanceBlock(body = {}) {
   });
 }
 
+function assertHostLabel(value, label) {
+  const host = String(value || '').trim();
+  if (!host) throw new Error(`${label} obrigatorio`);
+  if (!/^[A-Za-z0-9_.:-]{1,120}$/.test(host)) throw new Error(`${label} invalido`);
+  return host;
+}
+
+function failbackStrategyInfo(strategy) {
+  return {
+    sync_from_active: {
+      label: 'Sincronizar a partir do no ativo atual',
+      productionLocked: true,
+      recommended: true,
+      description: 'Usa quem esta respondendo pelo VIP agora como fonte da verdade antes de liberar producao.'
+    },
+    manual_database: {
+      label: 'Preparar failback e aguardar banco manual',
+      productionLocked: true,
+      recommended: false,
+      description: 'Organiza o HA em modo protegido. O tecnico sobe/restaura o banco e depois executa validacao final.'
+    },
+    force_selected_database: {
+      label: 'Usar banco atual do servidor escolhido',
+      productionLocked: false,
+      recommended: false,
+      dangerous: true,
+      description: 'Avancado. Assume que o banco ja presente no servidor escolhido e o correto.'
+    }
+  }[strategy] || null;
+}
+
+async function failbackStatus() {
+  const cluster = clusterStatus();
+  cluster.vipStatus = await vipStatus(cluster);
+  const network = await hostNetworkStatus();
+  const currentInterface = network.defaultInterface || network.interfaces?.[0]?.name || null;
+  const currentAddress = network.interfaces
+    ?.find(item => item.name === currentInterface)?.addresses?.[0]
+    || network.interfaces?.[0]?.addresses?.[0]
+    || null;
+  const sync = publicHaSyncSettings();
+  return {
+    generatedAt: new Date().toISOString(),
+    cluster,
+    guard: clusterGuard(),
+    maintenance: maintenanceState(),
+    sync,
+    local: {
+      nodeName: cluster.nodeName,
+      nodeRole: cluster.nodeRole,
+      address: currentAddress?.address || null,
+      cidr: currentAddress?.cidr || null,
+      interface: currentInterface
+    },
+    remote: {
+      address: sync.standbyHost || null,
+      sshUser: sync.sshUser || 'tronsoft',
+      sshPort: sync.sshPort || 22
+    },
+    strategies: ['sync_from_active', 'manual_database', 'force_selected_database'].map(id => ({ id, ...failbackStrategyInfo(id) }))
+  };
+}
+
+async function prepareFailback(body = {}) {
+  const strategy = String(body.strategy || '').trim();
+  const strategyInfo = failbackStrategyInfo(strategy);
+  if (!strategyInfo) throw new Error('estrategia de banco invalida');
+  const confirmation = strategy === 'force_selected_database'
+    ? 'USAR BANCO DO SERVIDOR ESCOLHIDO'
+    : 'PREPARAR FAILBACK';
+  requireConfirmation(body, confirmation);
+
+  const desiredPrimaryHost = assertHostLabel(body.desiredPrimaryHost, 'primary desejado');
+  const desiredStandbyHost = assertHostLabel(body.desiredStandbyHost, 'standby desejado');
+  if (desiredPrimaryHost === desiredStandbyHost) throw new Error('primary e standby desejados devem ser diferentes');
+
+  const status = await failbackStatus();
+  const vipHolder = status.cluster.vipStatus?.holder || null;
+  const state = writeMaintenanceState({
+    active: true,
+    mode: 'failback',
+    reason: `Failback preparado: ${desiredPrimaryHost} sera primary; estrategia ${strategy}`,
+    standbyHost: desiredStandbyHost,
+    startedAt: new Date().toISOString(),
+    expiresAt: maintenanceExpiresAt(Number(body.timeoutMinutes || 240)),
+    clearedAt: null,
+    failback: {
+      desiredPrimaryHost,
+      desiredStandbyHost,
+      strategy,
+      strategyLabel: strategyInfo.label,
+      productionLocked: strategyInfo.productionLocked !== false,
+      vip: status.cluster.vip || null,
+      vipHolder,
+      preparedBy: 'tronsoftos',
+      requiresDatabaseValidation: strategy !== 'force_selected_database',
+      nextSteps: strategy === 'manual_database'
+        ? ['Subir/restaurar o banco manualmente no primary desejado.', 'Executar validacao final do banco.', 'Liberar producao somente apos health e banco OK.']
+        : strategy === 'sync_from_active'
+        ? ['Sincronizar dados do no ativo atual para o primary desejado.', 'Validar banco no destino.', 'Mover/liberar VIP no primary desejado.']
+        : ['Confirmar auditoria de uso do banco atual.', 'Mover/liberar VIP no primary desejado.', 'Ressincronizar o outro no como standby.']
+    }
+  });
+  const lock = blockClusterPromotion(`Failback em preparacao para ${desiredPrimaryHost}; producao ${strategyInfo.productionLocked === false ? 'pode ser liberada apos confirmacao avancada' : 'bloqueada ate validacao'}`);
+  appendEvent('HA_FAILBACK_PREPARED', {
+    desiredPrimaryHost,
+    desiredStandbyHost,
+    strategy,
+    vip: status.cluster.vip || null,
+    vipHolder
+  });
+  return { ok: true, state, lock, status: await failbackStatus() };
+}
+
 async function maintenanceStatus() {
   let localKeepalived = 'unknown';
   try {
@@ -3150,9 +3343,11 @@ async function maintenanceStatus() {
   } catch (err) {
     localKeepalived = String(err.stdout || err.message || 'unknown').trim();
   }
+  const cluster = clusterStatus();
+  cluster.vipStatus = await vipStatus(cluster);
   return {
     generatedAt: new Date().toISOString(),
-    cluster: clusterStatus(),
+    cluster,
     maintenance: maintenanceState(),
     failoverMaintenance: failoverMaintenanceBlock(),
     guard: clusterGuard(),
@@ -3523,6 +3718,8 @@ async function handleApi(req, reply, url) {
   if (req.method === 'POST' && url.pathname === '/api/maintenance/update') return json(reply, 202, { ok: true, job: startTronsoftosUpdate(await readBody(req)) });
   if (req.method === 'POST' && url.pathname === '/api/maintenance/failover-block') return json(reply, 200, writeFailoverMaintenanceBlock(await readBody(req).catch(() => ({}))));
   if (req.method === 'POST' && url.pathname === '/api/maintenance/failover-clear') return json(reply, 200, clearFailoverMaintenanceBlock(await readBody(req).catch(() => ({}))));
+  if (req.method === 'GET' && url.pathname === '/api/maintenance/failback') return json(reply, 200, await failbackStatus());
+  if (req.method === 'POST' && url.pathname === '/api/maintenance/failback/prepare') return json(reply, 200, await prepareFailback(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/maintenance/standby/keepalived/stop') return json(reply, 202, { ok: true, job: startStandbyKeepalived('stop', await readBody(req)) });
   if (req.method === 'POST' && url.pathname === '/api/maintenance/standby/keepalived/start') return json(reply, 202, { ok: true, job: startStandbyKeepalived('start', await readBody(req)) });
   if (req.method === 'POST' && url.pathname === '/api/maintenance/local/keepalived/stop') return json(reply, 202, { ok: true, job: startLocalKeepalived('stop', await readBody(req)) });

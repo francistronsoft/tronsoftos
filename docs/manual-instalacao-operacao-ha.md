@@ -295,6 +295,8 @@ Nesse modelo, o servidor que assumiu producao continua como primary. O antigo pr
 
 So faca se houver necessidade operacional de devolver producao ao servidor original.
 
+Quando disponivel, use `Manutencao > Failback` no TronSoftOS. O assistente mostra quem esta respondendo pelo VIP, registra a topologia desejada e exige uma estrategia de banco antes de preparar a troca. Estrategias que dependem de banco manual deixam a producao em modo protegido ate a validacao final do banco e dos servicos.
+
 1. Confirme que o servidor original esta como standby e `READY`.
 2. Rode sync manual do primary atual para o standby.
 3. Suspenda failover automatico durante a janela, se necessario.

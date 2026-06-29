@@ -65,7 +65,8 @@ const fallbackDashboard = {
     nodeRole: 'primary',
     vip: 'nao configurado',
     lock: null,
-    keepalived: { enabled: false, interface: null, routerId: null }
+    keepalived: { enabled: false, interface: null, routerId: null },
+    vipStatus: null
   },
   apps: [
     {
@@ -133,6 +134,7 @@ function statusClass(status) {
     running: 'bg-green-100 text-green-800 border-green-200',
     primary: 'bg-green-100 text-green-800 border-green-200',
     success: 'bg-green-100 text-green-800 border-green-200',
+    prepared: 'bg-sky-100 text-sky-800 border-sky-200',
     READY: 'bg-green-100 text-green-800 border-green-200',
     critical: 'bg-red-100 text-red-800 border-red-200',
     degraded: 'bg-amber-100 text-amber-800 border-amber-200',
@@ -603,6 +605,11 @@ function ClusterView({ dashboard }) {
   const networkImpact = networkImpactQuery.data || {};
   const sync = syncQuery.data || {};
   const syncStatus = cluster.sync || sync || {};
+  const vipStatus = cluster.vipStatus || {};
+  const vipHolder = vipStatus.holder || {};
+  const vipHolderLabel = vipHolder.nodeName ? `${vipHolder.nodeName}${vipHolder.nodeRole ? ` / ${vipHolder.nodeRole}` : ''}` : (vipStatus.reachable ? 'no sem nome' : 'nao identificado');
+  const vipCardStatus = !vipStatus.vip ? 'disabled' : vipStatus.ok ? 'online' : vipStatus.reachable ? 'warning' : 'offline';
+  const vipLocalExpected = vipStatus.expectedLocalPresence === true ? 'sim' : vipStatus.expectedLocalPresence === false ? 'nao' : '-';
   const [form, setForm] = useState(null);
   const [lockForm, setLockForm] = useState(null);
   const [syncForm, setSyncForm] = useState(null);
@@ -876,6 +883,40 @@ function ClusterView({ dashboard }) {
             </Card>
           </div>
           <div className="grid gap-5 xl:grid-cols-3">
+            <Card title="Dono do VIP" icon={Network} action={<StatusPill value={vipCardStatus} />}>
+              <div className="grid gap-3 text-sm">
+                {[
+                  ['VIP', vipStatus.vip || cluster.vip || 'nao configurado'],
+                  ['Este no possui VIP', vipStatus.localPresent ? 'sim' : 'nao'],
+                  ['Esperado neste no', vipLocalExpected],
+                  ['Interface local', vipStatus.localInterface || '-'],
+                  ['Health pelo VIP', vipStatus.reachable ? vipHolderLabel : 'sem resposta'],
+                  ['Papel pelo VIP', vipHolder.nodeRole || '-']
+                ].map(([label, value]) => (
+                  <div key={label} className="flex items-center justify-between gap-4 border-b border-slate-100 pb-2">
+                    <span className="text-slate-500">{label}</span>
+                    <span className="min-w-0 truncate text-right font-medium text-slate-950">{value}</span>
+                  </div>
+                ))}
+              </div>
+              {!vipStatus.vip ? (
+                <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                  VIP ainda nao configurado para este cluster.
+                </div>
+              ) : vipStatus.ok ? (
+                <div className="mt-4 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">
+                  VIP coerente com o papel atual do no e respondendo como primary.
+                </div>
+              ) : vipStatus.reachable ? (
+                <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                  O VIP respondeu, mas revise se o dono e o papel retornado estao corretos.
+                </div>
+              ) : (
+                <div className="mt-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  O health pelo VIP nao respondeu. Verifique Keepalived, ARP e conectividade local.
+                </div>
+              )}
+            </Card>
             <Card title="Sync HA" icon={RefreshCw} action={<StatusPill value={isSyncReceiver ? 'receptor' : (syncStatus.status || 'disabled')} />}>
               <div className="grid gap-3 text-sm">
                 {(isSyncReceiver ? [
@@ -1809,6 +1850,162 @@ function ConfirmAction({ label, icon: Icon, confirmation, tone = 'slate', disabl
   );
 }
 
+function StrategyOption({ option, selected, onSelect }) {
+  const tone = option.dangerous ? 'border-red-200 bg-red-50' : option.recommended ? 'border-green-200 bg-green-50' : 'border-slate-200 bg-white';
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={`w-full rounded-md border p-3 text-left transition hover:border-slate-300 ${selected ? 'ring-2 ring-slate-900' : ''} ${tone}`}
+    >
+      <div className="flex items-start gap-3">
+        <span className={`mt-1 h-4 w-4 rounded-full border ${selected ? 'border-slate-950 bg-slate-950' : 'border-slate-300 bg-white'}`} />
+        <span className="min-w-0 flex-1">
+          <span className="flex flex-wrap items-center gap-2">
+            <span className="font-medium text-slate-950">{option.label}</span>
+            {option.recommended ? <StatusPill value="online" /> : null}
+            {option.dangerous ? <StatusPill value="critical" /> : null}
+          </span>
+          <span className="mt-1 block text-sm text-slate-600">{option.description}</span>
+        </span>
+      </div>
+    </button>
+  );
+}
+
+function FailbackAssistant({ dashboard, onPrepared }) {
+  const queryClient = useQueryClient();
+  const failbackQuery = useQuery({ queryKey: ['maintenance-failback'], queryFn: () => api('/api/maintenance/failback'), refetchInterval: 8000 });
+  const data = failbackQuery.data || {};
+  const cluster = data.cluster || dashboard.cluster || {};
+  const vipStatus = cluster.vipStatus || {};
+  const holder = vipStatus.holder || {};
+  const strategies = data.strategies || [];
+  const localAddress = data.local?.address || '';
+  const remoteAddress = data.remote?.address || '';
+  const [form, setForm] = useState(null);
+  const values = form || {
+    desiredPrimaryHost: localAddress || '',
+    desiredStandbyHost: remoteAddress || '',
+    strategy: 'sync_from_active',
+    confirmation: ''
+  };
+  const selectedStrategy = strategies.find(item => item.id === values.strategy) || strategies[0] || {};
+  const expectedConfirmation = values.strategy === 'force_selected_database' ? 'USAR BANCO DO SERVIDOR ESCOLHIDO' : 'PREPARAR FAILBACK';
+  const confirmationReady = values.confirmation.trim() === expectedConfirmation;
+  const setValue = (key, value) => setForm(previous => ({ ...(previous || values), [key]: value }));
+  const mutation = useMutation({
+    mutationFn: payload => postApi('/api/maintenance/failback/prepare', payload),
+    onSuccess: result => {
+      queryClient.invalidateQueries({ queryKey: ['maintenance'] });
+      queryClient.invalidateQueries({ queryKey: ['maintenance-failback'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+      onPrepared?.(result);
+    }
+  });
+  const maintenanceFailback = data.maintenance?.mode === 'failback' && data.maintenance?.active ? data.maintenance.failback : null;
+
+  return (
+    <div className="space-y-5">
+      <Card title="Diagnostico do failback" icon={ShieldCheck} action={<StatusPill value={vipStatus.ok ? 'online' : vipStatus.reachable ? 'warning' : 'offline'} />}>
+        <div className="grid gap-5 xl:grid-cols-2">
+          <div className="grid gap-3 text-sm">
+            {[
+              ['VIP', vipStatus.vip || cluster.vip || 'nao configurado'],
+              ['Respondendo por', holder.nodeName ? `${holder.nodeName} / ${holder.nodeRole || '-'}` : vipStatus.reachable ? 'no sem nome' : 'sem resposta'],
+              ['Este no possui VIP', vipStatus.localPresent ? 'sim' : 'nao'],
+              ['No local', `${data.local?.nodeName || cluster.nodeName || '-'} / ${data.local?.nodeRole || cluster.nodeRole || '-'}`],
+              ['IP local', data.local?.cidr || '-'],
+              ['No remoto configurado', remoteAddress || 'nao configurado']
+            ].map(([label, value]) => (
+              <div key={label} className="flex items-center justify-between gap-4 border-b border-slate-100 pb-2">
+                <span className="text-slate-500">{label}</span>
+                <span className="min-w-0 truncate text-right font-medium text-slate-950">{value}</span>
+              </div>
+            ))}
+          </div>
+          <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800">
+            O no que responde pelo VIP agora deve ser tratado como fonte da verdade por padrao. Se o banco for preparado manualmente, a producao permanece bloqueada ate a validacao final.
+          </div>
+        </div>
+      </Card>
+
+      <Card title="Topologia desejada" icon={GitBranch}>
+        <form
+          className="grid gap-4"
+          onSubmit={event => {
+            event.preventDefault();
+            mutation.mutate(values);
+          }}
+        >
+          <div className="grid gap-3 md:grid-cols-2">
+            <Field label="Primary desejado" value={values.desiredPrimaryHost} onChange={value => setValue('desiredPrimaryHost', value)} placeholder="192.168.1.154" />
+            <Field label="Standby desejado" value={values.desiredStandbyHost} onChange={value => setValue('desiredStandbyHost', value)} placeholder="192.168.1.149" />
+          </div>
+          <div>
+            <div className="mb-2 text-xs font-medium uppercase text-slate-500">Estrategia do banco</div>
+            <div className="grid gap-3">
+              {strategies.map(option => (
+                <StrategyOption
+                  key={option.id}
+                  option={option}
+                  selected={values.strategy === option.id}
+                  onSelect={() => setForm(previous => ({ ...(previous || values), strategy: option.id, confirmation: '' }))}
+                />
+              ))}
+            </div>
+          </div>
+          {selectedStrategy.productionLocked !== false ? (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              Esta estrategia prepara o failback em modo protegido. O VIP/producao so deve ser liberado depois da validacao objetiva do banco e dos servicos.
+            </div>
+          ) : (
+            <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              Estrategia avancada: se o outro no recebeu lancamentos enquanto estava ativo, pode haver perda de dados.
+            </div>
+          )}
+          <Field label={`Confirmacao: digite ${expectedConfirmation}`} value={values.confirmation} onChange={value => setValue('confirmation', value)} placeholder={expectedConfirmation} />
+          <div className="flex flex-wrap items-center gap-3">
+            <button disabled={mutation.isPending || !confirmationReady || !values.desiredPrimaryHost || !values.desiredStandbyHost} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
+              <ShieldCheck className="h-4 w-4" />
+              Preparar failback protegido
+            </button>
+            {mutation.isSuccess ? <StatusPill value="prepared" /> : null}
+            {mutation.isError ? <span className="text-sm text-red-700">{mutation.error.message}</span> : null}
+          </div>
+        </form>
+      </Card>
+
+      {maintenanceFailback ? (
+        <Card title="Failback preparado" icon={CheckCircle2} action={<StatusPill value={maintenanceFailback.productionLocked ? 'blocked' : 'warning'} />}>
+          <div className="grid gap-3 text-sm">
+            {[
+              ['Primary desejado', maintenanceFailback.desiredPrimaryHost],
+              ['Standby desejado', maintenanceFailback.desiredStandbyHost],
+              ['Estrategia', maintenanceFailback.strategyLabel],
+              ['Producao bloqueada', maintenanceFailback.productionLocked ? 'sim' : 'nao'],
+              ['Validacao de banco exigida', maintenanceFailback.requiresDatabaseValidation ? 'sim' : 'nao']
+            ].map(([label, value]) => (
+              <div key={label} className="flex items-center justify-between gap-4 border-b border-slate-100 pb-2">
+                <span className="text-slate-500">{label}</span>
+                <span className="text-right font-medium text-slate-950">{value}</span>
+              </div>
+            ))}
+          </div>
+          {maintenanceFailback.nextSteps?.length ? (
+            <div className="mt-4 grid gap-2 text-sm">
+              {maintenanceFailback.nextSteps.map((step, index) => (
+                <div key={`${step}-${index}`} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-slate-700">{step}</div>
+              ))}
+            </div>
+          ) : null}
+        </Card>
+      ) : null}
+    </div>
+  );
+}
+
 function MaintenanceView({ dashboard }) {
   const queryClient = useQueryClient();
   const maintenanceQuery = useQuery({ queryKey: ['maintenance'], queryFn: () => api('/api/maintenance'), refetchInterval: 10000 });
@@ -1835,6 +2032,7 @@ function MaintenanceView({ dashboard }) {
   const run = path => payload => actionMutation.mutate({ path, ...payload });
   const maintenanceTabs = [
     { id: 'ha', label: 'Failover HA', icon: ShieldCheck },
+    { id: 'failback', label: 'Failback', icon: GitBranch },
     { id: 'power', label: 'Energia', icon: Power },
     { id: 'keepalived', label: 'Keepalived', icon: Network },
     { id: 'diagnostics', label: 'Diagnostico', icon: CheckCircle2 },
@@ -1877,6 +2075,8 @@ function MaintenanceView({ dashboard }) {
           {actionMutation.isError ? <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{actionMutation.error.message}</div> : null}
         </Card>
       ) : null}
+
+      {tab === 'failback' ? <FailbackAssistant dashboard={dashboard} /> : null}
 
       {tab === 'power' ? (
         <Card title="Energia do host local" icon={Power} action={<StatusPill value="critico" />}>

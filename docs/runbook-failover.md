@@ -69,6 +69,11 @@ docs/plano-testes-ha-failover.md
 scripts/ha-smoke-test.sh
 ```
 
+Depois de failover, failback ou retorno de manutencao, rode o smoke test nos dois nos. O resultado esperado e:
+
+- no primary: `TRONSOFTOS_NODE_ROLE=primary`, Keepalived `MASTER`, VIP presente e `Health pelo VIP` retornando `primary`.
+- no standby/recovery: `TRONSOFTOS_NODE_ROLE=standby` ou `recovery`, Keepalived `BACKUP`, VIP ausente e `Health pelo VIP` retornando o primary ativo.
+
 Checklist mínimo:
 
 - VIP responde no MASTER.
