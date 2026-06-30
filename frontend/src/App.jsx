@@ -1321,7 +1321,8 @@ function ClusterView({ dashboard }) {
             ['No ativo', guard.activeNode || 'nao definido'],
             ['Pode segurar VIP', guard.canHoldVip ? 'sim' : 'nao'],
             ['Pode servir producao', guard.canServeProduction ? 'sim' : 'nao'],
-            ['Pode promover', guard.canPromote ? 'sim' : 'nao']
+            ['Pode promover', guard.canPromote ? 'sim' : 'nao'],
+            ['Ativacao local', guard.localActivationRequired ? (guard.localActivationValid ? 'valida' : 'pendente') : 'nao exigida']
           ].map(([label, value]) => (
             <div key={label} className="flex items-center justify-between gap-4 border-b border-slate-100 pb-2">
               <span className="text-slate-500">{label}</span>
@@ -1333,7 +1334,7 @@ function ClusterView({ dashboard }) {
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <button type="button" disabled={activateMutation.isPending || (!guard.canPromote && values.deploymentMode === 'ha' && values.nodeRole === 'standby')} onClick={() => activateMutation.mutate(lockValues.reason || 'ativacao manual confirmada no TronSoftOS')} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
             <ShieldCheck className="h-4 w-4" />
-            Promover e ativar este no
+            Promover/ativar este no
           </button>
           <button type="button" disabled={recoveryMutation.isPending} onClick={() => recoveryMutation.mutate(lockValues.reason || 'nó retornou e sera ressincronizado antes de voltar ao cluster')} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
             <XCircle className="h-4 w-4" />

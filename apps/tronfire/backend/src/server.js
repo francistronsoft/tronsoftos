@@ -524,6 +524,107 @@ async function firebirdAttachmentsForDatabase(db) {
   };
 }
 
+function parseInactiveIndexes(stdout) {
+  return String(stdout || '')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line.startsWith('TRONIDX|'))
+    .map(line => {
+      const [indexName, relationName, uniqueFlag, indexType] = line.slice('TRONIDX|'.length).split('|');
+      return {
+        indexName: firebirdAttachmentText(indexName),
+        relationName: firebirdAttachmentText(relationName),
+        unique: Number(uniqueFlag) === 1,
+        type: Number(indexType) === 1 ? 'DESCENDING' : 'ASCENDING'
+      };
+    })
+    .filter(item => item.indexName);
+}
+
+async function inactiveIndexesForDatabase(db) {
+  const databasePath = effectiveDatabasePath(db);
+  const connect = firebirdDbConnect(databasePath);
+  const firebirdBin = process.env.FIREBIRD_BIN || '/usr/local/firebird/bin';
+  const password = process.env.FIREBIRD_PASSWORD || 'masterkey';
+  const sql = [
+    'SET HEADING OFF;',
+    'SET LIST OFF;',
+    'SELECT',
+    "  'TRONIDX|' ||",
+    "  COALESCE(REPLACE(TRIM(RDB$INDEX_NAME), '|', '/'), '') || '|' ||",
+    "  COALESCE(REPLACE(TRIM(RDB$RELATION_NAME), '|', '/'), '') || '|' ||",
+    "  COALESCE(CAST(RDB$UNIQUE_FLAG AS VARCHAR(5)), '') || '|' ||",
+    "  COALESCE(CAST(RDB$INDEX_TYPE AS VARCHAR(5)), '')",
+    'FROM RDB$INDICES',
+    'WHERE COALESCE(RDB$INDEX_INACTIVE, 0) = 1',
+    'ORDER BY RDB$RELATION_NAME, RDB$INDEX_NAME;',
+    'COMMIT;',
+    'QUIT;'
+  ].join('\n');
+  const cmd = [
+    `printf %s ${shQuote(`${sql}\n`)}`,
+    '|',
+    shQuote(`${firebirdBin}/isql`),
+    '-q',
+    '-user SYSDBA',
+    `-password ${shQuote(password)}`,
+    shQuote(connect)
+  ].join(' ');
+  const out = await runFirebirdShellScript(cmd, 60_000);
+  const inactiveIndexes = parseInactiveIndexes(out.stdout);
+  return {
+    databaseId: db.id,
+    databaseName: db.name,
+    databaseAlias: db.alias,
+    pathRole: databasePath === db.filePath ? 'production' : 'standby_read_only',
+    total: inactiveIndexes.length,
+    checkedAt: new Date().toISOString(),
+    inactiveIndexes
+  };
+}
+
+async function refreshInactiveIndexAlert(db) {
+  const type = `DATABASE_INACTIVE_INDEXES_${db.alias}`;
+  const health = await inactiveIndexesForDatabase(db);
+  if (health.total > 0) {
+    const sample = health.inactiveIndexes.slice(0, 5).map(item => `${item.relationName}.${item.indexName}`).join(', ');
+    const suffix = health.total > 5 ? ` e mais ${health.total - 5}` : '';
+    const message = `Banco ${db.name} tem ${health.total} indice(s) Firebird inativo(s): ${sample}${suffix}. Recrie/ative indices antes de liberar producao.`;
+    const existing = await prisma.alert.findFirst({ where: { type, resolved: false } });
+    if (existing) {
+      await prisma.alert.update({ where: { id: existing.id }, data: { severity: 'WARNING', message } });
+    } else {
+      await prisma.alert.create({ data: { type, severity: 'WARNING', message } });
+    }
+  } else {
+    await resolveActiveAlertsByType(type);
+  }
+  return health;
+}
+
+async function refreshInactiveIndexAlertsForActiveDatabases() {
+  const dbs = await prisma.managedDatabase.findMany({
+    where: { type: { not: 'ARQUIVADO' } },
+    orderBy: [{ isPrimary: 'desc' }, { name: 'asc' }]
+  });
+  const results = [];
+  for (const db of dbs) {
+    try {
+      results.push(await refreshInactiveIndexAlert(db));
+    } catch (err) {
+      results.push({
+        databaseId: db.id,
+        databaseName: db.name,
+        databaseAlias: db.alias,
+        total: null,
+        checkedAt: new Date().toISOString(),
+        error: shellErrorText(err)
+      });
+    }
+  }
+  return results;
+}
+
 function firebirdHistoryRange(query = {}) {
   const now = new Date();
   const range = ['day', 'week', 'month'].includes(query.range) ? query.range : 'day';
@@ -658,6 +759,10 @@ async function createAlertOnce(type, severity, message) {
   if (!existing) {
     await prisma.alert.create({ data: { type, severity, message } });
   }
+}
+
+async function resolveActiveAlertsByType(type) {
+  await prisma.alert.updateMany({ where: { type, resolved: false }, data: { resolved: true } });
 }
 
 async function backupToolProcesses() {
@@ -1213,12 +1318,13 @@ app.get('/api/settings/google-drive/oauth/callback', async (req, reply) => {
 app.get('/api/preflight', { preHandler: requireAuth }, async () => runPreflight());
 
 app.get('/api/dashboard', { preHandler: requireAuth }, async (req) => {
-  const [dbs, alerts, backups, metrics] = await Promise.all([
+  const [dbs, backups, metrics] = await Promise.all([
     prisma.managedDatabase.findMany({ orderBy: [{ isPrimary: 'desc' }, { name: 'asc' }] }),
-    prisma.alert.findMany({ where: { resolved: false }, orderBy: { createdAt: 'desc' }, take: 5 }),
     prisma.backupJob.findMany({ orderBy: { createdAt: 'desc' }, take: 5, include: { database: true } }),
     loadDashboardMetrics(reqQueryRange(req))
   ]);
+  const indexHealth = await refreshInactiveIndexAlertsForActiveDatabases();
+  const activeAlerts = await prisma.alert.findMany({ where: { resolved: false }, orderBy: { createdAt: 'desc' }, take: 5 });
   const productionDatabase = dbs.find(db => db.isPrimary) || dbs.find(db => db.type === 'PRODUCAO') || null;
   let productionConnections = null;
   if (productionDatabase) {
@@ -1237,10 +1343,11 @@ app.get('/api/dashboard', { preHandler: requireAuth }, async (req) => {
   }
   return {
     databases: dbs,
-    alerts,
+    alerts: activeAlerts,
     backups: backups.map(j => ({ ...j, backupSize: j.backupSize?.toString() })),
     metrics,
     productionConnections,
+    indexHealth,
     ha: { deploymentMode, nodeRole }
   };
 });
@@ -1272,6 +1379,7 @@ app.get('/api/alerts', { preHandler: requireAuth }, async (req) => {
 
 app.get('/api/internal/alerts', async (req) => {
   assertInternalTronsoftos(req);
+  await refreshInactiveIndexAlertsForActiveDatabases();
   return prisma.alert.findMany({ where: { resolved: false }, orderBy: { createdAt: 'desc' }, take: 20 });
 });
 
@@ -1515,9 +1623,10 @@ app.post('/api/databases/:id/validate', { preHandler: requireOperator }, async (
   const targetPath = effectiveDatabasePath(db);
   try {
     await runFirebirdShellScript(`test -f ${shQuote(targetPath)} && ${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h ${shQuote(targetPath)} >/tmp/tronfire_gstat.txt 2>&1`, 120000);
+    const indexHealth = await refreshInactiveIndexAlert(db);
     const updated = await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ONLINE', lastCheckAt: new Date() } });
     await audit(req, 'DATABASE_VALIDATED', { entityType: 'database', entityId: db.id });
-    return updated;
+    return { ...updated, indexHealth };
   } catch (err) {
     await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ERROR', lastCheckAt: new Date() } });
     return { ok: false, error: err.message };

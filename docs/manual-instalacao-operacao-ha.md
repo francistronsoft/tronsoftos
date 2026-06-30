@@ -243,6 +243,12 @@ Enquanto a operacao protegida estiver ativa:
 
 Quando a migracao ou restore termina com sucesso, o banco volta para uso e o standby fica `PENDING`. Em seguida, gere ou aguarde um novo backup validado, execute o Sync HA e confirme que o standby voltou para `READY`. So depois disso o banco deve ser considerado pronto para failover.
 
+### Alerta De Indices Inativos
+
+Algumas manutencoes Firebird podem deixar indices inativos se a recriacao/ativacao nao terminar corretamente. O TronFire consulta `RDB$INDICES` e cria alerta `DATABASE_INACTIVE_INDEXES_<alias>` quando encontra `RDB$INDEX_INACTIVE = 1`.
+
+Esse alerta indica risco de lentidao forte no ERP. Antes de liberar producao, recrie ou reative os indices indicados e valide novamente o banco pelo TronFire; quando nao houver mais indices inativos, o alerta e resolvido automaticamente.
+
 ## Queda de Energia no Local
 
 Quando a energia voltar:

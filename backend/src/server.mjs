@@ -20,6 +20,7 @@ const versionPath = path.join(appRoot, 'VERSION');
 const buildInfoPath = process.env.TRONSOFTOS_BUILD_INFO || path.join(stateDir, 'build-info.json');
 const nodeIdentityPath = process.env.TRONSOFTOS_NODE_IDENTITY || path.join(stateDir, 'node-identity.json');
 const clusterLockPath = process.env.TRONSOFTOS_CLUSTER_LOCK || path.join(stateDir, 'cluster-lock.json');
+const clusterActivationPath = process.env.TRONSOFTOS_CLUSTER_ACTIVATION || path.join(stateDir, 'cluster-activation.json');
 const clusterSecretsPath = process.env.TRONSOFTOS_CLUSTER_SECRETS || path.join(stateDir, 'cluster-secrets.env');
 const eventLogPath = process.env.TRONSOFTOS_EVENT_LOG || path.join(stateDir, 'events.jsonl');
 const smtpSettingsPath = process.env.TRONSOFTOS_SMTP_SETTINGS || path.join(stateDir, 'smtp-settings.json');
@@ -328,6 +329,61 @@ function writeClusterLock(body) {
   return next;
 }
 
+function currentBootId() {
+  try {
+    return fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+  } catch {
+    return process.env.TRONSOFTOS_BOOT_ID || '';
+  }
+}
+
+function clusterActivation() {
+  return readJson(clusterActivationPath, null);
+}
+
+function writeClusterActivation(identity, lock, reason = '') {
+  ensureStateDir();
+  const activation = {
+    cluster: identity.clusterId,
+    nodeName: identity.nodeName,
+    nodeRole: identity.nodeRole,
+    activeNode: lock.active_node || identity.nodeName,
+    bootId: currentBootId(),
+    reason: String(reason || lock.reason || '').trim(),
+    updatedAt: new Date().toISOString()
+  };
+  fs.writeFileSync(clusterActivationPath, `${JSON.stringify(activation, null, 2)}\n`, { mode: 0o600 });
+  appendEvent('CLUSTER_LOCAL_ACTIVATION_RECORDED', {
+    cluster: activation.cluster,
+    nodeName: activation.nodeName,
+    nodeRole: activation.nodeRole,
+    activeNode: activation.activeNode,
+    reason: activation.reason
+  });
+  return activation;
+}
+
+function clearClusterActivation(reason = '') {
+  try {
+    fs.rmSync(clusterActivationPath, { force: true });
+  } catch {}
+  appendEvent('CLUSTER_LOCAL_ACTIVATION_CLEARED', { reason: String(reason || '').trim() });
+}
+
+function localActivationValid(identity, activeNode) {
+  const activation = clusterActivation();
+  const bootId = currentBootId();
+  const valid = Boolean(
+    activation
+    && activation.cluster === identity.clusterId
+    && activation.nodeName === identity.nodeName
+    && activation.nodeRole === 'primary'
+    && activation.activeNode === activeNode
+    && (!bootId || activation.bootId === bootId)
+  );
+  return { valid, activation, bootId };
+}
+
 function blockClusterPromotion(reason = '') {
   return writeClusterLock({ ...clusterLock(), allow_promotion: false, reason: String(reason || 'promocao bloqueada').trim() });
 }
@@ -340,7 +396,11 @@ function clusterGuard() {
   const thisNode = identity.nodeName;
   const isHa = mode === 'ha';
   const noActiveDefined = !activeNode;
-  const isLocalActive = !isHa || activeNode === thisNode || (noActiveDefined && identity.nodeRole === 'primary');
+  const effectiveActiveNode = activeNode || (identity.nodeRole === 'primary' ? thisNode : '');
+  const activation = localActivationValid(identity, effectiveActiveNode);
+  const primaryActivationRequired = isHa && identity.nodeRole === 'primary';
+  const primaryActivationOk = !primaryActivationRequired || activation.valid;
+  const isLocalActive = !isHa || ((activeNode === thisNode || (noActiveDefined && identity.nodeRole === 'primary')) && primaryActivationOk);
   const returnedFormerPrimary = isHa && identity.nodeRole === 'primary' && activeNode && activeNode !== thisNode;
   const standbyWaiting = isHa && ['standby', 'recovery'].includes(identity.nodeRole) && activeNode !== thisNode;
   const canPromote = isHa && identity.nodeRole === 'standby' && lock.allow_promotion === true && activeNode !== thisNode;
@@ -351,6 +411,9 @@ function clusterGuard() {
   if (returnedFormerPrimary) {
     status = 'blocked';
     reason = `nó era primary, mas o ativo atual é ${activeNode}`;
+  } else if (primaryActivationRequired && !activation.valid) {
+    status = 'blocked';
+    reason = 'primary HA aguardando ativacao local apos boot/failback';
   } else if (identity.nodeRole === 'recovery') {
     status = 'maintenance';
     reason = 'nó em recuperação/ressincronização';
@@ -373,6 +436,9 @@ function clusterGuard() {
     canServeProduction,
     canPromote,
     returnedFormerPrimary,
+    localActivationRequired: primaryActivationRequired,
+    localActivationValid: activation.valid,
+    localActivationUpdatedAt: activation.activation?.updatedAt || null,
     updatedAt: new Date().toISOString()
   };
 }
@@ -410,6 +476,9 @@ async function activateLocalNode(body = {}) {
     allow_promotion: false,
     reason
   });
+  const activation = nextIdentity.deploymentMode === 'ha' && nextIdentity.nodeRole === 'primary'
+    ? writeClusterActivation(nextIdentity, nextLock, reason)
+    : null;
   appendEvent('CLUSTER_LOCAL_NODE_ACTIVATED', {
     cluster: nextIdentity.clusterId,
     nodeName: nextIdentity.nodeName,
@@ -418,11 +487,12 @@ async function activateLocalNode(body = {}) {
     tronfirePromotion: !!tronfirePromotion,
     tronfireRestart
   });
-  return { identity: nextIdentity, lock: nextLock, guard: clusterGuard(), tronfirePromotion, roleEnv, tronfireRestart };
+  return { identity: nextIdentity, lock: nextLock, activation, guard: clusterGuard(), tronfirePromotion, roleEnv, tronfireRestart };
 }
 
 function putLocalNodeInRecovery(body = {}) {
   const identity = writeNodeIdentity({ ...nodeIdentity(), nodeRole: 'recovery' });
+  clearClusterActivation(String(body.reason || 'no colocado em recovery').trim());
   const lock = blockClusterPromotion(String(body.reason || 'nó colocado em recuperação para evitar duplo primary').trim());
   appendEvent('CLUSTER_NODE_RECOVERY_MODE', { cluster: identity.clusterId, nodeName: identity.nodeName, reason: lock.reason });
   return { identity, lock, guard: clusterGuard() };

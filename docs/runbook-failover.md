@@ -60,6 +60,13 @@ Ponto crítico: nunca permita dois nós escrevendo no mesmo banco Firebird ao me
 4. Colocar o nó recuperado como BACKUP.
 5. Testar health check e logs por alguns ciclos.
 
+Protecao contra retorno acidental:
+
+- Em HA, um no `primary` so pode segurar o VIP depois de ativacao local explicita no boot atual.
+- Se o antigo primary for religado depois que o standby assumiu, o guard deve retornar `canHoldVip=false`.
+- Para failback, primeiro ressincronize o banco a partir do no ativo atual; so depois execute a ativacao local/failback planejado.
+- Nunca use o banco do antigo primary como fonte de verdade sem comparar com o no que ficou ativo pelo VIP.
+
 ## Teste De HA
 
 Para execucao completa com registro de evidencias, use tambem:

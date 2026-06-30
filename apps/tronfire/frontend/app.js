@@ -496,6 +496,13 @@ async function dashboard() {
   const topContainers = latestPerContainer(metrics).slice(0, 5);
   const backupOk = data.backups.filter(b => b.status === 'SUCCESS').length;
   const backupFailed = data.backups.filter(b => b.status === 'FAILED').length;
+  const inactiveIndexTotal = (data.indexHealth || []).reduce((sum, item) => sum + Number(item.total || 0), 0);
+  const inactiveIndexErrors = (data.indexHealth || []).filter(item => item.error).length;
+  const inactiveIndexDetail = inactiveIndexErrors
+    ? `${inactiveIndexErrors} banco(s) sem leitura`
+    : inactiveIndexTotal
+      ? 'Recriar/ativar indices'
+      : 'Indices OK';
   content.innerHTML = `
     <div class="dashboard-toolbar">
       <div>
@@ -515,6 +522,7 @@ async function dashboard() {
       <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Bancos</div><div class="h1 mb-0">${data.databases.length}</div></div></div></div>
       <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Producao</div><div class="h3 mb-0 text-truncate">${escapeHtml(prod?.name || 'Nao definido')}</div></div></div></div>
       <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Conexoes producao</div><div class="h1 mb-0">${data.productionConnections?.total ?? '-'}</div><div class="text-muted small">${data.productionConnections?.error ? 'Consulta indisponivel' : escapeHtml(data.productionConnections?.databaseAlias || 'Sem banco')}</div></div></div></div>
+      <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Indices inativos</div><div class="h1 mb-0 ${inactiveIndexTotal ? 'text-danger' : ''}">${inactiveIndexTotal}</div><div class="text-muted small">${escapeHtml(inactiveIndexDetail)}</div></div></div></div>
       <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Uptime Firebird</div><div class="h1 mb-0">${formatDuration(uptime.uptimeSeconds)}</div></div></div></div>
     </div>
     <div class="row row-cards">
