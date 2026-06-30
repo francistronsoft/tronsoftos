@@ -461,7 +461,7 @@ function DashboardView({ dashboard }) {
           <div className="grid gap-2">
             {alerts.slice(0, 8).map((alert, index) => (
               <div key={`${alert.message}-${index}`} className={`flex items-center justify-between gap-4 rounded-md border px-3 py-2 text-sm ${alert.severity === 'critical' ? 'border-red-200 bg-red-50 text-red-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
-                <span>{alert.message}</span>
+                <span>{alert.message}{alert.createdAt ? ` (${new Date(alert.createdAt).toLocaleString()})` : ''}</span>
                 <StatusPill value={alert.severity === 'critical' ? 'critical' : 'warning'} />
               </div>
             ))}

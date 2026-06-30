@@ -185,6 +185,7 @@ model Alert {
   type      String
   severity  String
   message   String
+  details   Json?
   resolved  Boolean  @default(false)
   createdAt DateTime @default(now())
 }

@@ -271,6 +271,26 @@ function timestamp14() {
   return new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
 }
 
+function formatAlertDate(value) {
+  if (!value) return 'sem data';
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toISOString().replace('T', ' ').slice(0, 19);
+}
+
+function formatAlertBytes(value) {
+  const bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return 'nao informado';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = bytes;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${Math.round(size * 10) / 10} ${units[unit]}`;
+}
+
 function safeLogToken(value) {
   const token = String(value || '').trim();
   return /^[a-zA-Z0-9_-]{6,32}$/.test(token) ? token : timestamp14();
@@ -524,24 +544,100 @@ async function firebirdAttachmentsForDatabase(db) {
   };
 }
 
-function parseInactiveIndexes(stdout) {
-  return String(stdout || '')
+const criticalIndexTables = [
+  'CAIXA',
+  'COMANDA',
+  'ITEM_COMANDA',
+  'NF_VENDA',
+  'TITULO',
+  'PESSOA',
+  'ITEM_CARDAPIO',
+  'ITEM_CARDAPIOXEMPRESA',
+  'ITENS_NF',
+  'PEDIDO_TELEENTREGA',
+  'PRODUTO',
+  'PRODUTOXEMPRESA'
+];
+
+function parseIndexHealth(stdout) {
+  const totals = { total: 0, active: 0, inactive: 0 };
+  const tables = [];
+  String(stdout || '')
     .split(/\r?\n/)
     .map(line => line.trim())
-    .filter(line => line.startsWith('TRONIDX|'))
-    .map(line => {
-      const [indexName, relationName, uniqueFlag, indexType] = line.slice('TRONIDX|'.length).split('|');
-      return {
-        indexName: firebirdAttachmentText(indexName),
-        relationName: firebirdAttachmentText(relationName),
-        unique: Number(uniqueFlag) === 1,
-        type: Number(indexType) === 1 ? 'DESCENDING' : 'ASCENDING'
-      };
-    })
-    .filter(item => item.indexName);
+    .forEach(line => {
+      if (line.startsWith('TRONIDX_TOTAL|')) {
+        const [, total, active, inactive] = line.split('|');
+        totals.total = Number(total || 0);
+        totals.active = Number(active || 0);
+        totals.inactive = Number(inactive || 0);
+      } else if (line.startsWith('TRONIDX_TABLE|')) {
+        const [, tableName, total, active, inactive] = line.split('|');
+        tables.push({
+          tableName: firebirdAttachmentText(tableName),
+          total: Number(total || 0),
+          active: Number(active || 0),
+          inactive: Number(inactive || 0)
+        });
+      }
+    });
+  return { ...totals, tables };
 }
 
-async function inactiveIndexesForDatabase(db) {
+function classifyIndexHealth(summary) {
+  const activeRatio = summary.total > 0 ? summary.active / summary.total : 0;
+  const criticalTables = summary.tables
+    .filter(table => criticalIndexTables.includes(table.tableName) && table.total > 0 && table.active === 0)
+    .map(table => table.tableName);
+  const hasCriticalIndexLoss = summary.total > 0 && (summary.active <= 100 || activeRatio < 0.2 || criticalTables.length >= 3);
+  const hasInactiveIndexes = summary.inactive > 0;
+  return {
+    severity: hasCriticalIndexLoss ? 'CRITICAL' : hasInactiveIndexes ? 'INFO' : 'OK',
+    missingActiveTables: criticalTables,
+    activeRatio
+  };
+}
+
+function databaseFileSizeBytes(filePath) {
+  try {
+    return fs.statSync(filePath).size;
+  } catch {
+    return null;
+  }
+}
+
+async function databaseSizeTrend(db, currentSizeBytes) {
+  if (!Number.isFinite(currentSizeBytes) || currentSizeBytes <= 0) {
+    return { currentSizeBytes: currentSizeBytes ?? null, previousMaxSizeBytes: null, previousMaxCollectedAt: null, sizeDropPercent: null };
+  }
+  const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const snapshots = await prisma.metricSnapshot.findMany({
+    where: {
+      scope: 'DATABASE',
+      target: db.alias,
+      fileSizeBytes: { not: null },
+      createdAt: { gte: since }
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 500
+  });
+  const previousMax = snapshots.reduce((max, snapshot) => {
+    const size = Number(snapshot.fileSizeBytes || 0);
+    return size > max.size ? { size, collectedAt: snapshot.createdAt } : max;
+  }, { size: 0, collectedAt: null });
+  const previousMaxSizeBytes = previousMax.size;
+  const sizeDropPercent = previousMaxSizeBytes > currentSizeBytes
+    ? Math.round(((previousMaxSizeBytes - currentSizeBytes) / previousMaxSizeBytes) * 1000) / 10
+    : 0;
+  return {
+    currentSizeBytes,
+    previousMaxSizeBytes: previousMaxSizeBytes || null,
+    previousMaxCollectedAt: previousMax.collectedAt,
+    sizeDropPercent
+  };
+}
+
+async function indexHealthForDatabase(db) {
   const databasePath = effectiveDatabasePath(db);
   const connect = firebirdDbConnect(databasePath);
   const firebirdBin = process.env.FIREBIRD_BIN || '/usr/local/firebird/bin';
@@ -550,14 +646,17 @@ async function inactiveIndexesForDatabase(db) {
     'SET HEADING OFF;',
     'SET LIST OFF;',
     'SELECT',
-    "  'TRONIDX|' ||",
-    "  COALESCE(REPLACE(TRIM(RDB$INDEX_NAME), '|', '/'), '') || '|' ||",
-    "  COALESCE(REPLACE(TRIM(RDB$RELATION_NAME), '|', '/'), '') || '|' ||",
-    "  COALESCE(CAST(RDB$UNIQUE_FLAG AS VARCHAR(5)), '') || '|' ||",
-    "  COALESCE(CAST(RDB$INDEX_TYPE AS VARCHAR(5)), '')",
+    "  'TRONIDX_TOTAL|' || COUNT(*) || '|' ||",
+    "  SUM(CASE WHEN COALESCE(RDB$INDEX_INACTIVE, 0) = 0 THEN 1 ELSE 0 END) || '|' ||",
+    "  SUM(CASE WHEN COALESCE(RDB$INDEX_INACTIVE, 0) = 1 THEN 1 ELSE 0 END)",
+    'FROM RDB$INDICES;',
+    'SELECT',
+    "  'TRONIDX_TABLE|' || COALESCE(REPLACE(TRIM(RDB$RELATION_NAME), '|', '/'), '') || '|' || COUNT(*) || '|' ||",
+    "  SUM(CASE WHEN COALESCE(RDB$INDEX_INACTIVE, 0) = 0 THEN 1 ELSE 0 END) || '|' ||",
+    "  SUM(CASE WHEN COALESCE(RDB$INDEX_INACTIVE, 0) = 1 THEN 1 ELSE 0 END)",
     'FROM RDB$INDICES',
-    'WHERE COALESCE(RDB$INDEX_INACTIVE, 0) = 1',
-    'ORDER BY RDB$RELATION_NAME, RDB$INDEX_NAME;',
+    'GROUP BY RDB$RELATION_NAME',
+    'ORDER BY RDB$RELATION_NAME;',
     'COMMIT;',
     'QUIT;'
   ].join('\n');
@@ -571,30 +670,66 @@ async function inactiveIndexesForDatabase(db) {
     shQuote(connect)
   ].join(' ');
   const out = await runFirebirdShellScript(cmd, 60_000);
-  const inactiveIndexes = parseInactiveIndexes(out.stdout);
+  const summary = parseIndexHealth(out.stdout);
+  const classification = classifyIndexHealth(summary);
+  const sizeTrend = await databaseSizeTrend(db, databaseFileSizeBytes(databasePath));
+  const checkedAt = new Date().toISOString();
   return {
     databaseId: db.id,
     databaseName: db.name,
     databaseAlias: db.alias,
     pathRole: databasePath === db.filePath ? 'production' : 'standby_read_only',
-    total: inactiveIndexes.length,
-    checkedAt: new Date().toISOString(),
-    inactiveIndexes
+    totalIndexes: summary.total,
+    activeIndexes: summary.active,
+    inactiveIndexes: summary.inactive,
+    total: summary.inactive,
+    severity: classification.severity,
+    activeRatio: classification.activeRatio,
+    missingActiveTables: classification.missingActiveTables,
+    currentSizeBytes: sizeTrend.currentSizeBytes,
+    previousMaxSizeBytes: sizeTrend.previousMaxSizeBytes,
+    previousMaxCollectedAt: sizeTrend.previousMaxCollectedAt,
+    sizeDropPercent: sizeTrend.sizeDropPercent,
+    checkedAt,
+    tables: summary.tables
   };
 }
 
 async function refreshInactiveIndexAlert(db) {
-  const type = `DATABASE_INACTIVE_INDEXES_${db.alias}`;
-  const health = await inactiveIndexesForDatabase(db);
-  if (health.total > 0) {
-    const sample = health.inactiveIndexes.slice(0, 5).map(item => `${item.relationName}.${item.indexName}`).join(', ');
-    const suffix = health.total > 5 ? ` e mais ${health.total - 5}` : '';
-    const message = `Banco ${db.name} tem ${health.total} indice(s) Firebird inativo(s): ${sample}${suffix}. Recrie/ative indices antes de liberar producao.`;
+  const type = `DATABASE_MISSING_ACTIVE_INDEXES_${db.alias}`;
+  const legacyType = `DATABASE_INACTIVE_INDEXES_${db.alias}`;
+  const health = await indexHealthForDatabase(db);
+  await resolveActiveAlertsByType(legacyType);
+  if (health.severity === 'CRITICAL') {
+    const sample = health.missingActiveTables.slice(0, 6).join(', ');
+    const suffix = health.missingActiveTables.length > 6 ? ` e mais ${health.missingActiveTables.length - 6}` : '';
+    const sizeEvidence = health.sizeDropPercent >= 10
+      ? ` Tamanho atual ${formatAlertBytes(health.currentSizeBytes)} verificado em ${formatAlertDate(health.checkedAt)}; maior recente ${formatAlertBytes(health.previousMaxSizeBytes)} em ${formatAlertDate(health.previousMaxCollectedAt)}; queda ${health.sizeDropPercent}%.`
+      : '';
+    const message = `Banco ${db.name} parece estar sem indices funcionais: ${health.activeIndexes}/${health.totalIndexes} ativos. Verificado em ${formatAlertDate(health.checkedAt)}. Tabelas criticas sem indice ativo: ${sample}${suffix}.${sizeEvidence}`;
+    const details = {
+      kind: 'DATABASE_MISSING_ACTIVE_INDEXES',
+      databaseId: db.id,
+      databaseName: db.name,
+      databaseAlias: db.alias,
+      checkedAt: health.checkedAt,
+      totalIndexes: health.totalIndexes,
+      activeIndexes: health.activeIndexes,
+      inactiveIndexes: health.inactiveIndexes,
+      activeRatio: health.activeRatio,
+      missingActiveTables: health.missingActiveTables,
+      currentSizeBytes: health.currentSizeBytes,
+      currentSizeCheckedAt: health.checkedAt,
+      previousMaxSizeBytes: health.previousMaxSizeBytes,
+      previousMaxSizeCollectedAt: health.previousMaxCollectedAt,
+      sizeDropPercent: health.sizeDropPercent,
+      pathRole: health.pathRole
+    };
     const existing = await prisma.alert.findFirst({ where: { type, resolved: false } });
     if (existing) {
-      await prisma.alert.update({ where: { id: existing.id }, data: { severity: 'WARNING', message } });
+      await prisma.alert.update({ where: { id: existing.id }, data: { severity: 'CRITICAL', message, details } });
     } else {
-      await prisma.alert.create({ data: { type, severity: 'WARNING', message } });
+      await prisma.alert.create({ data: { type, severity: 'CRITICAL', message, details } });
     }
   } else {
     await resolveActiveAlertsByType(type);

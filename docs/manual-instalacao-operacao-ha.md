@@ -245,9 +245,9 @@ Quando a migracao ou restore termina com sucesso, o banco volta para uso e o sta
 
 ### Alerta De Indices Inativos
 
-Algumas manutencoes Firebird podem deixar indices inativos se a recriacao/ativacao nao terminar corretamente. O TronFire consulta `RDB$INDICES` e cria alerta `DATABASE_INACTIVE_INDEXES_<alias>` quando encontra `RDB$INDEX_INACTIVE = 1`.
+Algumas manutencoes Firebird podem deixar o banco praticamente sem indices ativos se a recriacao/ativacao nao terminar corretamente. O TronFire consulta `RDB$INDICES` e cria alerta `DATABASE_MISSING_ACTIVE_INDEXES_<alias>` quando detecta poucos indices ativos ou tabelas operacionais sem nenhum indice ativo.
 
-Esse alerta indica risco de lentidao forte no ERP. Antes de liberar producao, recrie ou reative os indices indicados e valide novamente o banco pelo TronFire; quando nao houver mais indices inativos, o alerta e resolvido automaticamente.
+Indices inativos antigos em tabelas pouco usadas podem existir sem caracterizar emergencia. O alerta critico indica risco real de lentidao forte no ERP. Quando houver historico de metricas, o TronFire tambem informa queda relevante no tamanho do `.fdb`, que costuma acompanhar bancos que ficaram sem indices ativos. A consulta de alertas por periodo mostra a data/hora de verificacao, indices ativos/total, queda de tamanho e o snapshot usado para comparacao. Antes de liberar producao, recrie ou reative os indices e valide novamente o banco pelo TronFire; quando os indices ativos voltarem ao nivel esperado, o alerta e resolvido automaticamente.
 
 ## Queda de Energia no Local
 

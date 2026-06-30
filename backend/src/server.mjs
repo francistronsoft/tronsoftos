@@ -1776,7 +1776,8 @@ async function tronfireAlerts() {
       severity: String(alert.severity || 'warning').toLowerCase(),
       message: alert.message || alert.type || 'Alerta TronFire',
       type: alert.type || null,
-      createdAt: alert.createdAt || null
+      createdAt: alert.createdAt || null,
+      details: alert.details || null
     })) : [];
   } catch {
     return [];

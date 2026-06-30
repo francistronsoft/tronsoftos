@@ -450,6 +450,24 @@ function alertSeverityClass(severity) {
   return 'info';
 }
 
+function alertDetailsText(alert) {
+  const details = alert?.details || {};
+  if (details.kind !== 'DATABASE_MISSING_ACTIVE_INDEXES') return '';
+  const parts = [];
+  if (details.checkedAt) parts.push(`Verificado: ${new Date(details.checkedAt).toLocaleString()}`);
+  if (details.activeIndexes !== undefined && details.totalIndexes !== undefined) parts.push(`Indices ativos: ${details.activeIndexes}/${details.totalIndexes}`);
+  if (details.sizeDropPercent !== null && details.sizeDropPercent !== undefined && Number(details.sizeDropPercent) > 0) {
+    parts.push(`Queda: ${details.sizeDropPercent}%`);
+  }
+  if (details.currentSizeCheckedAt) parts.push(`Tamanho atual em: ${new Date(details.currentSizeCheckedAt).toLocaleString()}`);
+  if (details.previousMaxSizeCollectedAt) parts.push(`Maior tamanho em: ${new Date(details.previousMaxSizeCollectedAt).toLocaleString()}`);
+  if (Array.isArray(details.missingActiveTables) && details.missingActiveTables.length) {
+    const sample = details.missingActiveTables.slice(0, 8).join(', ');
+    parts.push(`Tabelas: ${sample}${details.missingActiveTables.length > 8 ? '...' : ''}`);
+  }
+  return parts.join(' | ');
+}
+
 function dashboardAlertShortcut(alerts) {
   const active = alerts || [];
   const first = active.slice(0, 3);
@@ -496,13 +514,19 @@ async function dashboard() {
   const topContainers = latestPerContainer(metrics).slice(0, 5);
   const backupOk = data.backups.filter(b => b.status === 'SUCCESS').length;
   const backupFailed = data.backups.filter(b => b.status === 'FAILED').length;
-  const inactiveIndexTotal = (data.indexHealth || []).reduce((sum, item) => sum + Number(item.total || 0), 0);
-  const inactiveIndexErrors = (data.indexHealth || []).filter(item => item.error).length;
-  const inactiveIndexDetail = inactiveIndexErrors
+  const indexHealthItems = data.indexHealth || [];
+  const activeIndexTotal = indexHealthItems.reduce((sum, item) => sum + Number(item.activeIndexes || 0), 0);
+  const inactiveIndexTotal = indexHealthItems.reduce((sum, item) => sum + Number((item.inactiveIndexes ?? item.total) || 0), 0);
+  const criticalIndexDatabases = indexHealthItems.filter(item => item.severity === 'CRITICAL').length;
+  const inactiveIndexErrors = indexHealthItems.filter(item => item.error).length;
+  const maxIndexSizeDrop = Math.max(0, ...indexHealthItems.map(item => Number(item.sizeDropPercent || 0)));
+  const indexHealthDetail = inactiveIndexErrors
     ? `${inactiveIndexErrors} banco(s) sem leitura`
-    : inactiveIndexTotal
-      ? 'Recriar/ativar indices'
-      : 'Indices OK';
+    : criticalIndexDatabases
+      ? `${criticalIndexDatabases} banco(s) sem indices${maxIndexSizeDrop >= 10 ? `, -${maxIndexSizeDrop}%` : ''}`
+      : inactiveIndexTotal
+        ? `${inactiveIndexTotal} inativos antigos`
+        : 'Indices OK';
   content.innerHTML = `
     <div class="dashboard-toolbar">
       <div>
@@ -522,7 +546,7 @@ async function dashboard() {
       <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Bancos</div><div class="h1 mb-0">${data.databases.length}</div></div></div></div>
       <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Producao</div><div class="h3 mb-0 text-truncate">${escapeHtml(prod?.name || 'Nao definido')}</div></div></div></div>
       <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Conexoes producao</div><div class="h1 mb-0">${data.productionConnections?.total ?? '-'}</div><div class="text-muted small">${data.productionConnections?.error ? 'Consulta indisponivel' : escapeHtml(data.productionConnections?.databaseAlias || 'Sem banco')}</div></div></div></div>
-      <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Indices inativos</div><div class="h1 mb-0 ${inactiveIndexTotal ? 'text-danger' : ''}">${inactiveIndexTotal}</div><div class="text-muted small">${escapeHtml(inactiveIndexDetail)}</div></div></div></div>
+      <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Indices ativos</div><div class="h1 mb-0 ${criticalIndexDatabases ? 'text-danger' : ''}">${activeIndexTotal || '-'}</div><div class="text-muted small">${escapeHtml(indexHealthDetail)}</div></div></div></div>
       <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Uptime Firebird</div><div class="h1 mb-0">${formatDuration(uptime.uptimeSeconds)}</div></div></div></div>
     </div>
     <div class="row row-cards">
@@ -1349,14 +1373,17 @@ async function alerts() {
       </div>
     </div></div>
     <div class="card"><div class="table-responsive"><table class="table"><thead><tr><th>Severidade</th><th>Mensagem</th><th>Tipo</th><th>Data</th><th>Status</th><th>Acoes</th></tr></thead><tbody>
-      ${data.length ? data.map(a => `<tr>
+      ${data.length ? data.map(a => {
+        const details = alertDetailsText(a);
+        return `<tr>
         <td><span class="badge bg-${alertSeverityClass(a.severity)}">${escapeHtml(a.severity)}</span></td>
-        <td>${escapeHtml(a.message)}</td>
+        <td>${escapeHtml(a.message)}${details ? `<div class="text-muted small mt-1">${escapeHtml(details)}</div>` : ''}</td>
         <td>${escapeHtml(a.type)}</td>
         <td>${new Date(a.createdAt).toLocaleString()}</td>
         <td>${a.resolved ? 'Resolvido' : 'Ativo'}</td>
         <td>${!a.resolved && currentUser?.role !== 'CONSULTA' ? `<button class="btn btn-sm btn-outline-success" data-resolve-alert="${a.id}">Resolver</button>` : '-'}</td>
-      </tr>`).join('') : '<tr><td colspan="6" class="text-muted">Nenhum alerta encontrado.</td></tr>'}
+      </tr>`;
+      }).join('') : '<tr><td colspan="6" class="text-muted">Nenhum alerta encontrado.</td></tr>'}
     </tbody></table></div></div>`;
   alertStatus.value = status;
   btnFilterAlerts.onclick = () => {
