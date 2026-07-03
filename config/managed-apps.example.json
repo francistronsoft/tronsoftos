@@ -30,7 +30,7 @@
       ],
       "projectName": "troncomanda",
       "healthUrl": "http://127.0.0.1:8000/health",
-      "publicUrl": "http://127.0.0.1:8000",
+      "publicUrl": "http://127.0.0.1:8000/qr/",
       "containers": [
         "troncomanda_web",
         "troncomanda_api",

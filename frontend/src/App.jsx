@@ -483,8 +483,9 @@ function AppsView({ dashboard, onAction, actionPending, actionJob }) {
       <div className="grid gap-4 xl:grid-cols-2">
         {dashboard.apps.map(app => (
           <Card key={app.name} title={app.name} icon={Boxes} action={<StatusPill value={app.status} />}>
-            <div className="mb-4 grid gap-3 sm:grid-cols-4">
-              <button disabled={actionPending} onClick={() => onAction(app.name, 'up')} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"><Play className="h-4 w-4" />Subir</button>
+            <div className="mb-4 grid gap-3 sm:grid-cols-5">
+              <button disabled={actionPending} onClick={() => onAction(app.name, 'up')} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"><Play className="h-4 w-4" />Instalar</button>
+              <button disabled={actionPending} onClick={() => onAction(app.name, 'pull')} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"><RefreshCw className="h-4 w-4" />Atualizar</button>
               <button disabled={actionPending} onClick={() => onAction(app.name, 'restart')} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"><RefreshCw className="h-4 w-4" />Reiniciar</button>
               <button disabled={actionPending} onClick={() => onAction(app.name, 'stop')} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"><Square className="h-4 w-4" />Parar</button>
               {app.publicUrl ? (

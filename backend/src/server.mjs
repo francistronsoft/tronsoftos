@@ -1486,12 +1486,15 @@ function appAccessUrl(app) {
   if (app.name === 'tronfire') {
     return process.env.TRONFIRE_PROXY_PATH || '/tronfire/';
   }
-  if (app.publicUrl || app.accessUrl) return app.publicUrl || app.accessUrl;
   if (app.name === 'troncomanda') {
     const env = parseEnvFile(path.join(appRoot, 'apps/troncomanda/.env'));
-    if (env.TRONCOMANDA_PUBLIC_URL) return env.TRONCOMANDA_PUBLIC_URL;
-    if (env.TRONCOMANDA_LAN_HOST && env.TRONCOMANDA_WEB_PORT) return `http://${env.TRONCOMANDA_LAN_HOST}:${env.TRONCOMANDA_WEB_PORT}`;
+    const baseUrl = env.TRONCOMANDA_PUBLIC_URL
+      || (env.TRONCOMANDA_LAN_HOST && env.TRONCOMANDA_WEB_PORT ? `http://${env.TRONCOMANDA_LAN_HOST}:${env.TRONCOMANDA_WEB_PORT}` : '')
+      || app.publicUrl
+      || app.accessUrl;
+    if (baseUrl) return `${baseUrl.replace(/\/+$/, '')}/qr/`;
   }
+  if (app.publicUrl || app.accessUrl) return app.publicUrl || app.accessUrl;
   return app.healthUrl ? app.healthUrl.replace(/\/health\/?$/, '/') : null;
 }
 
@@ -2887,19 +2890,28 @@ async function appAction(app, action) {
   return out;
 }
 
-function appActionCommand(app, action) {
+function appActionSteps(app, action) {
   if (!['up', 'stop', 'restart', 'pull'].includes(action)) throw new Error('invalid action');
   if (app.type !== 'compose') throw new Error('only compose apps are supported');
   const composeFiles = app.composeFiles || (app.composeFile ? [app.composeFile] : []);
   if (!composeFiles.length) throw new Error('compose file not configured');
-  const args = ['compose', '-p', app.projectName || app.name];
+  const baseArgs = ['compose', '-p', app.projectName || app.name];
   for (const composeFile of composeFiles) {
-    args.push('-f', path.resolve(appRoot, composeFile));
+    baseArgs.push('-f', path.resolve(appRoot, composeFile));
   }
-  if (action === 'up') args.push('up', '-d');
-  else if (action === 'restart') args.push('restart');
-  else args.push(action);
-  return { command: 'docker', args };
+  if (action === 'up') return [{ command: 'docker', args: [...baseArgs, 'up', '-d'] }];
+  if (action === 'restart') return [{ command: 'docker', args: [...baseArgs, 'restart'] }];
+  if (action === 'pull') {
+    return [
+      { command: 'docker', args: [...baseArgs, 'pull'] },
+      { command: 'docker', args: [...baseArgs, 'up', '-d'] }
+    ];
+  }
+  return [{ command: 'docker', args: [...baseArgs, action] }];
+}
+
+function appActionCommand(app, action) {
+  return appActionSteps(app, action)[0];
 }
 
 function dockerEnv() {
@@ -3043,15 +3055,29 @@ function appendActionLog(job, stream, chunk) {
   }
 }
 
+function runActionStep(job, step) {
+  return new Promise((resolve, reject) => {
+    appendActionLog(job, 'stdout', `$ ${step.command} ${step.args.join(' ')}\n`);
+    const child = spawn(step.command, step.args, { cwd: appRoot, env: dockerEnv(), windowsHide: true });
+    child.stdout.on('data', chunk => appendActionLog(job, 'stdout', chunk));
+    child.stderr.on('data', chunk => appendActionLog(job, 'stderr', chunk));
+    child.on('error', reject);
+    child.on('close', code => {
+      if (code !== 0) return reject(Object.assign(new Error(`${step.command} saiu com codigo ${code}`), { exitCode: code }));
+      resolve(code);
+    });
+  });
+}
+
 function startAppAction(app, action) {
-  const { command, args } = appActionCommand(app, action);
+  const steps = appActionSteps(app, action);
   const id = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
   const job = {
     id,
     app: app.name,
     action,
-    command,
-    args,
+    command: steps.map(step => step.command).join(' && '),
+    args: steps.flatMap(step => step.args),
     status: 'running',
     startedAt: new Date().toISOString(),
     finishedAt: null,
@@ -3074,21 +3100,21 @@ function startAppAction(app, action) {
       return;
     }
 
-    const child = spawn(command, args, { cwd: appRoot, env: dockerEnv(), windowsHide: true });
-    child.stdout.on('data', chunk => appendActionLog(job, 'stdout', chunk));
-    child.stderr.on('data', chunk => appendActionLog(job, 'stderr', chunk));
-    child.on('error', err => {
+    try {
+      for (const step of steps) {
+        await runActionStep(job, step);
+      }
+      job.exitCode = 0;
+      job.status = 'success';
+      job.finishedAt = new Date().toISOString();
+      appendEvent(`APP_${action.toUpperCase()}`, { app: app.name, exitCode: 0, stdout: job.stdout, stderr: job.stderr });
+    } catch (err) {
+      job.exitCode = err.exitCode ?? 1;
       job.status = 'failed';
       job.error = err.message;
       job.finishedAt = new Date().toISOString();
       appendEvent(`APP_${action.toUpperCase()}_FAILED`, { app: app.name, error: err.message });
-    });
-    child.on('close', code => {
-      job.exitCode = code;
-      job.status = code === 0 ? 'success' : 'failed';
-      job.finishedAt = new Date().toISOString();
-      appendEvent(`APP_${action.toUpperCase()}`, { app: app.name, exitCode: code, stdout: job.stdout, stderr: job.stderr });
-    });
+    }
   })();
   return publicActionJob(job);
 }

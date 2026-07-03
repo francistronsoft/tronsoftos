@@ -612,7 +612,7 @@ TRONCOMANDA_STORAGE_ROOT=/opt/tronfire-storage/troncomanda
 TRONCOMANDA_WEB_PORT=8000
 TRONCOMANDA_API_PORT=9000
 TRONCOMANDA_LAN_HOST=${HA_VIP:-$SERVER_IP}
-TRONCOMANDA_PUBLIC_URL=http://${HA_VIP:-$SERVER_IP}:8000
+TRONCOMANDA_PUBLIC_URL=http://$SERVER_IP:8000/qr/
 
 TRONCOMANDA_SECRET_KEY=$TRONCOMANDA_SECRET_KEY
 TRONCOMANDA_FIREBIRD_HOST=host.docker.internal
@@ -687,8 +687,8 @@ if [ "$FIREBIRD_MODE" = "host" ]; then
       "composeFile": "apps/troncomanda/docker-compose.yml",
       "composeFiles": ["apps/troncomanda/docker-compose.yml"],
       "projectName": "troncomanda",
-      "healthUrl": "http://127.0.0.1:8000/",
-      "publicUrl": "http://$SERVER_IP:8000",
+      "healthUrl": "http://127.0.0.1:8000/health",
+      "publicUrl": "http://$SERVER_IP:8000/qr/",
       "containers": [
         "troncomanda_web",
         "troncomanda_api",
@@ -729,8 +729,8 @@ else
       "composeFile": "apps/troncomanda/docker-compose.yml",
       "composeFiles": ["apps/troncomanda/docker-compose.yml"],
       "projectName": "troncomanda",
-      "healthUrl": "http://127.0.0.1:8000/",
-      "publicUrl": "http://$SERVER_IP:8000",
+      "healthUrl": "http://127.0.0.1:8000/health",
+      "publicUrl": "http://$SERVER_IP:8000/qr/",
       "containers": [
         "troncomanda_web",
         "troncomanda_api",
