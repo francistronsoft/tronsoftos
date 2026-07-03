@@ -83,6 +83,20 @@ sudo bash install.sh
 
 3. Responda o assistente.
 
+Credenciais privadas do TronComanda/GHCR nao devem ficar no Git. Quando as
+imagens forem privadas, publique um arquivo `installer-secrets.env` no mesmo
+local privado usado para o `template.fdb` e informe a URL antes da instalacao:
+
+```bash
+sudo TRONSOFTOS_INSTALLER_SECRETS_URL="https://link-privado/installer-secrets.env" bash install.sh
+```
+
+O arquivo remoto deve conter apenas as variaveis de login, por exemplo
+`TRONSOFTOS_GHCR_REGISTRY`, `TRONSOFTOS_GHCR_USER` e `TRONSOFTOS_GHCR_TOKEN`
+ou a versao criptografada `TRONSOFTOS_GHCR_TOKEN_ENC` com
+`TRONSOFTOS_GHCR_TOKEN_KEY`. Durante a instalacao ele e baixado para
+`state/installer-secrets.env` com permissao restrita e usado para o `docker login`.
+
 Para instalacao simples:
 
 - Escolha que o cliente nao tera alta disponibilidade.

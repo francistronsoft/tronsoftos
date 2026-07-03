@@ -12,13 +12,59 @@ MANAGED_APPS="$APP_DIR/config/managed-apps.json"
 CLUSTER_SECRETS="$APP_DIR/state/cluster-secrets.env"
 NODE_IDENTITY="$APP_DIR/state/node-identity.json"
 SSH_PUBLIC_KEY_PATH="$APP_DIR/state/ssh/id_ed25519.pub"
+TRONSOFTOS_INSTALLER_SECRETS_URL="${TRONSOFTOS_INSTALLER_SECRETS_URL:-https://tronsoft.bitrix24.com.br/file/MhJuIFtuaVf1PtvmtsfS}"
 
-for secrets_file in "$APP_DIR/config/installer-secrets.env" "$ENV_DIR/installer-secrets.env"; do
-  if [ -f "$secrets_file" ]; then
-    # shellcheck disable=SC1090
-    . "$secrets_file"
+installer_secret_key_allowed() {
+  case "$1" in
+    TRONSOFTOS_GHCR_REGISTRY|TRONSOFTOS_GHCR_USER|TRONSOFTOS_GHCR_TOKEN|TRONSOFTOS_GHCR_TOKEN_ENC|TRONSOFTOS_GHCR_TOKEN_KEY|TRONSOFTOS_INSTALLER_SECRETS_URL|INSTALLER_SECRETS_URL|TRONCOMANDA_CREDENTIALS_URL) return 0 ;;
+    GHCR_REGISTRY|GHCR_USER|GHCR_TOKEN|GHCR_TOKEN_ENC|GHCR_TOKEN_KEY) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+load_installer_secret_file() {
+  local secrets_file="$1"
+  [ -f "$secrets_file" ] || return 0
+
+  local line key value
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ''|\#*) continue ;;
+      export\ *) line="${line#export }" ;;
+    esac
+    key="${line%%=*}"
+    value="${line#*=}"
+    [ "$key" != "$line" ] || continue
+    installer_secret_key_allowed "$key" || continue
+    case "$value" in
+      \"*\") value="${value#\"}"; value="${value%\"}" ;;
+      \'*\') value="${value#\'}"; value="${value%\'}" ;;
+    esac
+    printf -v "$key" '%s' "$value"
+    export "$key"
+  done < "$secrets_file"
+}
+
+download_installer_secrets() {
+  local url="${TRONSOFTOS_INSTALLER_SECRETS_URL:-${INSTALLER_SECRETS_URL:-${TRONCOMANDA_CREDENTIALS_URL:-}}}"
+  [ -n "$url" ] || return 0
+
+  local dest="$APP_DIR/state/installer-secrets.env"
+  mkdir -p "$APP_DIR/state"
+  chmod 700 "$APP_DIR/state"
+  echo "Baixando credenciais privadas da instalacao..."
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --retry 3 --retry-delay 2 -o "$dest.tmp" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -O "$dest.tmp" "$url"
+  else
+    echo "Aviso: curl/wget indisponivel; nao foi possivel baixar credenciais privadas." >&2
+    return 0
   fi
-done
+  mv "$dest.tmp" "$dest"
+  chmod 600 "$dest"
+  load_installer_secret_file "$dest"
+}
 
 decrypt_installer_secret() {
   local encrypted="$1"
@@ -40,6 +86,11 @@ if [ "$(id -u)" -ne 0 ]; then
   echo "Execute como root: sudo scripts/configure-wizard.sh" >&2
   exit 77
 fi
+
+for secrets_file in "$APP_DIR/config/installer-secrets.env" "$ENV_DIR/installer-secrets.env"; do
+  load_installer_secret_file "$secrets_file"
+done
+download_installer_secrets
 
 ask() {
   local label="$1"
@@ -523,6 +574,7 @@ TRONFIRE_AUTH_DISABLED=true
 
 FIREBIRD_PACKAGE_URL=https://tronsoft.bitrix24.com.br/~qQVae
 FIREBIRD_TEMPLATE_URL=https://tronsoft.bitrix24.com.br/~wUw0m
+
 FIREBIRD_PACKAGE_SHA256=
 FIREBIRD_TEMPLATE_SHA256=
 
