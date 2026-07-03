@@ -50,15 +50,35 @@ download_installer_secrets() {
   [ -n "$url" ] || return 0
 
   local dest="$APP_DIR/state/installer-secrets.env"
+  local cookie_jar
+  cookie_jar="$(mktemp)"
   mkdir -p "$APP_DIR/state"
   chmod 700 "$APP_DIR/state"
   echo "Baixando credenciais privadas da instalacao..."
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL --retry 3 --retry-delay 2 -o "$dest.tmp" "$url"
+    curl -fsSL --retry 3 --retry-delay 2 -c "$cookie_jar" -b "$cookie_jar" -o "$dest.tmp" "$url"
   elif command -v wget >/dev/null 2>&1; then
     wget -q -O "$dest.tmp" "$url"
   else
     echo "Aviso: curl/wget indisponivel; nao foi possivel baixar credenciais privadas." >&2
+    rm -f "$cookie_jar"
+    return 0
+  fi
+  if ! grep -Eq '^(TRONSOFTOS_GHCR_|GHCR_)' "$dest.tmp" && grep -q '/download?token=' "$dest.tmp"; then
+    local href base_url
+    href="$(grep -o 'href="[^"]*/download?token=[^"]*"' "$dest.tmp" | head -n1 | sed 's/^href="//;s/"$//')"
+    base_url="$(printf '%s' "$url" | sed -E 's#^(https?://[^/]+).*$#\1#')"
+    if [ -n "$href" ] && command -v curl >/dev/null 2>&1; then
+      case "$href" in
+        http*) curl -fsSL --retry 3 --retry-delay 2 -c "$cookie_jar" -b "$cookie_jar" -o "$dest.tmp" "$href" ;;
+        /*) curl -fsSL --retry 3 --retry-delay 2 -c "$cookie_jar" -b "$cookie_jar" -o "$dest.tmp" "$base_url$href" ;;
+      esac
+    fi
+  fi
+  rm -f "$cookie_jar"
+  if ! grep -Eq '^(TRONSOFTOS_GHCR_|GHCR_)' "$dest.tmp"; then
+    echo "Aviso: credenciais privadas baixadas nao parecem estar em formato .env. Verifique o link do Bitrix." >&2
+    rm -f "$dest.tmp"
     return 0
   fi
   mv "$dest.tmp" "$dest"

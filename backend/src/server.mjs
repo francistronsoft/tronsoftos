@@ -3,6 +3,7 @@ import https from 'node:https';
 import net from 'node:net';
 import tls from 'node:tls';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +26,9 @@ const clusterSecretsPath = process.env.TRONSOFTOS_CLUSTER_SECRETS || path.join(s
 const eventLogPath = process.env.TRONSOFTOS_EVENT_LOG || path.join(stateDir, 'events.jsonl');
 const smtpSettingsPath = process.env.TRONSOFTOS_SMTP_SETTINGS || path.join(stateDir, 'smtp-settings.json');
 const smtpAlertStatePath = process.env.TRONSOFTOS_SMTP_ALERT_STATE || path.join(stateDir, 'smtp-alert-state.json');
+const centralSettingsPath = process.env.TRONSOFTOS_CENTRAL_SETTINGS || path.join(stateDir, 'central-settings.json');
+const centralTokenPath = process.env.TRONSOFTOS_CENTRAL_TOKEN_FILE || path.join(stateDir, 'central-installation-token');
+const centralAlertStatePath = process.env.TRONSOFTOS_CENTRAL_ALERT_STATE || path.join(stateDir, 'central-alert-state.json');
 const cloudflareSettingsPath = process.env.TRONSOFTOS_CLOUDFLARE_SETTINGS || path.join(stateDir, 'cloudflare-settings.json');
 const rcloneSettingsPath = process.env.TRONSOFTOS_RCLONE_SETTINGS || path.join(stateDir, 'rclone-settings.json');
 const haSyncSettingsPath = process.env.TRONSOFTOS_HA_SYNC_SETTINGS || path.join(stateDir, 'ha-sync-settings.json');
@@ -34,6 +38,7 @@ const googleCredentialsPath = process.env.TRONSOFTOS_GOOGLE_CREDENTIALS || path.
 const googleOauthDir = process.env.TRONSOFTOS_GOOGLE_OAUTH_DIR || path.join(stateDir, 'google-oauth');
 const frontendDist = process.env.TRONSOFTOS_FRONTEND_DIST || path.join(appRoot, 'frontend/dist');
 const haSyncLogDir = process.env.TRONSOFTOS_HA_SYNC_LOG_DIR || path.join(appRoot, 'logs', 'ha-sync');
+const installerSecretsUrl = process.env.TRONSOFTOS_INSTALLER_SECRETS_URL || 'https://tronsoft.bitrix24.com.br/file/MhJuIFtuaVf1PtvmtsfS';
 const FIXED_HA_SYNC_INTERVAL_MINUTES = 3;
 const HA_SYNC_CRITICAL_LAG_MINUTES = 20;
 const DEFAULT_HA_SYNC_MODE = 'physical';
@@ -57,6 +62,9 @@ let primaryDownSince = 0;
 let autoFailoverInProgress = false;
 const smtpAlertStates = new Map(Object.entries(readJson(smtpAlertStatePath, {})));
 let smtpNotificationInFlight = false;
+const centralAlertStates = new Map(Object.entries(readJson(centralAlertStatePath, {})));
+let centralAgentTimer = null;
+let centralAgentInFlight = false;
 
 function json(reply, status, body) {
   const payload = JSON.stringify(body, null, 2);
@@ -2900,6 +2908,117 @@ function dockerEnv() {
   return { ...process.env, DOCKER_CONFIG: dockerConfigDir };
 }
 
+async function downloadInstallerSecretsIfNeeded({ force = false } = {}) {
+  const dest = path.join(stateDir, 'installer-secrets.env');
+  if (!force && fs.existsSync(dest) && fs.statSync(dest).size > 0) return dest;
+  if (!installerSecretsUrl) return null;
+
+  ensureStateDir();
+  let response = await fetch(installerSecretsUrl);
+  if (!response.ok) throw new Error(`falha ao baixar credenciais privadas: HTTP ${response.status}`);
+  let text = await response.text();
+  if (!/TRONSOFTOS_GHCR_(USER|TOKEN)|GHCR_(USER|TOKEN)/.test(text)) {
+    const href = text.match(/href="([^"]*\/download\?token=[^"]*)"/)?.[1];
+    if (href) {
+      const downloadUrl = new URL(href, installerSecretsUrl);
+      const cookie = cookieHeaderFromResponse(response);
+      response = await fetch(downloadUrl, { headers: cookie ? { cookie } : {} });
+      if (!response.ok) throw new Error(`falha ao baixar credenciais privadas: HTTP ${response.status}`);
+      text = await response.text();
+    }
+  }
+  if (!/TRONSOFTOS_GHCR_(USER|TOKEN)|GHCR_(USER|TOKEN)/.test(text)) {
+    throw new Error('arquivo de credenciais privadas nao contem variaveis GHCR esperadas');
+  }
+  fs.writeFileSync(`${dest}.tmp`, text, { mode: 0o600 });
+  fs.renameSync(`${dest}.tmp`, dest);
+  fs.chmodSync(dest, 0o600);
+  return dest;
+}
+
+function cookieHeaderFromResponse(response) {
+  const values = typeof response.headers.getSetCookie === 'function'
+    ? response.headers.getSetCookie()
+    : String(response.headers.get('set-cookie') || '').split(/,(?=[^;,]+=)/);
+  return values
+    .map(value => String(value || '').split(';')[0].trim())
+    .filter(Boolean)
+    .join('; ');
+}
+
+async function readInstallerRegistryCredentials() {
+  const candidates = [
+    path.join(stateDir, 'installer-secrets.env'),
+    path.join(appRoot, 'config/installer-secrets.env'),
+    '/etc/tronsoftos/installer-secrets.env'
+  ];
+
+  if (installerSecretsUrl) {
+    const hasLocalFallback = candidates.some(filePath => fs.existsSync(filePath));
+    try {
+      const downloaded = await downloadInstallerSecretsIfNeeded({ force: true });
+      if (downloaded) candidates.unshift(downloaded);
+    } catch (err) {
+      appendEvent('INSTALLER_SECRETS_DOWNLOAD_FAILED', { url: installerSecretsUrl, error: err.message });
+      if (!hasLocalFallback) throw err;
+    }
+  } else if (!candidates.some(filePath => fs.existsSync(filePath))) {
+    const downloaded = await downloadInstallerSecretsIfNeeded();
+    if (downloaded) candidates.unshift(downloaded);
+  }
+
+  for (const filePath of candidates) {
+    if (!fs.existsSync(filePath)) continue;
+    const env = parseEnvFile(filePath);
+    const registry = String(env.TRONSOFTOS_GHCR_REGISTRY || env.GHCR_REGISTRY || 'ghcr.io').trim();
+    const username = String(env.TRONSOFTOS_GHCR_USER || env.GHCR_USER || '').trim();
+    const token = String(env.TRONSOFTOS_GHCR_TOKEN || env.GHCR_TOKEN || '').trim();
+    if (registry && username && token) return { registry, username, token, source: filePath };
+  }
+  return null;
+}
+
+function dockerRegistryLoginWithCredentials(credentials) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('docker', ['login', credentials.registry, '-u', credentials.username, '--password-stdin'], { cwd: appRoot, env: dockerEnv(), windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error('timeout no docker login'));
+    }, 60_000);
+    child.stdout.on('data', chunk => { stdout += chunk.toString(); });
+    child.stderr.on('data', chunk => { stderr += chunk.toString(); });
+    child.on('error', err => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on('close', code => {
+      clearTimeout(timer);
+      appendEvent(code === 0 ? 'DOCKER_REGISTRY_LOGIN_OK' : 'DOCKER_REGISTRY_LOGIN_FAILED', {
+        registry: credentials.registry,
+        username: credentials.username,
+        source: credentials.source,
+        exitCode: code,
+        stdout,
+        stderr
+      });
+      if (code !== 0) return reject(new Error(stderr || stdout || `docker login saiu com codigo ${code}`));
+      resolve({ ok: true, stdout, stderr });
+    });
+    child.stdin.end(`${credentials.token}\n`);
+  });
+}
+
+async function ensureTroncomandaRegistryLogin(job) {
+  const credentials = await readInstallerRegistryCredentials();
+  if (!credentials) {
+    throw new Error('Credenciais GHCR nao encontradas para baixar imagens privadas do TronComanda');
+  }
+  appendActionLog(job, 'stdout', `Autenticando no ${credentials.registry} para baixar imagens privadas...\n`);
+  await dockerRegistryLoginWithCredentials(credentials);
+}
+
 function publicActionJob(job) {
   return {
     id: job.id,
@@ -2942,21 +3061,35 @@ function startAppAction(app, action) {
     stderr: ''
   };
   actionJobs.set(id, job);
-  const child = spawn(command, args, { cwd: appRoot, env: dockerEnv(), windowsHide: true });
-  child.stdout.on('data', chunk => appendActionLog(job, 'stdout', chunk));
-  child.stderr.on('data', chunk => appendActionLog(job, 'stderr', chunk));
-  child.on('error', err => {
-    job.status = 'failed';
-    job.error = err.message;
-    job.finishedAt = new Date().toISOString();
-    appendEvent(`APP_${action.toUpperCase()}_FAILED`, { app: app.name, error: err.message });
-  });
-  child.on('close', code => {
-    job.exitCode = code;
-    job.status = code === 0 ? 'success' : 'failed';
-    job.finishedAt = new Date().toISOString();
-    appendEvent(`APP_${action.toUpperCase()}`, { app: app.name, exitCode: code, stdout: job.stdout, stderr: job.stderr });
-  });
+  (async () => {
+    try {
+      if (app.name === 'troncomanda' && ['up', 'pull'].includes(action)) {
+        await ensureTroncomandaRegistryLogin(job);
+      }
+    } catch (err) {
+      job.status = 'failed';
+      job.error = err.message;
+      job.finishedAt = new Date().toISOString();
+      appendEvent(`APP_${action.toUpperCase()}_FAILED`, { app: app.name, error: err.message });
+      return;
+    }
+
+    const child = spawn(command, args, { cwd: appRoot, env: dockerEnv(), windowsHide: true });
+    child.stdout.on('data', chunk => appendActionLog(job, 'stdout', chunk));
+    child.stderr.on('data', chunk => appendActionLog(job, 'stderr', chunk));
+    child.on('error', err => {
+      job.status = 'failed';
+      job.error = err.message;
+      job.finishedAt = new Date().toISOString();
+      appendEvent(`APP_${action.toUpperCase()}_FAILED`, { app: app.name, error: err.message });
+    });
+    child.on('close', code => {
+      job.exitCode = code;
+      job.status = code === 0 ? 'success' : 'failed';
+      job.finishedAt = new Date().toISOString();
+      appendEvent(`APP_${action.toUpperCase()}`, { app: app.name, exitCode: code, stdout: job.stdout, stderr: job.stderr });
+    });
+  })();
   return publicActionJob(job);
 }
 
@@ -3597,6 +3730,326 @@ function dockerRegistryLogin(body) {
   });
 }
 
+function centralEnabled() {
+  const settings = centralSettings();
+  return (settings.enabled === true || String(process.env.TRONSOFTOS_CENTRAL_ENABLED || '').toLowerCase() === 'true')
+    && Boolean(centralBaseUrl());
+}
+
+function centralBaseUrl() {
+  const settings = centralSettings();
+  return String(settings.url || process.env.TRONSOFTOS_CENTRAL_URL || 'https://central.tronsoft.app.br').trim().replace(/\/+$/, '');
+}
+
+function centralHeartbeatMs() {
+  const seconds = Number(process.env.TRONSOFTOS_CENTRAL_HEARTBEAT_SECONDS || 300);
+  return Math.max(60, seconds || 300) * 1000;
+}
+
+function centralInstallationId() {
+  const identity = nodeIdentity();
+  return process.env.TRONSOFTOS_CENTRAL_INSTALLATION_ID
+    || identity.installId
+    || `${identity.clusterId}-${identity.nodeName}`;
+}
+
+function centralEnvironmentName() {
+  const identity = nodeIdentity();
+  return process.env.TRONSOFTOS_CENTRAL_ENVIRONMENT_NAME
+    || `${identity.clusterId} / ${identity.nodeName}`;
+}
+
+function centralSettings() {
+  const saved = readJson(centralSettingsPath, {});
+  return {
+    enabled: saved.enabled === true || String(process.env.TRONSOFTOS_CENTRAL_ENABLED || '').toLowerCase() === 'true',
+    url: saved.url || process.env.TRONSOFTOS_CENTRAL_URL || 'https://central.tronsoft.app.br',
+    pairedAt: saved.pairedAt || null,
+    installationId: saved.installationId || null,
+    clientId: saved.clientId || null,
+    lastValidationAt: saved.lastValidationAt || null
+  };
+}
+
+function publicCentralSettings() {
+  const settings = centralSettings();
+  return {
+    ...settings,
+    tokenConfigured: Boolean(centralToken())
+  };
+}
+
+function writeCentralSettings(next) {
+  ensureStateDir();
+  const current = centralSettings();
+  const settings = {
+    ...current,
+    ...next,
+    url: String(next.url || current.url || 'https://central.tronsoft.app.br').trim().replace(/\/+$/, '')
+  };
+  fs.writeFileSync(centralSettingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
+  return settings;
+}
+
+function centralCustomerPayload() {
+  const identity = nodeIdentity();
+  return {
+    name: process.env.TRONSOFTOS_CENTRAL_CUSTOMER_NAME || process.env.CUSTOMER_NAME || identity.clusterId || 'Cliente TronSoftOS',
+    document: process.env.TRONSOFTOS_CENTRAL_CUSTOMER_DOCUMENT || process.env.CUSTOMER_DOCUMENT || '',
+    city: process.env.TRONSOFTOS_CENTRAL_CUSTOMER_CITY || '',
+    state: process.env.TRONSOFTOS_CENTRAL_CUSTOMER_STATE || ''
+  };
+}
+
+function centralResellerPayload() {
+  return {
+    name: process.env.TRONSOFTOS_CENTRAL_RESELLER_NAME || 'TronSoftOS Direto',
+    document: process.env.TRONSOFTOS_CENTRAL_RESELLER_DOCUMENT || ''
+  };
+}
+
+function primaryHostIp() {
+  const interfaces = os.networkInterfaces();
+  for (const items of Object.values(interfaces)) {
+    for (const item of items || []) {
+      if (item.family === 'IPv4' && !item.internal) return item.address;
+    }
+  }
+  return '';
+}
+
+function centralDatabasePayload() {
+  const tronfireEnv = parseEnvFile(path.join(appRoot, 'apps/tronfire/.env'));
+  return {
+    engine: process.env.TRONSOFTOS_CENTRAL_DATABASE_ENGINE || tronfireEnv.FIREBIRD_ENGINE || 'Firebird',
+    version: process.env.TRONSOFTOS_CENTRAL_DATABASE_VERSION || tronfireEnv.FIREBIRD_VERSION || '2.5',
+    schemaVersion: process.env.TRONSOFTOS_CENTRAL_DATABASE_SCHEMA_VERSION || tronfireEnv.TRONFIRE_SCHEMA_VERSION || '',
+    sizeMb: null
+  };
+}
+
+function centralHostPayload() {
+  return {
+    hostname: os.hostname(),
+    os: `${os.type()} ${os.release()}`,
+    ip: primaryHostIp()
+  };
+}
+
+function centralToken() {
+  try {
+    return fs.readFileSync(centralTokenPath, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
+function writeCentralToken(token) {
+  if (!token) return;
+  ensureStateDir();
+  fs.writeFileSync(centralTokenPath, `${token}\n`, { mode: 0o600 });
+}
+
+async function centralRequest(pathname, { method = 'GET', token = '', body = null } = {}) {
+  const response = await fetch(`${centralBaseUrl()}${pathname}`, {
+    method,
+    headers: {
+      ...(body ? { 'content-type': 'application/json' } : {}),
+      ...(token ? { 'x-installation-token': token } : {})
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload.error || `Central HTTP ${response.status}`);
+    error.statusCode = response.status;
+    throw error;
+  }
+  return payload;
+}
+
+async function centralPair(pairingToken, url = '') {
+  if (!pairingToken) throw new Error('Token da Central obrigatorio');
+  const settings = writeCentralSettings({ enabled: false, url: url || centralBaseUrl() });
+  const payload = await centralRequest('/api/tronsoftos/pair', {
+    method: 'POST',
+    body: {
+      ...centralIdentifyPayload(),
+      pairingToken
+    }
+  });
+  writeCentralToken(payload.installationToken);
+  const next = writeCentralSettings({
+    enabled: true,
+    url: settings.url,
+    pairedAt: new Date().toISOString(),
+    lastValidationAt: new Date().toISOString(),
+    installationId: payload.installationId,
+    clientId: payload.clientId
+  });
+  appendEvent('CENTRAL_TOKEN_VALIDATED', {
+    centralUrl: next.url,
+    installationId: payload.installationId,
+    clientId: payload.clientId
+  });
+  if (!centralAgentTimer) startCentralAgent();
+  else centralAgentTick();
+  return {
+    ...publicCentralSettings(),
+    message: payload.message || 'Central validada com sucesso.'
+  };
+}
+
+function centralIdentifyPayload() {
+  const build = buildInfo();
+  const identity = nodeIdentity();
+  return {
+    installationId: centralInstallationId(),
+    reseller: centralResellerPayload(),
+    customer: centralCustomerPayload(),
+    environment: {
+      name: centralEnvironmentName(),
+      mode: identity.deploymentMode,
+      nodeRole: identity.nodeRole
+    },
+    tronsoftos: {
+      version: build.version,
+      build: build.buildNumber ? String(build.buildNumber) : build.commit,
+      channel: build.branch
+    },
+    database: centralDatabasePayload(),
+    host: centralHostPayload(),
+    status: 'online'
+  };
+}
+
+async function centralIdentify() {
+  const payload = await centralRequest('/api/tronsoftos/identify', {
+    method: 'POST',
+    body: centralIdentifyPayload()
+  });
+  writeCentralToken(payload.installationToken);
+  appendEvent('CENTRAL_IDENTIFIED', {
+    centralUrl: centralBaseUrl(),
+    installationId: payload.installationId,
+    clientId: payload.clientId,
+    resellerId: payload.resellerId
+  });
+  return payload.installationToken;
+}
+
+function centralStatusFromDashboard(payload) {
+  if (payload.apps?.some(app => app.status === 'offline' && app.enabled !== false)) return 'offline';
+  if (payload.alerts?.some(alert => alert.severity === 'critical')) return 'warning';
+  if (payload.alerts?.some(alert => alert.severity === 'warning')) return 'warning';
+  return 'online';
+}
+
+async function centralHeartbeat(token, payload) {
+  return centralRequest('/api/tronsoftos/heartbeat', {
+    method: 'POST',
+    token,
+    body: {
+      status: centralStatusFromDashboard(payload),
+      tronsoftos: {
+        version: payload.build?.version || '',
+        build: payload.build?.buildNumber ? String(payload.build.buildNumber) : payload.build?.commit || '',
+        channel: payload.build?.branch || ''
+      },
+      database: centralDatabasePayload(),
+      host: centralHostPayload(),
+      cluster: {
+        mode: payload.cluster?.mode || '',
+        nodeName: payload.cluster?.nodeName || '',
+        nodeRole: payload.cluster?.nodeRole || '',
+        vip: payload.cluster?.vip || null
+      }
+    }
+  });
+}
+
+function centralAlertKey(alert) {
+  return crypto.createHash('sha1')
+    .update(`${alert.severity || 'info'}:${alert.message || alert.title || ''}`)
+    .digest('hex');
+}
+
+function writeCentralAlertStates() {
+  ensureStateDir();
+  fs.writeFileSync(centralAlertStatePath, `${JSON.stringify(Object.fromEntries(centralAlertStates), null, 2)}\n`, { mode: 0o600 });
+}
+
+async function centralSendAlert(token, alert) {
+  const title = alert.title || alert.message || 'Alerta TronSoftOS';
+  return centralRequest('/api/tronsoftos/alerts', {
+    method: 'POST',
+    token,
+    body: {
+      severity: alert.severity || 'info',
+      title,
+      message: alert.message || title,
+      code: alert.code || centralAlertKey(alert),
+      details: {
+        source: 'tronsoftos',
+        node: nodeIdentity(),
+        alert
+      }
+    }
+  });
+}
+
+async function centralSyncAlerts(token, alerts) {
+  const activeKeys = new Set();
+  for (const alert of alerts || []) {
+    const key = centralAlertKey(alert);
+    activeKeys.add(key);
+    if (centralAlertStates.get(key) === 'active') continue;
+    await centralSendAlert(token, alert);
+    centralAlertStates.set(key, 'active');
+    appendEvent('CENTRAL_ALERT_SENT', { key, severity: alert.severity || 'info', message: alert.message || alert.title || '' });
+  }
+  for (const [key, state] of centralAlertStates.entries()) {
+    if (state === 'active' && !activeKeys.has(key)) {
+      centralAlertStates.set(key, 'recovered');
+      appendEvent('CENTRAL_ALERT_RECOVERED', { key });
+    }
+  }
+  writeCentralAlertStates();
+}
+
+async function centralAgentTick() {
+  if (!centralEnabled() || centralAgentInFlight) return;
+  centralAgentInFlight = true;
+  try {
+    let token = centralToken();
+    if (!token) {
+      appendEvent('CENTRAL_SYNC_SKIPPED', { reason: 'token da instalacao nao configurado' });
+      return;
+    }
+    const payload = await dashboard();
+    try {
+      await centralHeartbeat(token, payload);
+    } catch (err) {
+      throw err;
+    }
+    await centralSyncAlerts(token, payload.alerts || []);
+  } catch (err) {
+    appendEvent('CENTRAL_SYNC_FAILED', { centralUrl: centralBaseUrl(), error: err.message });
+  } finally {
+    centralAgentInFlight = false;
+  }
+}
+
+function startCentralAgent() {
+  if (!centralEnabled()) return;
+  centralAgentTick();
+  centralAgentTimer = setInterval(centralAgentTick, centralHeartbeatMs());
+  appendEvent('CENTRAL_AGENT_STARTED', {
+    centralUrl: centralBaseUrl(),
+    intervalSeconds: Math.round(centralHeartbeatMs() / 1000)
+  });
+}
+
 function contentTypeFor(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   return {
@@ -3782,6 +4235,11 @@ async function handleApi(req, reply, url) {
   if (req.method === 'PATCH' && url.pathname === '/api/cloudflare') return json(reply, 200, writeCloudflareSettings(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/cloudflare/test') return json(reply, 200, await cloudflareTest());
   if (req.method === 'POST' && url.pathname === '/api/cloudflare/sync') return json(reply, 200, await cloudflareSync());
+  if (req.method === 'GET' && url.pathname === '/api/settings/central') return json(reply, 200, publicCentralSettings());
+  if (req.method === 'POST' && url.pathname === '/api/settings/central/validate-token') {
+    const body = await readBody(req);
+    return json(reply, 200, await centralPair(String(body.token || '').trim(), String(body.url || '').trim()));
+  }
   if (req.method === 'GET' && url.pathname === '/api/settings/smtp') return json(reply, 200, smtpSettings());
   if (req.method === 'PATCH' && url.pathname === '/api/settings/smtp') return json(reply, 200, writeSmtpSettings(await readBody(req)));
   if (req.method === 'GET' && url.pathname === '/api/events') return json(reply, 200, { events: readEvents(Number(url.searchParams.get('limit') || 100)) });
@@ -3847,6 +4305,7 @@ server.listen(port, '0.0.0.0', () => {
   ensureStateDir();
   startHaSyncScheduler();
   startHaFailoverWatchdog();
+  startCentralAgent();
   appendEvent('TRONSOFTOS_STARTED', { port });
   console.log(`TronSoftOS listening on 0.0.0.0:${port}`);
 });

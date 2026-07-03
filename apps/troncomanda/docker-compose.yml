@@ -2,13 +2,15 @@ name: troncomanda
 
 services:
   web:
-    image: httpd:2.4
+    image: nginx:1.27-alpine
     container_name: troncomanda_web
     restart: unless-stopped
     ports:
       - "0.0.0.0:${TRONCOMANDA_WEB_PORT:-8000}:80"
     environment:
       TZ: ${TZ:-America/Sao_Paulo}
+    volumes:
+      - ./nginx-web.conf:/etc/nginx/conf.d/default.conf:ro
 
   api:
     image: ghcr.io/tronsoft-solucoes/ts-restaurant:main
