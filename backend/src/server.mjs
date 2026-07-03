@@ -2666,15 +2666,18 @@ function exportPairingFile(reply) {
 async function dashboard() {
   const [apps, localTronfireHa, systemMetrics] = await Promise.all([appsStatus(), tronfireHaStatus(), tronfireSystemMetrics()]);
   const cluster = clusterStatus();
+  const haMode = cluster.mode === 'ha';
   cluster.vipStatus = await vipStatus(cluster);
   const identity = cluster.identity || nodeIdentity();
-  if (cluster.mode === 'ha' && cluster.sync?.standbyHost) {
+  if (haMode && cluster.sync?.standbyHost) {
     cluster.standbyHealth = await remoteTronsoftosHealth(cluster.sync.standbyHost);
   }
-  const tronfireHa = cluster.mode === 'ha' && identity.nodeRole === 'primary' && cluster.sync?.standbyHost
+  const tronfireHa = haMode && identity.nodeRole === 'primary' && cluster.sync?.standbyHost
     ? await remoteTronfireHaStatus(cluster.sync.standbyHost)
-    : localTronfireHa;
-  if (tronfireHa && cluster.sync) {
+    : haMode
+      ? localTronfireHa
+      : null;
+  if (haMode && tronfireHa && cluster.sync) {
     cluster.sync.tronfireStandby = tronfireHa;
     const requiredReady = tronfireHa.ok !== false && tronfireHa.allReady === true;
     const latestRestoredBackupAt = tronfireHa.latestBackupAt ? new Date(tronfireHa.latestBackupAt).getTime() : 0;
@@ -2694,23 +2697,23 @@ async function dashboard() {
     const standbyVersion = cluster.standbyHealth.buildNumber ? `build ${cluster.standbyHealth.buildNumber}` : (cluster.standbyHealth.commit || cluster.standbyHealth.version);
     alerts.push({ severity: 'warning', message: `Nos HA em versoes diferentes: local ${localVersion}, standby ${standbyVersion}` });
   }
-  if (cluster.mode === 'ha' && !cluster.lock) alerts.push({ severity: 'warning', message: 'Cluster HA sem cluster-lock' });
-  if (identity.nodeRole === 'primary' && cluster.sync?.standbyHost && cluster.sync?.sshValidated !== true) {
+  if (haMode && !cluster.lock) alerts.push({ severity: 'warning', message: 'Cluster HA sem cluster-lock' });
+  if (haMode && identity.nodeRole === 'primary' && cluster.sync?.standbyHost && cluster.sync?.sshValidated !== true) {
     alerts.push({ severity: 'warning', message: 'Pareamento SSH do standby pendente: o TronSoftOS tentara validar automaticamente' });
   }
-  if (cluster.sync?.status === 'failed') {
+  if (haMode && cluster.sync?.status === 'failed') {
     alerts.push({
       severity: 'warning',
       message: 'Sync HA em recuperacao: ultima tentativa falhou; aguarde a proxima execucao ou rode o sync manual se persistir'
     });
   }
-  if (cluster.sync?.status === 'deferred') {
+  if (haMode && cluster.sync?.status === 'deferred') {
     alerts.push({
       severity: 'warning',
       message: 'Sync HA adiado: backup do TronFire em andamento; nova tentativa automatica ocorrera no proximo ciclo'
     });
   }
-  if (cluster.failover?.maintenanceBlock?.active) {
+  if (haMode && cluster.failover?.maintenanceBlock?.active) {
     alerts.push({
       severity: cluster.failover.maintenanceBlock.expired ? 'critical' : 'warning',
       message: cluster.failover.maintenanceBlock.expired
@@ -2718,7 +2721,7 @@ async function dashboard() {
         : `Failover automatico suspenso por manutencao planejada ate ${formatIsoForAlert(cluster.failover.maintenanceBlock.expiresAt)}`
     });
   }
-  if (cluster.failover?.primaryDownSince) {
+  if (haMode && cluster.failover?.primaryDownSince) {
     const maintenanceBlocked = cluster.failover.maintenanceBlock?.active === true;
     const standbyBlocked = !maintenanceBlocked && cluster.failover.enabled && cluster.sync?.enabled && cluster.sync?.standbyReady === false;
     alerts.push({
@@ -2741,14 +2744,14 @@ async function dashboard() {
       });
     }
   }
-  if (cluster.sync?.enabled && cluster.sync?.standbyLagMinutes !== null && cluster.sync.standbyLagMinutes > FIXED_HA_SYNC_INTERVAL_MINUTES * 2) {
+  if (haMode && cluster.sync?.enabled && cluster.sync?.standbyLagMinutes !== null && cluster.sync.standbyLagMinutes > FIXED_HA_SYNC_INTERVAL_MINUTES * 2) {
     const lagLabel = cluster.sync.syncMode === 'physical' ? 'sem standby fisico validado' : 'sem backup validado/restauravel';
     alerts.push({
       severity: cluster.sync.standbyLagMinutes >= HA_SYNC_CRITICAL_LAG_MINUTES ? 'critical' : 'warning',
       message: `Standby atrasado: ${cluster.sync.standbyLagMinutes} min ${lagLabel}`
     });
   }
-  if (cluster.sync?.enabled && cluster.sync?.syncMode === 'backup_restore') {
+  if (haMode && cluster.sync?.enabled && cluster.sync?.syncMode === 'backup_restore') {
     const intervalMinutes = FIXED_HA_SYNC_INTERVAL_MINUTES;
     const latestBackupAt = cluster.sync.receiver?.latestValidatedBackup?.modifiedAt ? new Date(cluster.sync.receiver.latestValidatedBackup.modifiedAt).getTime() : 0;
     const backupAgeMinutes = latestBackupAt ? Math.round((Date.now() - latestBackupAt) / 60000) : null;

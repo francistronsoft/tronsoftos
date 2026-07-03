@@ -624,7 +624,8 @@ function ClusterView({ dashboard }) {
     nodeRole: identity.nodeRole || cluster.nodeRole || 'primary',
     deploymentMode: identity.deploymentMode || cluster.mode || 'simple'
   };
-  const isSyncReceiver = values.deploymentMode === 'ha' && ['standby', 'recovery'].includes(values.nodeRole);
+  const isHaMode = values.deploymentMode === 'ha';
+  const isSyncReceiver = isHaMode && ['standby', 'recovery'].includes(values.nodeRole);
   const standbyDbStatusKnown = Number.isFinite(Number(syncStatus.tronfireStandby?.databaseCount));
   const standbyDbAllReady = syncStatus.tronfireStandby?.allReady === true;
   const standbyReady = syncStatus.standbyReady === true && (!standbyDbStatusKnown || standbyDbAllReady);
@@ -821,9 +822,9 @@ function ClusterView({ dashboard }) {
   const setFailoverValue = (key, value) => setFailoverForm(previous => ({ ...(previous || failoverValues), [key]: value }));
   const setSyncValue = (key, value) => setSyncForm(previous => ({ ...(previous || syncValues), [key]: value }));
   const setVipValue = (key, value) => setVipForm(previous => ({ ...(previous || vipValues), [key]: value }));
-  const canManageSync = values.deploymentMode !== 'ha' || guard.canServeProduction === true || values.nodeRole === 'primary';
-  const canExportPairing = values.deploymentMode !== 'ha' || guard.canServeProduction === true || values.nodeRole === 'primary';
-  const canImportPairing = values.deploymentMode === 'ha' && !canExportPairing && ['standby', 'recovery'].includes(values.nodeRole);
+  const canManageSync = isHaMode && (guard.canServeProduction === true || values.nodeRole === 'primary');
+  const canExportPairing = isHaMode && (guard.canServeProduction === true || values.nodeRole === 'primary');
+  const canImportPairing = isHaMode && !canExportPairing && ['standby', 'recovery'].includes(values.nodeRole);
   const pairingImportMutation = useMutation({
     mutationFn: content => postApi('/api/cluster/pairing-file/import', { content }),
     onSuccess: () => {
@@ -840,7 +841,7 @@ function ClusterView({ dashboard }) {
     reader.readAsText(file);
     event.target.value = '';
   };
-  const clusterTabs = [
+  const clusterTabs = isHaMode ? [
     { id: 'overview', label: 'Visao geral', icon: Activity },
     { id: 'identity', label: 'Identidade', icon: ShieldCheck },
     { id: 'vip', label: 'VIP', icon: Network },
@@ -848,12 +849,82 @@ function ClusterView({ dashboard }) {
     ...(canManageSync ? [{ id: 'sync', label: 'Sync', icon: RefreshCw }] : []),
     { id: 'logs', label: 'Logs HA', icon: Terminal },
     { id: 'promotion', label: 'Promocao', icon: GitBranch }
+  ] : [
+    { id: 'overview', label: 'Visao geral', icon: Activity },
+    { id: 'identity', label: 'Identidade', icon: ShieldCheck }
   ];
+  const activeClusterTab = clusterTabs.some(item => item.id === clusterTab) ? clusterTab : 'overview';
+  const identityForm = (
+    <Card title="Identidade do no" icon={ShieldCheck}>
+      <form
+        className="grid gap-3 md:grid-cols-2"
+        onSubmit={event => {
+          event.preventDefault();
+          saveMutation.mutate(values);
+        }}
+      >
+        <Field label="Cluster ID" value={values.clusterId} onChange={value => setValue('clusterId', value)} placeholder="cliente-x" />
+        <Field label="Nome do no" value={values.nodeName} onChange={value => setValue('nodeName', value)} placeholder="servidor-01" />
+        <label className="block">
+          <span className="text-xs font-medium uppercase text-slate-500">Modo</span>
+          <select value={values.deploymentMode} onChange={event => setValue('deploymentMode', event.target.value)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100">
+            <option value="simple">simple</option>
+            <option value="ha">ha</option>
+          </select>
+        </label>
+        <label className="block">
+          <span className="text-xs font-medium uppercase text-slate-500">Papel</span>
+          <select value={values.nodeRole} onChange={event => setValue('nodeRole', event.target.value)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100">
+            <option value="primary">primary</option>
+            <option value="standby">standby</option>
+            <option value="recovery">recovery</option>
+          </select>
+        </label>
+        <div className="md:col-span-2 flex flex-wrap items-center gap-3">
+          <button disabled={saveMutation.isPending} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
+            <Save className="h-4 w-4" />
+            Salvar identidade
+          </button>
+          {saveMutation.isSuccess ? <span className="text-sm text-green-700">Identidade salva.</span> : null}
+          {saveMutation.isError ? <span className="text-sm text-red-700">{saveMutation.error?.message}</span> : null}
+        </div>
+      </form>
+    </Card>
+  );
+  if (!isHaMode) {
+    return (
+      <div className="space-y-5">
+        <SubTabs items={clusterTabs} active={activeClusterTab} onChange={setClusterTab} />
+        {activeClusterTab === 'overview' ? (
+          <Card title="Servidor solo" icon={Server} action={<StatusPill value="disabled" />}>
+            <div className="grid gap-4 lg:grid-cols-[1fr_280px]">
+              <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-3 text-sm text-sky-800">
+                Este TronSoftOS foi instalado sem alta disponibilidade. As funcoes de VIP, Sync HA, rsync, standby, pareamento e promocao automatica ficam desativadas para este servidor.
+              </div>
+              <div className="grid gap-3 text-sm">
+                {[
+                  ['Modo', 'simple'],
+                  ['No', values.nodeName],
+                  ['Papel', values.nodeRole],
+                  ['Cluster ID', values.clusterId]
+                ].map(([label, value]) => (
+                  <div key={label} className="flex items-center justify-between gap-4 border-b border-slate-100 pb-2">
+                    <span className="text-slate-500">{label}</span>
+                    <span className="text-right font-medium text-slate-950">{value}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </Card>
+        ) : identityForm}
+      </div>
+    );
+  }
   return (
     <div className="space-y-5">
-      <SubTabs items={clusterTabs} active={clusterTab} onChange={setClusterTab} />
+      <SubTabs items={clusterTabs} active={activeClusterTab} onChange={setClusterTab} />
 
-      {clusterTab === 'overview' ? (
+      {activeClusterTab === 'overview' ? (
         <div className="space-y-5">
           <div className="grid gap-4 lg:grid-cols-4">
             <Stat label="No atual" value={cluster.nodeName} detail={identity.clusterId || 'cluster local'} icon={Server} tone="sky" />
@@ -1040,45 +1111,9 @@ function ClusterView({ dashboard }) {
         </div>
       ) : null}
 
-      {clusterTab === 'identity' ? (
-        <Card title="Identidade do no" icon={ShieldCheck}>
-          <form
-            className="grid gap-3 md:grid-cols-2"
-            onSubmit={event => {
-              event.preventDefault();
-              saveMutation.mutate(values);
-            }}
-          >
-            <Field label="Cluster ID" value={values.clusterId} onChange={value => setValue('clusterId', value)} placeholder="cliente-x" />
-            <Field label="Nome do no" value={values.nodeName} onChange={value => setValue('nodeName', value)} placeholder="servidor-01" />
-            <label className="block">
-              <span className="text-xs font-medium uppercase text-slate-500">Modo</span>
-              <select value={values.deploymentMode} onChange={event => setValue('deploymentMode', event.target.value)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100">
-                <option value="simple">simple</option>
-                <option value="ha">ha</option>
-              </select>
-            </label>
-            <label className="block">
-              <span className="text-xs font-medium uppercase text-slate-500">Papel</span>
-              <select value={values.nodeRole} onChange={event => setValue('nodeRole', event.target.value)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100">
-                <option value="primary">primary</option>
-                <option value="standby">standby</option>
-                <option value="recovery">recovery</option>
-              </select>
-            </label>
-            <div className="md:col-span-2 flex flex-wrap items-center gap-3">
-              <button disabled={saveMutation.isPending} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
-                <Save className="h-4 w-4" />
-                Salvar identidade
-              </button>
-              {saveMutation.isSuccess ? <span className="text-sm text-green-700">Identidade salva.</span> : null}
-              {saveMutation.isError ? <span className="text-sm text-red-700">{saveMutation.error?.message}</span> : null}
-            </div>
-          </form>
-        </Card>
-      ) : null}
+      {activeClusterTab === 'identity' ? identityForm : null}
 
-      {clusterTab === 'pairing' ? (
+      {activeClusterTab === 'pairing' ? (
         <Card title="Pareamento HA" icon={ShieldCheck}>
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div>
@@ -1153,7 +1188,7 @@ function ClusterView({ dashboard }) {
         </Card>
       ) : null}
 
-      {clusterTab === 'vip' ? (
+      {activeClusterTab === 'vip' ? (
       <Card title="VIP Keepalived" icon={Network} action={<StatusPill value={cluster.keepalived?.enabled ? 'online' : 'disabled'} />}>
         <form
           className="grid gap-3 md:grid-cols-2"
@@ -1197,7 +1232,7 @@ function ClusterView({ dashboard }) {
       </Card>
       ) : null}
 
-      {clusterTab === 'logs' ? (
+      {activeClusterTab === 'logs' ? (
         <div className="grid gap-5 xl:grid-cols-[360px_1fr]">
           <Card title="Logs do Sync HA" icon={Terminal} action={<StatusPill value={haLogsQuery.data?.selected?.status || 'logs'} />}>
             <div className="mb-3 text-xs text-slate-500">
@@ -1246,7 +1281,7 @@ function ClusterView({ dashboard }) {
         </div>
       ) : null}
 
-      {clusterTab === 'promotion' ? (
+      {activeClusterTab === 'promotion' ? (
         <div className="grid gap-5 xl:grid-cols-2">
       <Card title="Failover automatico" icon={RefreshCw} action={<StatusPill value={failoverValues.enabled ? 'automatico' : 'manual'} />}>
         <form
@@ -1348,7 +1383,7 @@ function ClusterView({ dashboard }) {
         </div>
       ) : null}
 
-      {clusterTab === 'sync' ? (
+      {activeClusterTab === 'sync' ? (
         canManageSync ? (
       <Card title="Sync HA" icon={RefreshCw} action={<StatusPill value={sync.sshValidated ? 'automatico' : syncValues.standbyHost ? 'SSH pendente' : 'configurar'} />}>
         <form
