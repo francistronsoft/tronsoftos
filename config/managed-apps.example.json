@@ -29,7 +29,7 @@
         "apps/troncomanda/docker-compose.yml"
       ],
       "projectName": "troncomanda",
-      "healthUrl": "http://127.0.0.1:8000/",
+      "healthUrl": "http://127.0.0.1:8000/health",
       "publicUrl": "http://127.0.0.1:8000",
       "containers": [
         "troncomanda_web",
