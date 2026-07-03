@@ -427,7 +427,7 @@ firebird_script() {
   [ -f "$script_path" ] || fail "Script Firebird nao encontrado"
   grep -q '^# TronFire host Firebird script$' "$script_path" || fail "Script Firebird sem assinatura esperada"
   chmod 0700 "$script_path"
-  FIREBIRD=/usr/local/firebird LD_LIBRARY_PATH="/usr/local/firebird/lib:${LD_LIBRARY_PATH:-}" bash "$script_path"
+  TERM=dumb FIREBIRD=/usr/local/firebird LD_LIBRARY_PATH="/usr/local/firebird/lib:${LD_LIBRARY_PATH:-}" bash "$script_path"
   printf '{"ok":true,"script":"%s"}\n' "$(json_escape "$script_path")"
 }
 

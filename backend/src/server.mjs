@@ -2381,11 +2381,13 @@ async function hostFirebirdScript(req) {
   try {
     const out = await privilegedRun('/usr/local/sbin/tronsoftos-network', ['firebird-script', tmpPath], {
       timeout: timeoutMs,
-      maxBuffer: 1024 * 1024 * 10
+      maxBuffer: 1024 * 1024 * 10,
+      env: { ...process.env, TERM: 'dumb' }
     });
     const result = parseJsonLines(out.stdout).at(-1) || { ok: true };
-    appendEvent('FIREBIRD_HOST_SCRIPT_EXECUTED', { script: path.basename(tmpPath), stderr: out.stderr });
-    return { ...result, stdout: out.stdout, stderr: out.stderr };
+    const stderr = stripTerminalNoise(out.stderr);
+    appendEvent('FIREBIRD_HOST_SCRIPT_EXECUTED', { script: path.basename(tmpPath), ...(stderr ? { stderr } : {}) });
+    return { ...result, stdout: out.stdout, stderr };
   } finally {
     fs.rmSync(tmpPath, { force: true });
   }
@@ -3373,6 +3375,14 @@ function shQuote(value) {
   return `'${String(value).replace(/'/g, "'\\''")}'`;
 }
 
+function stripTerminalNoise(text) {
+  return String(text || '')
+    .split(/\r?\n/)
+    .filter(line => !/No entry for terminal type "unknown"|using dumb terminal settings/i.test(line))
+    .join('\n')
+    .trim();
+}
+
 function formatIsoForAlert(value) {
   if (!value) return 'horario nao informado';
   try {
@@ -3433,6 +3443,9 @@ function failoverMaintenanceBlock() {
 }
 
 function writeFailoverMaintenanceBlock(body = {}) {
+  if (nodeIdentity().deploymentMode !== 'ha') {
+    return clearFailoverMaintenanceBlock({ reason: 'Servidor solo: failover HA desativado' });
+  }
   const timeoutMinutes = Number(body.timeoutMinutes || UPDATE_MAINTENANCE_TIMEOUT_MINUTES);
   return writeMaintenanceState({
     active: true,
@@ -3601,6 +3614,7 @@ function startLocalKeepalived(action, body = {}) {
 function startStandbyKeepalived(action, body = {}) {
   if (!['start', 'stop'].includes(action)) throw new Error('acao keepalived invalida');
   requireConfirmation(body, action === 'stop' ? 'SUSPENDER STANDBY' : 'REATIVAR STANDBY');
+  if (nodeIdentity().deploymentMode !== 'ha') throw new Error('failover standby indisponivel em servidor solo');
   const settings = rawHaSyncSettings();
   if (!settings.standbyHost) throw new Error('host standby nao configurado no Sync HA');
   const sshUser = settings.sshUser || 'tronsoft';
@@ -3656,15 +3670,17 @@ function startTronsoftosUpdate(body = {}) {
   const script = path.join(appRoot, 'scripts/update-tronsoftos.sh');
   if (!fs.existsSync(script)) throw new Error(`script de atualizacao nao encontrado: ${script}`);
 
-  writeMaintenanceState({
-    active: true,
-    mode: 'update',
-    reason: `Atualizacao planejada para branch ${branch}`,
-    standbyHost: identity.deploymentMode === 'ha' && identity.nodeRole === 'primary' ? settings.standbyHost || null : null,
-    startedAt: new Date().toISOString(),
-    expiresAt: maintenanceExpiresAt(timeoutMinutes),
-    clearedAt: null
-  });
+  if (identity.deploymentMode === 'ha') {
+    writeMaintenanceState({
+      active: true,
+      mode: 'update',
+      reason: `Atualizacao planejada para branch ${branch}`,
+      standbyHost: identity.nodeRole === 'primary' ? settings.standbyHost || null : null,
+      startedAt: new Date().toISOString(),
+      expiresAt: maintenanceExpiresAt(timeoutMinutes),
+      clearedAt: null
+    });
+  }
 
   const cmd = privilegedCommandArgs('/usr/bin/bash', [script, branch]);
   const env = {
@@ -3690,7 +3706,7 @@ function startHostPower(action, body = {}) {
   const identity = nodeIdentity();
   const settings = rawHaSyncSettings();
   const cmd = privilegedCommandArgs('/usr/local/sbin/tronsoftos-network', ['host-power', action]);
-  if ((identity.nodeRole || 'primary') === 'primary' && settings.standbyHost) {
+  if (identity.deploymentMode === 'ha' && (identity.nodeRole || 'primary') === 'primary' && settings.standbyHost) {
     const sshUser = settings.sshUser || 'tronsoft';
     const sshPort = String(settings.sshPort || 22);
     const knownHosts = path.join(stateDir, 'known_hosts');

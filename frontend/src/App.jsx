@@ -184,7 +184,8 @@ function formatDateTime(value) {
   if (!value) return '-';
   return new Date(value).toLocaleString('pt-BR', {
     dateStyle: 'short',
-    timeStyle: 'medium'
+    timeStyle: 'medium',
+    timeZone: 'America/Sao_Paulo'
   });
 }
 
@@ -1765,6 +1766,7 @@ function UpdatesView({ dashboard }) {
   const build = dashboard.build || dashboard.cluster?.build || {};
   const role = dashboard.cluster?.nodeRole || dashboard.cluster?.identity?.nodeRole || '-';
   const mode = dashboard.cluster?.mode || '-';
+  const isHaMode = mode === 'ha';
   const standbyHost = dashboard.cluster?.sync?.standbyHost || '';
   const maintenanceBlock = dashboard.cluster?.failover?.maintenanceBlock || {};
   const busy = updateMutation.isPending || jobQuery.data?.status === 'running';
@@ -1774,7 +1776,7 @@ function UpdatesView({ dashboard }) {
         <Stat label="Versao atual" value={build.version || '-'} detail={build.buildNumber ? `Build ${build.buildNumber}` : 'build nao informado'} icon={GitBranch} tone="slate" />
         <Stat label="Branch atual" value={build.branch || '-'} detail={build.installedAt ? `instalado ${formatDateTime(build.installedAt)}` : 'instalacao nao informada'} icon={GitBranch} tone="sky" />
         <Stat label="Papel local" value={role} detail={mode} icon={ShieldCheck} tone={role === 'primary' ? 'green' : 'sky'} />
-        <Stat label="Standby HA" value={standbyHost || '-'} detail={standbyHost ? 'sera bloqueado ao atualizar primary' : 'nao configurado'} icon={Server} tone={standbyHost ? 'green' : 'amber'} />
+        <Stat label={isHaMode ? 'Standby HA' : 'Modo HA'} value={isHaMode ? (standbyHost || '-') : 'desativado'} detail={isHaMode ? (standbyHost ? 'sera bloqueado ao atualizar primary' : 'nao configurado') : 'servidor solo'} icon={Server} tone={isHaMode && standbyHost ? 'green' : 'slate'} />
       </div>
 
       {jobQuery.data ? <ActionTerminal job={jobQuery.data} /> : null}
@@ -1782,17 +1784,23 @@ function UpdatesView({ dashboard }) {
       <div className="grid gap-5 xl:grid-cols-2">
         <Card title="Atualizar branch dev" icon={RefreshCw} action={<StatusPill value={busy ? 'running' : 'dev'} />}>
           <div className="space-y-3 text-sm text-slate-700">
-            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-amber-800">
-              Em HA, atualize primeiro o standby. Ao atualizar o primary, o TronSoftOS bloqueia a promocao automatica no standby por manutencao planejada e libera novamente ao concluir.
+            <div className={`rounded-md border px-3 py-2 ${isHaMode ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-sky-200 bg-sky-50 text-sky-800'}`}>
+              {isHaMode
+                ? 'Em HA, atualize primeiro o standby. Ao atualizar o primary, o TronSoftOS bloqueia a promocao automatica no standby por manutencao planejada e libera novamente ao concluir.'
+                : 'Servidor solo: a atualizacao sera feita somente neste host, sem bloqueio ou reativacao de failover.'}
             </div>
             <ol className="space-y-2">
-              {[
+              {(isHaMode ? [
                 'Entrar em manutencao local',
                 'Bloquear promocao automatica no standby quando este no for primary',
                 'Baixar e aplicar a branch dev',
                 'Executar install.sh e migrations do TronFire',
                 'Liberar o standby e reiniciar o servico TronSoftOS'
-              ].map(item => (
+              ] : [
+                'Baixar e aplicar a branch dev',
+                'Executar install.sh e migrations do TronFire',
+                'Reiniciar o servico TronSoftOS'
+              ]).map(item => (
                 <li key={item} className="flex items-center gap-2"><span className="status-dot bg-slate-300" />{item}</li>
               ))}
             </ol>
@@ -1807,7 +1815,7 @@ function UpdatesView({ dashboard }) {
             {updateMutation.isError ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{updateMutation.error.message}</div> : null}
           </div>
         </Card>
-        <Card title="Trava de failover" icon={ShieldCheck} action={<StatusPill value={maintenanceBlock.active ? (maintenanceBlock.expired ? 'critical' : 'warning') : 'disabled'} />}>
+        {isHaMode ? <Card title="Trava de failover" icon={ShieldCheck} action={<StatusPill value={maintenanceBlock.active ? (maintenanceBlock.expired ? 'critical' : 'warning') : 'disabled'} />}>
           <div className="grid gap-3 text-sm">
             {[
               ['Status', maintenanceBlock.active ? 'ativo' : 'inativo'],
@@ -1825,9 +1833,9 @@ function UpdatesView({ dashboard }) {
           <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
             Se o prazo vencer, o standby continua sem promover automaticamente e gera alerta critico para decisao manual do tecnico.
           </div>
-        </Card>
+        </Card> : null}
       </div>
-      <Card title="Ordem recomendada em HA" icon={Database}>
+      {isHaMode ? <Card title="Ordem recomendada em HA" icon={Database}>
         <div className="grid gap-3 text-sm text-slate-700 md:grid-cols-2">
           <div className="rounded-md border border-slate-200 bg-white p-3">
             <div className="font-semibold text-slate-950">1. Standby</div>
@@ -1838,7 +1846,7 @@ function UpdatesView({ dashboard }) {
             <div>Atualize o primary depois. O standby recebe trava temporaria de failover durante a manutencao.</div>
           </div>
         </div>
-      </Card>
+      </Card> : null}
     </div>
   );
 }
@@ -1851,7 +1859,7 @@ function EventsView() {
       <div className="max-h-[520px] overflow-auto rounded-md bg-panel-950 p-3 font-mono text-xs text-slate-200 scrollbar-thin">
         {events.length ? events.map(event => (
           <div key={event.id} className="border-b border-white/10 py-2 last:border-0">
-            <span className="text-sky-300">{event.createdAt}</span> <span className="text-green-300">{event.type}</span> {JSON.stringify(event.details)}
+            <span className="text-sky-300">{formatDateTime(event.createdAt)}</span> <span className="text-green-300">{event.type}</span> {JSON.stringify(event.details)}
           </div>
         )) : <div className="py-8 text-center text-slate-400">Sem eventos registrados</div>}
       </div>
@@ -2065,9 +2073,10 @@ function MaintenanceView({ dashboard }) {
   const data = maintenanceQuery.data || {};
   const cluster = data.cluster || {};
   const sync = data.sync || {};
+  const isHaMode = cluster.mode === 'ha';
   const busy = actionMutation.isPending || jobQuery.data?.status === 'running';
   const run = path => payload => actionMutation.mutate({ path, ...payload });
-  const maintenanceTabs = [
+  const maintenanceTabs = isHaMode ? [
     { id: 'ha', label: 'Failover HA', icon: ShieldCheck },
     { id: 'failback', label: 'Failback', icon: GitBranch },
     { id: 'power', label: 'Energia', icon: Power },
@@ -2075,22 +2084,28 @@ function MaintenanceView({ dashboard }) {
     { id: 'diagnostics', label: 'Diagnostico', icon: CheckCircle2 },
     { id: 'events', label: 'Eventos', icon: Terminal },
     { id: 'settings', label: 'Ajustes', icon: Settings }
+  ] : [
+    { id: 'power', label: 'Energia', icon: Power },
+    { id: 'diagnostics', label: 'Diagnostico', icon: CheckCircle2 },
+    { id: 'events', label: 'Eventos', icon: Terminal },
+    { id: 'settings', label: 'Ajustes', icon: Settings }
   ];
+  const activeTab = maintenanceTabs.some(item => item.id === tab) ? tab : maintenanceTabs[0].id;
 
   return (
     <div className="space-y-5">
       <div className="grid gap-4 lg:grid-cols-4">
         <Stat label="No atual" value={cluster.nodeName || '-'} detail={cluster.nodeRole || '-'} icon={Server} tone="sky" />
-        <Stat label="Keepalived local" value={data.local?.keepalived || '-'} detail={cluster.vip || 'VIP nao configurado'} icon={Network} tone={data.local?.keepalived === 'active' ? 'green' : 'amber'} />
-        <Stat label="Standby" value={sync.standbyHost || '-'} detail={sync.enabled ? 'sync habilitado' : 'sync desabilitado'} icon={GitBranch} tone={sync.standbyHost ? 'green' : 'amber'} />
+        <Stat label={isHaMode ? 'Keepalived local' : 'HA local'} value={isHaMode ? (data.local?.keepalived || '-') : 'desativado'} detail={isHaMode ? (cluster.vip || 'VIP nao configurado') : 'servidor solo'} icon={Network} tone={isHaMode && data.local?.keepalived === 'active' ? 'green' : 'slate'} />
+        <Stat label={isHaMode ? 'Standby' : 'Sync HA'} value={isHaMode ? (sync.standbyHost || '-') : 'desativado'} detail={isHaMode ? (sync.enabled ? 'sync habilitado' : 'sync desabilitado') : 'sem rsync/standby'} icon={GitBranch} tone={isHaMode && sync.standbyHost ? 'green' : 'slate'} />
         <Stat label="Hora servidor" value={formatDateTime(data.generatedAt)} detail="backend local" icon={FileClock} tone="slate" />
       </div>
 
       {jobQuery.data ? <ActionTerminal job={jobQuery.data} /> : null}
 
-      <SubTabs items={maintenanceTabs} active={tab} onChange={setTab} />
+      <SubTabs items={maintenanceTabs} active={activeTab} onChange={setTab} />
 
-      {tab === 'ha' ? (
+      {activeTab === 'ha' ? (
         <Card title="Failover em manutencao" icon={ShieldCheck} action={<StatusPill value={sync.standbyHost ? 'online' : 'warning'} />}>
           <div className="mb-4 grid gap-3 text-sm">
             {[
@@ -2113,12 +2128,14 @@ function MaintenanceView({ dashboard }) {
         </Card>
       ) : null}
 
-      {tab === 'failback' ? <FailbackAssistant dashboard={dashboard} /> : null}
+      {activeTab === 'failback' ? <FailbackAssistant dashboard={dashboard} /> : null}
 
-      {tab === 'power' ? (
+      {activeTab === 'power' ? (
         <Card title="Energia do host local" icon={Power} action={<StatusPill value="critico" />}>
           <div className="mb-4 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-            Em primary com standby configurado, o TronSoftOS suspende o failover no standby antes de reiniciar ou desligar este host.
+            {isHaMode
+              ? 'Em primary com standby configurado, o TronSoftOS suspende o failover no standby antes de reiniciar ou desligar este host.'
+              : 'Servidor solo: reiniciar ou desligar afeta somente este host. Nao ha failover ou standby para suspender.'}
           </div>
           <div className="grid gap-3 md:grid-cols-2">
             <ConfirmAction label="Reiniciar host" icon={RefreshCw} confirmation="REINICIAR HOST" tone="amber" disabled={busy} onConfirm={run('/api/maintenance/host/reboot')} />
@@ -2127,7 +2144,7 @@ function MaintenanceView({ dashboard }) {
         </Card>
       ) : null}
 
-      {tab === 'keepalived' ? (
+      {activeTab === 'keepalived' ? (
         <Card title="Keepalived local" icon={Network}>
           <div className="mb-4 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
             Use estes controles apenas quando estiver operando diretamente no no correto. Em manutencao planejada do primary, normalmente voce suspende o keepalived no standby.
@@ -2139,9 +2156,9 @@ function MaintenanceView({ dashboard }) {
         </Card>
       ) : null}
 
-      {tab === 'diagnostics' ? <DiagnosticsView /> : null}
-      {tab === 'events' ? <EventsView /> : null}
-      {tab === 'settings' ? <SettingsView dashboard={dashboard} /> : null}
+      {activeTab === 'diagnostics' ? <DiagnosticsView /> : null}
+      {activeTab === 'events' ? <EventsView /> : null}
+      {activeTab === 'settings' ? <SettingsView dashboard={dashboard} /> : null}
     </div>
   );
 }
@@ -2420,7 +2437,7 @@ function AuthenticatedApp({ user, onLogout }) {
   const appActionPending = actionMutation.isPending || actionJobQuery.data?.status === 'running';
   const activeItem = useMemo(() => navItems.find(item => item.id === active) || navItems[0], [active]);
   const haMaintenance = dashboard.cluster?.maintenance;
-  const haMaintenanceActive = haMaintenance?.active === true;
+  const haMaintenanceActive = dashboard.cluster?.mode === 'ha' && haMaintenance?.active === true;
   const reactivateFailoverMutation = useMutation({
     mutationFn: () => postApi('/api/maintenance/standby/keepalived/start', { confirmation: 'REATIVAR STANDBY' }),
     onSuccess: () => {
