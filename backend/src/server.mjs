@@ -65,6 +65,7 @@ let smtpNotificationInFlight = false;
 const centralAlertStates = new Map(Object.entries(readJson(centralAlertStatePath, {})));
 let centralAgentTimer = null;
 let centralAgentInFlight = false;
+let centralDatabaseVersionCache = { checkedAt: 0, value: '' };
 
 function json(reply, status, body) {
   const payload = JSON.stringify(body, null, 2);
@@ -3914,9 +3915,35 @@ function primaryHostIp() {
   return '';
 }
 
-function centralDatabasePayload() {
+async function centralDatabaseVersionFromTronFire() {
+  if (centralDatabaseVersionCache.value && Date.now() - centralDatabaseVersionCache.checkedAt < 10 * 60 * 1000) {
+    return centralDatabaseVersionCache.value;
+  }
+  const token = internalTokenValue();
+  if (!token) return '';
+  try {
+    const target = tronfireProxyTarget();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const response = await fetch(new URL('/api/internal/database-version', target), {
+      signal: controller.signal,
+      headers: { 'x-tronsoftos-token': token }
+    });
+    clearTimeout(timeout);
+    if (!response.ok) return centralDatabaseVersionCache.value || '';
+    const payload = await response.json();
+    const value = String(payload.version || '').trim();
+    if (value) centralDatabaseVersionCache = { checkedAt: Date.now(), value };
+    return value;
+  } catch {
+    return centralDatabaseVersionCache.value || '';
+  }
+}
+
+async function centralDatabasePayload() {
   const tronfireEnv = parseEnvFile(path.join(appRoot, 'apps/tronfire/.env'));
-  const versaoBanco = process.env.TRONSOFTOS_CENTRAL_DATABASE_VERSAO_BANCO
+  const versaoBanco = await centralDatabaseVersionFromTronFire()
+    || process.env.TRONSOFTOS_CENTRAL_DATABASE_VERSAO_BANCO
     || process.env.TRONSOFTOS_CENTRAL_DATABASE_VERSION_LABEL
     || tronfireEnv.VERSAO_BANCO
     || tronfireEnv.versao_banco
@@ -3979,7 +4006,7 @@ async function centralPair(pairingToken, url = '') {
   const payload = await centralRequest('/api/tronsoftos/pair', {
     method: 'POST',
     body: {
-      ...centralIdentifyPayload(),
+      ...await centralIdentifyPayload(),
       pairingToken
     }
   });
@@ -4005,7 +4032,7 @@ async function centralPair(pairingToken, url = '') {
   };
 }
 
-function centralIdentifyPayload() {
+async function centralIdentifyPayload() {
   const build = buildInfo();
   const identity = nodeIdentity();
   return {
@@ -4022,7 +4049,7 @@ function centralIdentifyPayload() {
       build: build.buildNumber ? String(build.buildNumber) : build.commit,
       channel: build.branch
     },
-    database: centralDatabasePayload(),
+    database: await centralDatabasePayload(),
     host: centralHostPayload(),
     status: 'online'
   };
@@ -4031,7 +4058,7 @@ function centralIdentifyPayload() {
 async function centralIdentify() {
   const payload = await centralRequest('/api/tronsoftos/identify', {
     method: 'POST',
-    body: centralIdentifyPayload()
+    body: await centralIdentifyPayload()
   });
   writeCentralToken(payload.installationToken);
   appendEvent('CENTRAL_IDENTIFIED', {
@@ -4061,7 +4088,7 @@ async function centralHeartbeat(token, payload) {
         build: payload.build?.buildNumber ? String(payload.build.buildNumber) : payload.build?.commit || '',
         channel: payload.build?.branch || ''
       },
-      database: centralDatabasePayload(),
+      database: await centralDatabasePayload(),
       host: centralHostPayload(),
       cluster: {
         mode: payload.cluster?.mode || '',

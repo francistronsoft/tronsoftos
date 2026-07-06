@@ -13,7 +13,7 @@ import cors from '@fastify/cors';
 import { prisma } from './prisma.js';
 import { createSession, makeToken, requireAuth, requireAdmin, requireOperator, verifyPassword, hashPassword, sha256 } from './security.js';
 import { audit } from './audit.js';
-import { databaseCompanyIdentity, runPreflight } from './preflight.js';
+import { databaseCompanyIdentity, databaseDiagnostics, runPreflight } from './preflight.js';
 import { docker, dockerExec } from './shell.js';
 import {
   readCloudflareTunnelSettings,
@@ -1501,6 +1501,19 @@ app.get('/api/internal/metrics/dashboard', async (req) => {
 app.get('/api/internal/company-identity', async (req) => {
   assertInternalTronsoftos(req);
   return databaseCompanyIdentity();
+});
+
+app.get('/api/internal/database-version', async (req) => {
+  assertInternalTronsoftos(req);
+  const databases = await databaseDiagnostics();
+  const database = databases.find(db => db.pathRole === 'production' && db.version && db.version !== 'Erro')
+    || databases.find(db => db.version && db.version !== 'Erro')
+    || null;
+  return {
+    version: database?.version || null,
+    databaseName: database?.name || null,
+    databaseAlias: database?.alias || null
+  };
 });
 
 app.get('/api/alerts', { preHandler: requireAuth }, async (req) => {
