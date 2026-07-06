@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { execFile, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -182,13 +182,35 @@ function clearLoginFailures(req, username) {
 function buildInfo() {
   const version = String(process.env.TRONSOFTOS_VERSION || (fs.existsSync(versionPath) ? fs.readFileSync(versionPath, 'utf8') : '0.1.0')).trim() || '0.1.0';
   const saved = readJson(buildInfoPath, {});
+  const git = liveGitBuildInfo();
+  const commit = git.commit || process.env.TRONSOFTOS_GIT_COMMIT || saved.commit || 'unknown';
+  const buildNumber = Number(git.buildNumber || process.env.TRONSOFTOS_BUILD_NUMBER || saved.buildNumber || 0) || null;
   return {
-    version: saved.version || version,
-    buildNumber: Number(saved.buildNumber || process.env.TRONSOFTOS_BUILD_NUMBER || 0) || null,
-    commit: saved.commit || process.env.TRONSOFTOS_GIT_COMMIT || 'unknown',
-    branch: saved.branch || process.env.TRONSOFTOS_GIT_BRANCH || 'unknown',
-    installedAt: saved.installedAt || null
+    version: version || saved.version || '0.1.0',
+    buildNumber,
+    commit,
+    branch: git.branch || process.env.TRONSOFTOS_GIT_BRANCH || saved.branch || 'unknown',
+    installedAt: saved.installedAt || null,
+    generatedAt: new Date().toISOString(),
+    source: git.commit ? 'git' : saved.commit ? 'build-info' : 'env'
   };
+}
+
+function liveGitBuildInfo() {
+  try {
+    const git = (args) => execFileSync('git', ['-c', `safe.directory=${appRoot}`, '-C', appRoot, ...args], {
+      encoding: 'utf8',
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim();
+    return {
+      commit: git(['rev-parse', '--short', 'HEAD']),
+      branch: git(['branch', '--show-current']) || git(['rev-parse', '--abbrev-ref', 'HEAD']),
+      buildNumber: Number(git(['rev-list', '--count', 'HEAD'])) || null
+    };
+  } catch {
+    return {};
+  }
 }
 
 function appendEvent(type, details = {}) {

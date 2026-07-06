@@ -380,8 +380,12 @@ function DashboardView({ dashboard }) {
       : 'Ainda nao houve promocao. O standby continua recebendo/validando backups e aguardando autorizacao.';
   const localBuild = dashboard.build || dashboard.cluster.build || {};
   const standbyBuild = dashboard.cluster.standbyHealth || {};
-  const buildValue = build => build?.buildNumber ? `Build ${build.buildNumber}` : (build?.version || '-');
-  const buildDetail = build => `versao ${build?.version || '-'}`;
+  const buildValue = build => build?.version || '-';
+  const buildDetail = build => [
+    build?.buildNumber ? `build ${build.buildNumber}` : null,
+    build?.commit && build.commit !== 'unknown' ? `commit ${build.commit}` : null,
+    build?.branch && build.branch !== 'unknown' ? build.branch : null
+  ].filter(Boolean).join(' • ') || 'build nao informado';
   const buildsDifferClient = (left, right) => Boolean(
     (left?.buildNumber && right?.buildNumber && left.buildNumber !== right.buildNumber)
     || (left?.commit && right?.commit && left.commit !== right.commit)
@@ -1787,8 +1791,8 @@ function UpdatesView({ dashboard }) {
   return (
     <div className="space-y-5">
       <div className="grid gap-4 lg:grid-cols-4">
-        <Stat label="Versao atual" value={build.version || '-'} detail={build.buildNumber ? `Build ${build.buildNumber}` : 'build nao informado'} icon={GitBranch} tone="slate" />
-        <Stat label="Branch atual" value={build.branch || '-'} detail={build.installedAt ? `instalado ${formatDateTime(build.installedAt)}` : 'instalacao nao informada'} icon={GitBranch} tone="sky" />
+        <Stat label="Versao atual" value={build.version || '-'} detail={build.buildNumber ? `Build ${build.buildNumber} • ${build.commit || 'commit desconhecido'}` : 'build nao informado'} icon={GitBranch} tone="slate" />
+        <Stat label="Branch atual" value={build.branch || '-'} detail={build.generatedAt ? `detectado ${formatDateTime(build.generatedAt)}` : build.installedAt ? `instalado ${formatDateTime(build.installedAt)}` : 'instalacao nao informada'} icon={GitBranch} tone="sky" />
         <Stat label="Papel local" value={role} detail={mode} icon={ShieldCheck} tone={role === 'primary' ? 'green' : 'sky'} />
         <Stat label={isHaMode ? 'Standby HA' : 'Modo HA'} value={isHaMode ? (standbyHost || '-') : 'desativado'} detail={isHaMode ? (standbyHost ? 'sera bloqueado ao atualizar primary' : 'nao configurado') : 'servidor solo'} icon={Server} tone={isHaMode && standbyHost ? 'green' : 'slate'} />
       </div>
