@@ -4031,6 +4031,11 @@ async function centralHeartbeat(token, payload) {
         nodeName: payload.cluster?.nodeName || '',
         nodeRole: payload.cluster?.nodeRole || '',
         vip: payload.cluster?.vip || null
+      },
+      backups: payload.backups || {},
+      metrics: {
+        systemMetrics: payload.systemMetrics || {},
+        hostUptimeSeconds: payload.hostUptimeSeconds ?? null
       }
     }
   });
