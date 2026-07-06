@@ -2777,6 +2777,7 @@ async function dashboard() {
     cluster,
     apps,
     systemMetrics,
+    hostUptimeSeconds: Math.floor(os.uptime()),
     backups,
     cloudflare: cloudflareStatus(),
     alerts
