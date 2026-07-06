@@ -179,12 +179,21 @@ update_commit="$(git -c "safe.directory=$APP_DIR" -C "$APP_DIR" rev-parse --shor
 update_branch="$(git -c "safe.directory=$APP_DIR" -C "$APP_DIR" branch --show-current 2>/dev/null || printf "$BRANCH")"
 update_build="$(git -c "safe.directory=$APP_DIR" -C "$APP_DIR" rev-list --count HEAD 2>/dev/null || printf '0')"
 
-log "executando instalador"
-TRONSOFTOS_GIT_COMMIT="$update_commit" \
-TRONSOFTOS_GIT_BRANCH="$update_branch" \
-TRONSOFTOS_BUILD_NUMBER="$update_build" \
-TRONSOFTOS_SKIP_WIZARD=true \
-bash "$APP_DIR/install.sh"
+log "executando instalador com timeout de ${TIMEOUT_MINUTES} minuto(s)"
+if command -v timeout >/dev/null 2>&1; then
+  TRONSOFTOS_GIT_COMMIT="$update_commit" \
+  TRONSOFTOS_GIT_BRANCH="$update_branch" \
+  TRONSOFTOS_BUILD_NUMBER="$update_build" \
+  TRONSOFTOS_SKIP_WIZARD=true \
+  timeout --foreground "${TIMEOUT_MINUTES}m" bash "$APP_DIR/install.sh"
+else
+  log "aviso: comando timeout nao encontrado; instalador sera executado sem limite automatico"
+  TRONSOFTOS_GIT_COMMIT="$update_commit" \
+  TRONSOFTOS_GIT_BRANCH="$update_branch" \
+  TRONSOFTOS_BUILD_NUMBER="$update_build" \
+  TRONSOFTOS_SKIP_WIZARD=true \
+  bash "$APP_DIR/install.sh"
+fi
 
 log "validando preservacao de bancos, backups, historicos e configuracoes"
 verify_persistent_snapshot "$snapshot_file"

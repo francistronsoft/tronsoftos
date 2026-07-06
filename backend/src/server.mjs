@@ -3352,7 +3352,7 @@ function restartHaFailoverWatchdog() {
   startHaFailoverWatchdog();
 }
 
-function startCommandJob({ app, action, command, args, env = process.env, cwd = appRoot, eventPrefix = 'MAINTENANCE' }) {
+function startCommandJob({ app, action, command, args, env = process.env, cwd = appRoot, eventPrefix = 'MAINTENANCE', timeoutMs = 0 }) {
   const id = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
   const job = {
     id,
@@ -3370,18 +3370,39 @@ function startCommandJob({ app, action, command, args, env = process.env, cwd = 
   };
   actionJobs.set(id, job);
   const child = spawn(command, args, { cwd, env, windowsHide: true });
+  let timedOut = false;
+  let timeoutTimer = null;
+  if (timeoutMs > 0) {
+    timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      job.status = 'failed';
+      job.error = `tempo limite excedido apos ${Math.round(timeoutMs / 60000)} minuto(s)`;
+      job.finishedAt = new Date().toISOString();
+      appendActionLog(job, 'stderr', `\n[tronsoftos] ${job.error}; encerrando processo de atualizacao.\n`);
+      appendEvent(`${eventPrefix}_${action.toUpperCase()}_TIMEOUT`, { app, timeoutMs });
+      child.kill('SIGTERM');
+      setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      }, 5000).unref?.();
+    }, timeoutMs);
+    timeoutTimer.unref?.();
+  }
   child.stdout.on('data', chunk => appendActionLog(job, 'stdout', chunk));
   child.stderr.on('data', chunk => appendActionLog(job, 'stderr', chunk));
   child.on('error', err => {
+    if (timeoutTimer) clearTimeout(timeoutTimer);
     job.status = 'failed';
     job.error = err.message;
     job.finishedAt = new Date().toISOString();
     appendEvent(`${eventPrefix}_${action.toUpperCase()}_FAILED`, { app, error: err.message });
   });
   child.on('close', code => {
+    if (timeoutTimer) clearTimeout(timeoutTimer);
     job.exitCode = code;
-    job.status = code === 0 ? 'success' : 'failed';
-    job.finishedAt = new Date().toISOString();
+    if (!timedOut) {
+      job.status = code === 0 ? 'success' : 'failed';
+      job.finishedAt = new Date().toISOString();
+    }
     appendEvent(`${eventPrefix}_${action.toUpperCase()}`, { app, exitCode: code, stdout: job.stdout, stderr: job.stderr });
   });
   return publicActionJob(job);
@@ -3720,7 +3741,14 @@ function startTronsoftosUpdate(body = {}) {
     TRONSOFTOS_PORT: String(port)
   };
   appendEvent('TRONSOFTOS_UPDATE_STARTED', { branch, nodeRole: identity.nodeRole, standbyHost: env.TRONSOFTOS_UPDATE_STANDBY_HOST || null });
-  return startCommandJob({ app: 'tronsoftos', action: `update-${branch}`, ...cmd, env, eventPrefix: 'TRONSOFTOS_UPDATE' });
+  return startCommandJob({
+    app: 'tronsoftos',
+    action: `update-${branch}`,
+    ...cmd,
+    env,
+    eventPrefix: 'TRONSOFTOS_UPDATE',
+    timeoutMs: Math.max(timeoutMinutes, 1) * 60 * 1000
+  });
 }
 
 function startHostPower(action, body = {}) {
