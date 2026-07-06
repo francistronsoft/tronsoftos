@@ -3888,10 +3888,19 @@ function primaryHostIp() {
 
 function centralDatabasePayload() {
   const tronfireEnv = parseEnvFile(path.join(appRoot, 'apps/tronfire/.env'));
+  const versaoBanco = process.env.TRONSOFTOS_CENTRAL_DATABASE_VERSAO_BANCO
+    || process.env.TRONSOFTOS_CENTRAL_DATABASE_VERSION_LABEL
+    || tronfireEnv.VERSAO_BANCO
+    || tronfireEnv.versao_banco
+    || process.env.TRONSOFTOS_CENTRAL_DATABASE_SCHEMA_VERSION
+    || tronfireEnv.TRONFIRE_SCHEMA_VERSION
+    || '';
   return {
     engine: process.env.TRONSOFTOS_CENTRAL_DATABASE_ENGINE || tronfireEnv.FIREBIRD_ENGINE || 'Firebird',
     version: process.env.TRONSOFTOS_CENTRAL_DATABASE_VERSION || tronfireEnv.FIREBIRD_VERSION || '2.5',
-    schemaVersion: process.env.TRONSOFTOS_CENTRAL_DATABASE_SCHEMA_VERSION || tronfireEnv.TRONFIRE_SCHEMA_VERSION || '',
+    schemaVersion: versaoBanco,
+    versaoBanco,
+    versao_banco: versaoBanco,
     sizeMb: null
   };
 }
@@ -4036,7 +4045,16 @@ async function centralHeartbeat(token, payload) {
       metrics: {
         systemMetrics: payload.systemMetrics || {},
         hostUptimeSeconds: payload.hostUptimeSeconds ?? null
-      }
+      },
+      alerts: (payload.alerts || []).map(alert => {
+        const title = alert.title || alert.message || 'Alerta TronSoftOS';
+        return {
+          severity: alert.severity || 'info',
+          title,
+          message: alert.message || title,
+          code: alert.code || centralAlertKey(alert)
+        };
+      })
     }
   });
 }
