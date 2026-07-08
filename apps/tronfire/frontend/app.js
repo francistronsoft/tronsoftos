@@ -849,10 +849,11 @@ function databaseDetailsPanel(db, diagnostic, haStatus) {
           <button class="btn btn-sm btn-outline-dark" data-detail-connection="${db.id}">Conexao</button>
           <button class="btn btn-sm btn-outline-primary" data-detail-sessions="${db.id}">Sessoes Firebird</button>
           <button class="btn btn-sm btn-outline-primary" data-detail-primary="${db.id}">Marcar producao</button>
-          <button class="btn btn-sm btn-outline-secondary" data-detail-validate="${db.id}">Validar</button>
+          <button class="btn btn-sm btn-outline-secondary" data-detail-validate="${db.id}" title="Executa gstat -h, atualiza a ultima checagem e reavalia o alerta de indices inativos.">Validar</button>
           <button class="btn btn-sm btn-outline-info" data-detail-online="${db.id}">gfix -online</button>
           <button class="btn btn-sm btn-outline-success" data-detail-backup="${db.id}">Backup agora</button>
           <button class="btn btn-sm btn-outline-danger" data-detail-maintenance="${db.id}">Manutencao automatica</button>
+          <button class="btn btn-sm btn-outline-danger" data-detail-disable-indexes="${db.id}">Desativar indices</button>
         </div>
         <div id="detailConnectionSlot" class="mt-3"></div>
         <div id="detailSessionsSlot" class="mt-3"></div>
@@ -1001,8 +1002,24 @@ async function databases() {
       databases();
     });
     databaseDetailsSlot.querySelectorAll('[data-detail-validate]').forEach(btn => btn.onclick = async () => {
-      await appAlert('Validacao concluida', JSON.stringify(await api(`/api/databases/${btn.dataset.detailValidate}/validate`, { method:'POST' }), null, 2));
-      databases();
+      try {
+        btn.disabled = true;
+        btn.textContent = 'Validando...';
+        const out = await api(`/api/databases/${btn.dataset.detailValidate}/validate`, { method:'POST' });
+        const health = out.indexHealth;
+        const indexLine = health
+          ? `\nIndices: ${health.activeIndexes}/${health.totalIndexes} ativos, ${health.inactiveIndexes} inativos.`
+          : '';
+        const sizeLine = health?.sizeDropPercent
+          ? `\nQueda de tamanho: ${health.sizeDropPercent}% em relacao ao maior tamanho recente.`
+          : '';
+        await appAlert('Validacao concluida', `gstat -h executado e alerta de indices reavaliado.${indexLine}${sizeLine}`, health?.severity === 'CRITICAL' ? 'warning' : 'success');
+        databases();
+      } catch (err) {
+        await appAlert('Falha na validacao', err.message, 'danger');
+        btn.disabled = false;
+        btn.textContent = 'Validar';
+      }
     });
     databaseDetailsSlot.querySelectorAll('[data-detail-online]').forEach(btn => btn.onclick = async () => {
       const ok = await appDialog({
@@ -1063,6 +1080,28 @@ async function databases() {
       } catch (err) {
         await appAlert('Falha na manutencao', `${err.message}\nLog: ${err.payload?.logPath || 'Nao informado'}\nCopia anterior: ${err.payload?.safetyCopyPath || 'Nao informada'}`, 'danger');
         databases();
+      }
+    });
+    databaseDetailsSlot.querySelectorAll('[data-detail-disable-indexes]').forEach(btn => btn.onclick = async () => {
+      const ok = await appDialog({
+        title: 'Desativar indices do Firebird',
+        message: `Isso vai executar ALTER INDEX INACTIVE nos indices nao vinculados a constraints do banco ${db.name} (${db.alias}).\n\nUse apenas para manutencao/teste investigativo, com usuarios fora do sistema e backup recente. O banco pode ficar muito lento ate os indices serem recriados.\n\nDeseja continuar?`,
+        confirmText: 'Desativar indices',
+        cancelText: 'Cancelar',
+        variant: 'danger'
+      });
+      if (!ok) return;
+      try {
+        btn.disabled = true;
+        btn.textContent = 'Desativando...';
+        const out = await api(`/api/databases/${btn.dataset.detailDisableIndexes}/disable-indexes`, { method: 'POST', body: JSON.stringify({ confirmed: true }) });
+        const health = out.indexHealth;
+        await appAlert('Indices desativados', `Indices desativados: ${out.disabledIndexes}\nLog: ${out.logPath}\nAtivos agora: ${health?.activeIndexes ?? '-'} de ${health?.totalIndexes ?? '-'}`, 'warning');
+        databases();
+      } catch (err) {
+        await appAlert('Falha ao desativar indices', `${err.message}\nLog: ${err.payload?.logPath || 'Nao informado'}`, 'danger');
+        btn.disabled = false;
+        btn.textContent = 'Desativar indices';
       }
     });
   });

@@ -1773,7 +1773,7 @@ app.patch('/api/databases/:id/backup-settings', { preHandler: requireOperator },
   return db;
 });
 
-app.post('/api/databases/:id/validate', { preHandler: requireOperator }, async (req) => {
+app.post('/api/databases/:id/validate', { preHandler: requireOperator }, async (req, reply) => {
   const db = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: req.params.id } });
   const targetPath = effectiveDatabasePath(db);
   try {
@@ -1781,10 +1781,83 @@ app.post('/api/databases/:id/validate', { preHandler: requireOperator }, async (
     const indexHealth = await refreshInactiveIndexAlert(db);
     const updated = await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ONLINE', lastCheckAt: new Date() } });
     await audit(req, 'DATABASE_VALIDATED', { entityType: 'database', entityId: db.id });
-    return { ...updated, indexHealth };
+    return { ok: true, database: updated, indexHealth };
   } catch (err) {
     await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ERROR', lastCheckAt: new Date() } });
-    return { ok: false, error: err.message };
+    return reply.code(500).send({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/databases/:id/disable-indexes', { preHandler: requireOperator }, async (req, reply) => {
+  assertPrimaryWritable();
+  if (req.body?.confirmed !== true) {
+    return reply.code(400).send({ error: 'Confirmacao obrigatoria para desativar indices' });
+  }
+  const db = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: req.params.id } });
+  const stamp = timestamp14();
+  const logPath = `/firebird/logs/disable_indexes_${db.alias}_${stamp}.log`;
+  try {
+    const bin = process.env.FIREBIRD_BIN || '/usr/local/firebird/bin';
+    const password = process.env.FIREBIRD_PASSWORD || 'masterkey';
+    const connect = firebirdDbConnect(db.filePath);
+    const sql = [
+      'SET HEADING OFF;',
+      'SET LIST OFF;',
+      'SET TERM ^ ;',
+      'EXECUTE BLOCK RETURNS (LINE VARCHAR(80)) AS',
+      'DECLARE VARIABLE IDX VARCHAR(63);',
+      'DECLARE VARIABLE DISABLED INTEGER;',
+      'BEGIN',
+      '  DISABLED = 0;',
+      '  FOR',
+      '    SELECT TRIM(I.RDB$INDEX_NAME)',
+      '    FROM RDB$INDICES I',
+      '    WHERE COALESCE(I.RDB$SYSTEM_FLAG, 0) = 0',
+      '      AND COALESCE(I.RDB$INDEX_INACTIVE, 0) = 0',
+      '      AND NOT EXISTS (',
+      '        SELECT 1',
+      '        FROM RDB$RELATION_CONSTRAINTS RC',
+      '        WHERE RC.RDB$INDEX_NAME = I.RDB$INDEX_NAME',
+      '      )',
+      '    INTO :IDX',
+      '  DO',
+      '  BEGIN',
+      `    EXECUTE STATEMENT 'ALTER INDEX "' || REPLACE(IDX, '"', '""') || '" INACTIVE';`,
+      '    DISABLED = DISABLED + 1;',
+      '  END',
+      "  LINE = 'TRONIDX_DISABLED|' || CAST(DISABLED AS VARCHAR(20));",
+      '  SUSPEND;',
+      'END^',
+      'SET TERM ; ^',
+      'COMMIT;',
+      'QUIT;'
+    ].join('\n');
+    const cmd = [
+      'set -e',
+      'mkdir -p /firebird/logs',
+      `db_file=${shQuote(db.filePath)}`,
+      `log=${shQuote(logPath)}`,
+      'test -f "$db_file"',
+      `printf %s ${shQuote(`${sql}\n`)} | ${shQuote(`${bin}/isql`)} -q -user SYSDBA -password ${shQuote(password)} ${shQuote(connect)} > "$log" 2>&1`,
+      `${shQuote(`${bin}/gstat`)} -h "$db_file" >> "$log" 2>&1`,
+      'cat "$log"'
+    ].join('; ');
+    const out = await runFirebirdShellScript(cmd, 1000 * 60 * 10);
+    const logText = fs.existsSync(logPath) ? readTail(logPath, 64_000) : out.stdout || '';
+    const disabledIndexes = Number(logText.match(/TRONIDX_DISABLED\|(\d+)/)?.[1] || 0);
+    const indexHealth = await refreshInactiveIndexAlert(db);
+    const updated = await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ONLINE', lastCheckAt: new Date() } });
+    await audit(req, 'DATABASE_INDEXES_DISABLED', {
+      entityType: 'database',
+      entityId: db.id,
+      details: { logPath, disabledIndexes, indexHealth }
+    });
+    return { ok: true, database: updated, disabledIndexes, indexHealth, logPath };
+  } catch (err) {
+    const error = shellErrorText(err);
+    await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ERROR', lastCheckAt: new Date() } });
+    await audit(req, 'DATABASE_INDEXES_DISABLE_FAILED', { entityType: 'database', entityId: db.id, details: { logPath, error } });
+    return reply.code(500).send({ error: `Falha ao desativar indices: ${error}`, logPath });
   }
 });
 
