@@ -1091,15 +1091,22 @@ async function databases() {
         variant: 'danger'
       });
       if (!ok) return;
+      const token = operationToken();
+      const logPath = logPathFor('disable_indexes', db.alias, token);
+      const verbose = renderVerboseBox(detailConnectionSlot, 'Fluxo de banco sem indices em andamento...', logPath);
+      const stopPolling = startLogPolling(logPath, verbose);
       try {
         btn.disabled = true;
         btn.textContent = 'Manutencao...';
-        detailConnectionSlot.innerHTML = `<div class="alert alert-warning mb-3">Fluxo de banco sem indices em andamento: copia de seguranca, desativacao, backup logico, restore e troca do arquivo final.</div>`;
-        const out = await api(`/api/databases/${btn.dataset.detailDisableIndexes}/disable-indexes`, { method: 'POST', body: JSON.stringify({ confirmed: true }) });
+        const out = await api(`/api/databases/${btn.dataset.detailDisableIndexes}/disable-indexes`, { method: 'POST', body: JSON.stringify({ confirmed: true, logToken: token }) });
+        stopPolling();
         const health = out.indexHealth;
+        await finishVerbose(logPath, verbose, `Fluxo concluido.\nIndices desativados: ${out.disabledIndexes}\nTamanho antes: ${formatBytes(out.databaseSizeBefore)}\nTamanho depois: ${formatBytes(out.databaseSizeAfter)}\nBackup: ${out.backupPath}\nCopia anterior: ${out.safetyCopyPath}`, 'success');
         await appAlert('Banco restaurado sem indices ativos', `Indices desativados: ${out.disabledIndexes}\nTamanho antes: ${formatBytes(out.databaseSizeBefore)}\nTamanho depois: ${formatBytes(out.databaseSizeAfter)}\nBackup: ${out.backupPath}\nCopia anterior: ${out.safetyCopyPath}\nLog: ${out.logPath}\nAtivos agora: ${health?.activeIndexes ?? '-'} de ${health?.totalIndexes ?? '-'}`, 'warning');
         databases();
       } catch (err) {
+        stopPolling();
+        await finishVerbose(logPath, verbose, `Erro no fluxo sem indices: ${err.message}`, 'danger');
         await appAlert('Falha ao executar fluxo sem indices', `${err.message}\nLog: ${err.payload?.logPath || 'Nao informado'}\nCopia anterior: ${err.payload?.safetyCopyPath || 'Nao informada'}`, 'danger');
         btn.disabled = false;
         btn.textContent = 'Desativar indices';

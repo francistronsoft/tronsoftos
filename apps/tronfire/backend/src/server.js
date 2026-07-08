@@ -1799,7 +1799,7 @@ app.post('/api/databases/:id/disable-indexes', { preHandler: requireOperator }, 
     message: 'Manutencao de desativacao de indices em andamento'
   });
   if (reply.sent) return;
-  const stamp = timestamp14();
+  const stamp = safeLogToken(req.body?.logToken);
   const rawBackupPath = `/firebird/backups/${db.alias}_indexes_disabled_${stamp}.gbk`;
   const backupPath = `${rawBackupPath}.gz`;
   const safetyCopyPath = `/firebird/restore-work/${db.alias}_before_disable_indexes_${stamp}.fdb`;
@@ -1888,9 +1888,8 @@ app.post('/api/databases/:id/disable-indexes', { preHandler: requireOperator }, 
       'echo "[8/8] Colocando banco final online e coletando status" >> "$log"',
       `${gfix} -online -user SYSDBA -password ${password} "$db" >> "$log" 2>&1 || true`,
       `${gstat} -h "$db_file" >> "$log" 2>&1 || fail 73 "Falha ao validar banco final com gstat"`,
-      'echo "TRONIDX_DB_SIZE_AFTER|$(stat -c %s "$db_file")" >> "$log"',
-      'echo "TRONIDX_BACKUP_SIZE|$(stat -c %s "$backup")" >> "$log"',
-      'cat "$log"'
+      `printf 'TRONIDX_DB_SIZE_AFTER|%s\\n' "$(stat -c %s "$db_file")" >> "$log"`,
+      `printf 'TRONIDX_BACKUP_SIZE|%s\\n' "$(stat -c %s "$backup")" >> "$log"`
     ].join('; ');
     const out = await runFirebirdShellScript(cmd, 1000 * 60 * 60 * 4);
     const logText = fs.existsSync(logPath) ? readTail(logPath, 64_000) : out.stdout || '';
