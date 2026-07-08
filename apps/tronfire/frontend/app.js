@@ -1094,7 +1094,7 @@ async function databases() {
     databaseDetailsSlot.querySelectorAll('[data-detail-disable-indexes]').forEach(btn => btn.onclick = async () => {
       const ok = await appDialog({
         title: 'Desativar indices do Firebird',
-        message: `Isso vai colocar o banco ${db.name} (${db.alias}) em manutencao, criar copia fisica de seguranca, desativar indices nao vinculados a constraints, gerar GBK, restaurar em um novo FDB e substituir o arquivo original pelo restaurado validado.\n\nUse apenas para manutencao/teste investigativo, com usuarios fora do sistema. O banco pode ficar muito lento ate os indices serem recriados.\n\nDeseja continuar?`,
+        message: `Isso vai colocar o banco ${db.name} (${db.alias}) em manutencao, criar copia fisica de seguranca, desativar indices, gerar GBK, restaurar em um novo FDB com indices inativos e substituir o arquivo original pelo restaurado validado.\n\nUse apenas para manutencao/teste investigativo, com usuarios fora do sistema. O banco pode ficar muito lento ate os indices serem recriados.\n\nDeseja continuar?`,
         confirmText: 'Executar fluxo',
         cancelText: 'Cancelar',
         variant: 'danger'
