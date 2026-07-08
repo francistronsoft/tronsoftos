@@ -1070,16 +1070,24 @@ async function databases() {
         variant: 'danger'
       });
       if (!ok) return;
+      const token = operationToken();
+      const logPath = logPathFor('maintenance', db.alias, token);
+      const verbose = renderVerboseBox(detailConnectionSlot, 'Manutencao automatica em andamento...', logPath);
+      const stopPolling = startLogPolling(logPath, verbose);
       try {
         btn.disabled = true;
         btn.textContent = 'Manutencao...';
-        detailConnectionSlot.innerHTML = `<div class="alert alert-warning mb-3">Manutencao do banco em andamento. Se este ambiente estiver em HA, mantenha o failover suspenso no standby ate concluir e validar o banco.</div>`;
-        const out = await api(`/api/databases/${btn.dataset.detailMaintenance}/auto-maintenance`, { method: 'POST' });
+        const out = await api(`/api/databases/${btn.dataset.detailMaintenance}/auto-maintenance`, { method: 'POST', body: JSON.stringify({ logToken: token }) });
+        stopPolling();
+        await finishVerbose(logPath, verbose, `Manutencao concluida.\nTamanho antes: ${formatBytes(out.databaseSizeBefore)}\nTamanho depois: ${formatBytes(out.databaseSizeAfter)}\nBackup: ${out.backupPath}\nCopia anterior: ${out.safetyCopyPath}`);
         await appAlert('Manutencao concluida', `Tamanho antes: ${formatBytes(out.databaseSizeBefore)}\nTamanho depois: ${formatBytes(out.databaseSizeAfter)}\nBackup: ${out.backupPath}\nCopia anterior: ${out.safetyCopyPath}\nLog: ${out.logPath}`, 'success');
         databases();
       } catch (err) {
+        stopPolling();
+        await finishVerbose(logPath, verbose, `Erro na manutencao: ${err.message}`, 'danger');
         await appAlert('Falha na manutencao', `${err.message}\nLog: ${err.payload?.logPath || 'Nao informado'}\nCopia anterior: ${err.payload?.safetyCopyPath || 'Nao informada'}`, 'danger');
-        databases();
+        btn.disabled = false;
+        btn.textContent = 'Manutencao automatica';
       }
     });
     databaseDetailsSlot.querySelectorAll('[data-detail-disable-indexes]').forEach(btn => btn.onclick = async () => {

@@ -1993,7 +1993,7 @@ app.post('/api/databases/:id/auto-maintenance', { preHandler: requireOperator },
     message: 'Manutencao automatica em andamento'
   });
   if (reply.sent) return;
-  const stamp = timestamp14();
+  const stamp = safeLogToken(req.body?.logToken);
   const rawBackupPath = `/firebird/backups/${db.alias}_maintenance_${stamp}.gbk`;
   const backupPath = `${rawBackupPath}.gz`;
   const manifestPath = `${backupPath}.manifest.json`;
