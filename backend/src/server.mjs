@@ -1552,6 +1552,19 @@ function parseJsonLines(text) {
   return text.split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
 }
 
+function parseJsonLinesBestEffort(text) {
+  return text.split(/\r?\n/)
+    .filter(Boolean)
+    .map(line => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
 function parseEnvFile(filePath) {
   try {
     return parseEnvText(fs.readFileSync(filePath, 'utf8'));
@@ -2407,7 +2420,7 @@ async function hostFirebirdScript(req) {
       maxBuffer: 1024 * 1024 * 10,
       env: { ...process.env, TERM: 'dumb' }
     });
-    const result = parseJsonLines(out.stdout).at(-1) || { ok: true };
+    const result = parseJsonLinesBestEffort(out.stdout).at(-1) || { ok: true };
     const stderr = stripTerminalNoise(out.stderr);
     appendEvent('FIREBIRD_HOST_SCRIPT_EXECUTED', { script: path.basename(tmpPath), ...(stderr ? { stderr } : {}) });
     return { ...result, stdout: out.stdout, stderr };
