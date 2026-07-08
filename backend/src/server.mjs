@@ -65,7 +65,7 @@ let smtpNotificationInFlight = false;
 const centralAlertStates = new Map(Object.entries(readJson(centralAlertStatePath, {})));
 let centralAgentTimer = null;
 let centralAgentInFlight = false;
-let centralDatabaseVersionCache = { checkedAt: 0, value: '' };
+let centralDatabaseInfoCache = { checkedAt: 0, value: null };
 
 function json(reply, status, body) {
   const payload = JSON.stringify(body, null, 2);
@@ -3915,12 +3915,12 @@ function primaryHostIp() {
   return '';
 }
 
-async function centralDatabaseVersionFromTronFire() {
-  if (centralDatabaseVersionCache.value && Date.now() - centralDatabaseVersionCache.checkedAt < 10 * 60 * 1000) {
-    return centralDatabaseVersionCache.value;
+async function centralDatabaseInfoFromTronFire() {
+  if (centralDatabaseInfoCache.value && Date.now() - centralDatabaseInfoCache.checkedAt < 10 * 60 * 1000) {
+    return centralDatabaseInfoCache.value;
   }
   const token = internalTokenValue();
-  if (!token) return '';
+  if (!token) return null;
   try {
     const target = tronfireProxyTarget();
     const controller = new AbortController();
@@ -3930,19 +3930,29 @@ async function centralDatabaseVersionFromTronFire() {
       headers: { 'x-tronsoftos-token': token }
     });
     clearTimeout(timeout);
-    if (!response.ok) return centralDatabaseVersionCache.value || '';
+    if (!response.ok) return centralDatabaseInfoCache.value || null;
     const payload = await response.json();
-    const value = String(payload.version || '').trim();
-    if (value) centralDatabaseVersionCache = { checkedAt: Date.now(), value };
+    const value = {
+      version: String(payload.version || '').trim(),
+      databaseName: payload.databaseName || null,
+      databaseAlias: payload.databaseAlias || null,
+      fileSizeBytes: payload.fileSizeBytes ?? null,
+      sizeMb: payload.sizeMb ?? null,
+      indexHealth: payload.indexHealth || null
+    };
+    if (value.version || value.fileSizeBytes || value.indexHealth) {
+      centralDatabaseInfoCache = { checkedAt: Date.now(), value };
+    }
     return value;
   } catch {
-    return centralDatabaseVersionCache.value || '';
+    return centralDatabaseInfoCache.value || null;
   }
 }
 
 async function centralDatabasePayload() {
   const tronfireEnv = parseEnvFile(path.join(appRoot, 'apps/tronfire/.env'));
-  const versaoBanco = await centralDatabaseVersionFromTronFire()
+  const tronfireDatabase = await centralDatabaseInfoFromTronFire();
+  const versaoBanco = tronfireDatabase?.version
     || process.env.TRONSOFTOS_CENTRAL_DATABASE_VERSAO_BANCO
     || process.env.TRONSOFTOS_CENTRAL_DATABASE_VERSION_LABEL
     || tronfireEnv.VERSAO_BANCO
@@ -3956,7 +3966,11 @@ async function centralDatabasePayload() {
     schemaVersion: versaoBanco,
     versaoBanco,
     versao_banco: versaoBanco,
-    sizeMb: null
+    sizeMb: tronfireDatabase?.sizeMb ?? null,
+    fileSizeBytes: tronfireDatabase?.fileSizeBytes ?? null,
+    databaseName: tronfireDatabase?.databaseName || null,
+    databaseAlias: tronfireDatabase?.databaseAlias || null,
+    indexHealth: tronfireDatabase?.indexHealth || null
   };
 }
 

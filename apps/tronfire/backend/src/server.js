@@ -1509,10 +1509,17 @@ app.get('/api/internal/database-version', async (req) => {
   const database = databases.find(db => db.pathRole === 'production' && db.version && db.version !== 'Erro')
     || databases.find(db => db.version && db.version !== 'Erro')
     || null;
+  const managedDatabase = database?.id
+    ? await prisma.managedDatabase.findUnique({ where: { id: database.id } }).catch(() => null)
+    : null;
+  const indexHealth = managedDatabase ? await indexHealthForDatabase(managedDatabase).catch(() => null) : null;
   return {
     version: database?.version || null,
     databaseName: database?.name || null,
-    databaseAlias: database?.alias || null
+    databaseAlias: database?.alias || null,
+    fileSizeBytes: database?.fileSizeBytes ?? null,
+    sizeMb: database?.fileSizeBytes ? Math.round((Number(database.fileSizeBytes) / 1024 / 1024) * 10) / 10 : null,
+    indexHealth
   };
 });
 
