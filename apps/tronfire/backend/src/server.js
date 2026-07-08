@@ -1794,12 +1794,28 @@ app.post('/api/databases/:id/disable-indexes', { preHandler: requireOperator }, 
     return reply.code(400).send({ error: 'Confirmacao obrigatoria para desativar indices' });
   }
   const db = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: req.params.id } });
+  const databaseSizeBefore = fs.existsSync(db.filePath) ? fs.statSync(db.filePath).size : null;
+  const lockHandle = await acquireDatabaseOperationLock(req, db, 'DISABLE_INDEXES_MAINTENANCE', reply, {
+    message: 'Manutencao de desativacao de indices em andamento'
+  });
+  if (reply.sent) return;
   const stamp = timestamp14();
+  const rawBackupPath = `/firebird/backups/${db.alias}_indexes_disabled_${stamp}.gbk`;
+  const backupPath = `${rawBackupPath}.gz`;
+  const safetyCopyPath = `/firebird/restore-work/${db.alias}_before_disable_indexes_${stamp}.fdb`;
+  const restoredPath = `/firebird/restore-work/${db.alias}_indexes_disabled_${stamp}.fdb`;
   const logPath = `/firebird/logs/disable_indexes_${db.alias}_${stamp}.log`;
+  const job = await prisma.backupJob.create({
+    data: { databaseId: db.id, status: 'RUNNING', startedAt: new Date(), backupPath, sourceNode: process.env.TRONSOFTOS_NODE_NAME || null, targetAlias: db.alias, logPath }
+  });
   try {
     const bin = process.env.FIREBIRD_BIN || '/usr/local/firebird/bin';
-    const password = process.env.FIREBIRD_PASSWORD || 'masterkey';
-    const connect = firebirdDbConnect(db.filePath);
+    const password = shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey');
+    const connect = shQuote(firebirdDbConnect(db.filePath));
+    const gfix = shQuote(`${bin}/gfix`);
+    const gbak = shQuote(`${bin}/gbak`);
+    const gstat = shQuote(`${bin}/gstat`);
+    const isql = shQuote(`${bin}/isql`);
     const sql = [
       'SET HEADING OFF;',
       'SET LIST OFF;',
@@ -1834,30 +1850,88 @@ app.post('/api/databases/:id/disable-indexes', { preHandler: requireOperator }, 
     ].join('\n');
     const cmd = [
       'set -e',
-      'mkdir -p /firebird/logs',
       `db_file=${shQuote(db.filePath)}`,
+      `db=${connect}`,
+      `raw_backup=${shQuote(rawBackupPath)}`,
+      `backup=${shQuote(backupPath)}`,
+      `safety=${shQuote(safetyCopyPath)}`,
+      `restored=${shQuote(restoredPath)}`,
       `log=${shQuote(logPath)}`,
-      'test -f "$db_file"',
-      `printf %s ${shQuote(`${sql}\n`)} | ${shQuote(`${bin}/isql`)} -q -user SYSDBA -password ${shQuote(password)} ${shQuote(connect)} > "$log" 2>&1`,
-      `${shQuote(`${bin}/gstat`)} -h "$db_file" >> "$log" 2>&1`,
+      'fail() { code="$1"; shift; echo "$*"; test -f "$log" && cat "$log"; exit "$code"; }',
+      `cleanup() { ${gfix} -online -user SYSDBA -password ${password} "$db" >/dev/null 2>&1 || true; }`,
+      'trap cleanup EXIT',
+      'mkdir -p /firebird/backups /firebird/restore-work /firebird/logs',
+      'test -f "$db_file" || fail 60 "Banco de origem nao encontrado: $db_file"',
+      'rm -f "$raw_backup" "$backup" "$restored" || fail 61 "Nao foi possivel limpar arquivos temporarios"',
+      'echo "[1/8] Copia fisica de seguranca antes de desativar indices" > "$log"',
+      'cp -p "$db_file" "$safety" || fail 62 "Nao foi possivel criar copia fisica de seguranca: $safety"',
+      'echo "[2/8] Colocando banco em modo manutencao" >> "$log"',
+      `${gfix} -shut -force 0 -user SYSDBA -password ${password} "$db" >> "$log" 2>&1 || true`,
+      'echo "[3/8] Desativando indices nao vinculados a constraints" >> "$log"',
+      `printf %s ${shQuote(`${sql}\n`)} | ${isql} -q -user SYSDBA -password ${password} "$db" >> "$log" 2>&1 || fail 63 "Falha ao desativar indices"`,
+      'echo "[4/8] Gerando backup logico com os indices inativos" >> "$log"',
+      `${gbak} -b -g -v -user SYSDBA -password ${password} "$db" "$raw_backup" >> "$log" 2>&1 || fail 64 "Falha ao gerar backup logico com indices inativos"`,
+      'gzip -f "$raw_backup" || fail 65 "Falha ao compactar backup logico"',
+      'echo "[5/8] Restaurando backup em arquivo temporario" >> "$log"',
+      'restore_src="/tmp/tronfire_disable_indexes_${RANDOM}.gbk"',
+      'gzip -dc "$backup" > "$restore_src" || fail 66 "Falha ao descompactar backup para restore"',
+      `${gbak} -c -v -user SYSDBA -password ${password} "$restore_src" ${shQuote(firebirdCreateTarget(restoredPath))} >> "$log" 2>&1 || fail 67 "Falha ao restaurar banco sem indices ativos"`,
+      'rm -f "$restore_src"',
+      'test -f "$restored" || fail 68 "Restore terminou, mas arquivo restaurado nao foi encontrado: $restored"',
+      'chmod 0666 "$restored" || fail 69 "Nao foi possivel ajustar permissao do banco restaurado"',
+      'echo "[6/8] Validando banco restaurado" >> "$log"',
+      `${gstat} -h "$restored" >> "$log" 2>&1 || fail 70 "Falha ao validar banco restaurado com gstat"`,
+      'echo "[7/8] Substituindo banco original pelo restaurado sem indices ativos" >> "$log"',
+      `${gfix} -shut -force 0 -user SYSDBA -password ${password} "$db" >> "$log" 2>&1 || true`,
+      'mv -f "$restored" "$db_file" || fail 71 "Nao foi possivel substituir banco original"',
+      'chmod 0666 "$db_file" || fail 72 "Nao foi possivel ajustar permissao do banco final"',
+      'echo "[8/8] Colocando banco final online e coletando status" >> "$log"',
+      `${gfix} -online -user SYSDBA -password ${password} "$db" >> "$log" 2>&1 || true`,
+      `${gstat} -h "$db_file" >> "$log" 2>&1 || fail 73 "Falha ao validar banco final com gstat"`,
+      'echo "TRONIDX_DB_SIZE_AFTER|$(stat -c %s "$db_file")" >> "$log"',
+      'echo "TRONIDX_BACKUP_SIZE|$(stat -c %s "$backup")" >> "$log"',
       'cat "$log"'
     ].join('; ');
-    const out = await runFirebirdShellScript(cmd, 1000 * 60 * 10);
+    const out = await runFirebirdShellScript(cmd, 1000 * 60 * 60 * 4);
     const logText = fs.existsSync(logPath) ? readTail(logPath, 64_000) : out.stdout || '';
     const disabledIndexes = Number(logText.match(/TRONIDX_DISABLED\|(\d+)/)?.[1] || 0);
     const indexHealth = await refreshInactiveIndexAlert(db);
-    const updated = await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ONLINE', lastCheckAt: new Date() } });
+    const databaseSizeAfter = Number(logText.match(/TRONIDX_DB_SIZE_AFTER\|(\d+)/)?.[1] || 0) || (fs.existsSync(db.filePath) ? fs.statSync(db.filePath).size : null);
+    const backupSize = Number(logText.match(/TRONIDX_BACKUP_SIZE\|(\d+)/)?.[1] || 0);
+    const updated = await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ONLINE', lastCheckAt: new Date(), lastBackupAt: new Date() } });
+    await prisma.backupJob.update({
+      where: { id: job.id },
+      data: { status: 'SUCCESS', finishedAt: new Date(), backupSize: backupSize ? BigInt(backupSize) : null }
+    });
+    await syncFirebirdAliases();
     await audit(req, 'DATABASE_INDEXES_DISABLED', {
       entityType: 'database',
       entityId: db.id,
-      details: { logPath, disabledIndexes, indexHealth }
+      details: { backupPath, safetyCopyPath, restoredPath, logPath, disabledIndexes, indexHealth, databaseSizeBefore, databaseSizeAfter }
     });
-    return { ok: true, database: updated, disabledIndexes, indexHealth, logPath };
+    await lockHandle.releaseWith({ standbyStatus: isHaMode() ? 'PENDING' : lockHandle.previousDatabase.standbyStatus });
+    return {
+      ok: true,
+      database: updated,
+      disabledIndexes,
+      indexHealth,
+      backupPath,
+      backupSize: backupSize ? String(backupSize) : null,
+      safetyCopyPath,
+      databaseSizeBefore: databaseSizeBefore?.toString?.() ?? null,
+      databaseSizeAfter: databaseSizeAfter?.toString?.() ?? null,
+      logPath
+    };
   } catch (err) {
     const error = shellErrorText(err);
+    await prisma.backupJob.update({
+      where: { id: job.id },
+      data: { status: 'FAILED', finishedAt: new Date(), errorMessage: error }
+    });
     await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ERROR', lastCheckAt: new Date() } });
-    await audit(req, 'DATABASE_INDEXES_DISABLE_FAILED', { entityType: 'database', entityId: db.id, details: { logPath, error } });
-    return reply.code(500).send({ error: `Falha ao desativar indices: ${error}`, logPath });
+    await audit(req, 'DATABASE_INDEXES_DISABLE_FAILED', { entityType: 'database', entityId: db.id, details: { backupPath, safetyCopyPath, restoredPath, logPath, error } });
+    await lockHandle.releaseWith({ standbyStatus: lockHandle.previousDatabase.standbyStatus });
+    return reply.code(500).send({ error: `Falha ao desativar indices: ${error}`, backupPath, safetyCopyPath, logPath });
   }
 });
 

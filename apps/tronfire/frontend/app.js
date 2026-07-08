@@ -1085,21 +1085,22 @@ async function databases() {
     databaseDetailsSlot.querySelectorAll('[data-detail-disable-indexes]').forEach(btn => btn.onclick = async () => {
       const ok = await appDialog({
         title: 'Desativar indices do Firebird',
-        message: `Isso vai executar ALTER INDEX INACTIVE nos indices nao vinculados a constraints do banco ${db.name} (${db.alias}).\n\nUse apenas para manutencao/teste investigativo, com usuarios fora do sistema e backup recente. O banco pode ficar muito lento ate os indices serem recriados.\n\nDeseja continuar?`,
-        confirmText: 'Desativar indices',
+        message: `Isso vai colocar o banco ${db.name} (${db.alias}) em manutencao, criar copia fisica de seguranca, desativar indices nao vinculados a constraints, gerar GBK, restaurar em um novo FDB e substituir o arquivo original pelo restaurado validado.\n\nUse apenas para manutencao/teste investigativo, com usuarios fora do sistema. O banco pode ficar muito lento ate os indices serem recriados.\n\nDeseja continuar?`,
+        confirmText: 'Executar fluxo',
         cancelText: 'Cancelar',
         variant: 'danger'
       });
       if (!ok) return;
       try {
         btn.disabled = true;
-        btn.textContent = 'Desativando...';
+        btn.textContent = 'Manutencao...';
+        detailConnectionSlot.innerHTML = `<div class="alert alert-warning mb-3">Fluxo de banco sem indices em andamento: copia de seguranca, desativacao, backup logico, restore e troca do arquivo final.</div>`;
         const out = await api(`/api/databases/${btn.dataset.detailDisableIndexes}/disable-indexes`, { method: 'POST', body: JSON.stringify({ confirmed: true }) });
         const health = out.indexHealth;
-        await appAlert('Indices desativados', `Indices desativados: ${out.disabledIndexes}\nLog: ${out.logPath}\nAtivos agora: ${health?.activeIndexes ?? '-'} de ${health?.totalIndexes ?? '-'}`, 'warning');
+        await appAlert('Banco restaurado sem indices ativos', `Indices desativados: ${out.disabledIndexes}\nTamanho antes: ${formatBytes(out.databaseSizeBefore)}\nTamanho depois: ${formatBytes(out.databaseSizeAfter)}\nBackup: ${out.backupPath}\nCopia anterior: ${out.safetyCopyPath}\nLog: ${out.logPath}\nAtivos agora: ${health?.activeIndexes ?? '-'} de ${health?.totalIndexes ?? '-'}`, 'warning');
         databases();
       } catch (err) {
-        await appAlert('Falha ao desativar indices', `${err.message}\nLog: ${err.payload?.logPath || 'Nao informado'}`, 'danger');
+        await appAlert('Falha ao executar fluxo sem indices', `${err.message}\nLog: ${err.payload?.logPath || 'Nao informado'}\nCopia anterior: ${err.payload?.safetyCopyPath || 'Nao informada'}`, 'danger');
         btn.disabled = false;
         btn.textContent = 'Desativar indices';
       }
