@@ -456,6 +456,7 @@ function alertDetailsText(alert) {
   const parts = [];
   if (details.checkedAt) parts.push(`Verificado: ${new Date(details.checkedAt).toLocaleString()}`);
   if (details.activeIndexes !== undefined && details.totalIndexes !== undefined) parts.push(`Indices ativos: ${details.activeIndexes}/${details.totalIndexes}`);
+  if (details.activeUserIndexes !== undefined && details.userIndexes !== undefined) parts.push(`Indices comuns ativos: ${details.activeUserIndexes}/${details.userIndexes}`);
   if (details.sizeDropPercent !== null && details.sizeDropPercent !== undefined && Number(details.sizeDropPercent) > 0) {
     parts.push(`Queda: ${details.sizeDropPercent}%`);
   }
@@ -1008,7 +1009,7 @@ async function databases() {
         const out = await api(`/api/databases/${btn.dataset.detailValidate}/validate`, { method:'POST' });
         const health = out.indexHealth;
         const indexLine = health
-          ? `\nIndices: ${health.activeIndexes}/${health.totalIndexes} ativos, ${health.inactiveIndexes} inativos.`
+          ? `\nIndices totais: ${health.activeIndexes}/${health.totalIndexes} ativos, ${health.inactiveIndexes} inativos.\nIndices comuns: ${health.activeUserIndexes ?? '-'}/${health.userIndexes ?? '-'} ativos.`
           : '';
         const sizeLine = health?.sizeDropPercent
           ? `\nQueda de tamanho: ${health.sizeDropPercent}% em relacao ao maior tamanho recente.`
@@ -1110,7 +1111,7 @@ async function databases() {
         stopPolling();
         const health = out.indexHealth;
         await finishVerbose(logPath, verbose, `Fluxo concluido.\nIndices desativados: ${out.disabledIndexes}\nTamanho antes: ${formatBytes(out.databaseSizeBefore)}\nTamanho depois: ${formatBytes(out.databaseSizeAfter)}\nBackup: ${out.backupPath}\nCopia anterior: ${out.safetyCopyPath}`, 'success');
-        await appAlert('Banco restaurado sem indices ativos', `Indices desativados: ${out.disabledIndexes}\nTamanho antes: ${formatBytes(out.databaseSizeBefore)}\nTamanho depois: ${formatBytes(out.databaseSizeAfter)}\nBackup: ${out.backupPath}\nCopia anterior: ${out.safetyCopyPath}\nLog: ${out.logPath}\nAtivos agora: ${health?.activeIndexes ?? '-'} de ${health?.totalIndexes ?? '-'}`, 'warning');
+        await appAlert('Banco restaurado sem indices ativos', `Indices desativados nesta execucao: ${out.disabledIndexes}\nIndices comuns ativos agora: ${health?.activeUserIndexes ?? '-'} de ${health?.userIndexes ?? '-'}\nIndices totais ativos agora: ${health?.activeIndexes ?? '-'} de ${health?.totalIndexes ?? '-'}\nTamanho antes: ${formatBytes(out.databaseSizeBefore)}\nTamanho depois: ${formatBytes(out.databaseSizeAfter)}\nBackup: ${out.backupPath}\nCopia anterior: ${out.safetyCopyPath}\nLog: ${out.logPath}`, 'warning');
         databases();
       } catch (err) {
         stopPolling();

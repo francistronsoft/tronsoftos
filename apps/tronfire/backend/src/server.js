@@ -561,6 +561,7 @@ const criticalIndexTables = [
 
 function parseIndexHealth(stdout) {
   const totals = { total: 0, active: 0, inactive: 0 };
+  const userNonConstraint = { total: 0, active: 0, inactive: 0 };
   const tables = [];
   String(stdout || '')
     .split(/\r?\n/)
@@ -571,6 +572,11 @@ function parseIndexHealth(stdout) {
         totals.total = Number(total || 0);
         totals.active = Number(active || 0);
         totals.inactive = Number(inactive || 0);
+      } else if (line.startsWith('TRONIDX_USER_NON_CONSTRAINT|')) {
+        const [, total, active, inactive] = line.split('|');
+        userNonConstraint.total = Number(total || 0);
+        userNonConstraint.active = Number(active || 0);
+        userNonConstraint.inactive = Number(inactive || 0);
       } else if (line.startsWith('TRONIDX_TABLE|')) {
         const [, tableName, total, active, inactive] = line.split('|');
         tables.push({
@@ -581,20 +587,23 @@ function parseIndexHealth(stdout) {
         });
       }
     });
-  return { ...totals, tables };
+  return { ...totals, userNonConstraint, tables };
 }
 
 function classifyIndexHealth(summary) {
   const activeRatio = summary.total > 0 ? summary.active / summary.total : 0;
+  const userActiveRatio = summary.userNonConstraint.total > 0 ? summary.userNonConstraint.active / summary.userNonConstraint.total : 0;
   const criticalTables = summary.tables
     .filter(table => criticalIndexTables.includes(table.tableName) && table.total > 0 && table.active === 0)
     .map(table => table.tableName);
-  const hasCriticalIndexLoss = summary.total > 0 && (summary.active <= 100 || activeRatio < 0.2 || criticalTables.length >= 3);
+  const hasUserIndexLoss = summary.userNonConstraint.total > 0 && summary.userNonConstraint.active === 0;
+  const hasCriticalIndexLoss = hasUserIndexLoss || (summary.total > 0 && (summary.active <= 100 || activeRatio < 0.2 || criticalTables.length >= 3));
   const hasInactiveIndexes = summary.inactive > 0;
   return {
     severity: hasCriticalIndexLoss ? 'CRITICAL' : hasInactiveIndexes ? 'INFO' : 'OK',
     missingActiveTables: criticalTables,
-    activeRatio
+    activeRatio,
+    userActiveRatio
   };
 }
 
@@ -651,6 +660,17 @@ async function indexHealthForDatabase(db) {
     "  SUM(CASE WHEN COALESCE(RDB$INDEX_INACTIVE, 0) = 1 THEN 1 ELSE 0 END)",
     'FROM RDB$INDICES;',
     'SELECT',
+    "  'TRONIDX_USER_NON_CONSTRAINT|' || COUNT(*) || '|' ||",
+    "  SUM(CASE WHEN COALESCE(I.RDB$INDEX_INACTIVE, 0) = 0 THEN 1 ELSE 0 END) || '|' ||",
+    "  SUM(CASE WHEN COALESCE(I.RDB$INDEX_INACTIVE, 0) = 1 THEN 1 ELSE 0 END)",
+    'FROM RDB$INDICES I',
+    'WHERE COALESCE(I.RDB$SYSTEM_FLAG, 0) = 0',
+    '  AND NOT EXISTS (',
+    '    SELECT 1',
+    '    FROM RDB$RELATION_CONSTRAINTS RC',
+    '    WHERE RC.RDB$INDEX_NAME = I.RDB$INDEX_NAME',
+    '  );',
+    'SELECT',
     "  'TRONIDX_TABLE|' || COALESCE(REPLACE(TRIM(RDB$RELATION_NAME), '|', '/'), '') || '|' || COUNT(*) || '|' ||",
     "  SUM(CASE WHEN COALESCE(RDB$INDEX_INACTIVE, 0) = 0 THEN 1 ELSE 0 END) || '|' ||",
     "  SUM(CASE WHEN COALESCE(RDB$INDEX_INACTIVE, 0) = 1 THEN 1 ELSE 0 END)",
@@ -682,9 +702,13 @@ async function indexHealthForDatabase(db) {
     totalIndexes: summary.total,
     activeIndexes: summary.active,
     inactiveIndexes: summary.inactive,
+    userIndexes: summary.userNonConstraint.total,
+    activeUserIndexes: summary.userNonConstraint.active,
+    inactiveUserIndexes: summary.userNonConstraint.inactive,
     total: summary.inactive,
     severity: classification.severity,
     activeRatio: classification.activeRatio,
+    userActiveRatio: classification.userActiveRatio,
     missingActiveTables: classification.missingActiveTables,
     currentSizeBytes: sizeTrend.currentSizeBytes,
     previousMaxSizeBytes: sizeTrend.previousMaxSizeBytes,
@@ -706,7 +730,10 @@ async function refreshInactiveIndexAlert(db) {
     const sizeEvidence = health.sizeDropPercent >= 10
       ? ` Tamanho atual ${formatAlertBytes(health.currentSizeBytes)} verificado em ${formatAlertDate(health.checkedAt)}; maior recente ${formatAlertBytes(health.previousMaxSizeBytes)} em ${formatAlertDate(health.previousMaxCollectedAt)}; queda ${health.sizeDropPercent}%.`
       : '';
-    const message = `Banco ${db.name} parece estar sem indices funcionais: ${health.activeIndexes}/${health.totalIndexes} ativos. Verificado em ${formatAlertDate(health.checkedAt)}. Tabelas criticas sem indice ativo: ${sample}${suffix}.${sizeEvidence}`;
+    const userIndexText = Number.isFinite(health.activeUserIndexes) && Number.isFinite(health.userIndexes)
+      ? ` Indices comuns ativos: ${health.activeUserIndexes}/${health.userIndexes}.`
+      : '';
+    const message = `Banco ${db.name} parece estar sem indices funcionais: ${health.activeIndexes}/${health.totalIndexes} ativos no total.${userIndexText} Verificado em ${formatAlertDate(health.checkedAt)}. Tabelas criticas sem indice ativo: ${sample}${suffix}.${sizeEvidence}`;
     const details = {
       kind: 'DATABASE_MISSING_ACTIVE_INDEXES',
       databaseId: db.id,
@@ -716,7 +743,11 @@ async function refreshInactiveIndexAlert(db) {
       totalIndexes: health.totalIndexes,
       activeIndexes: health.activeIndexes,
       inactiveIndexes: health.inactiveIndexes,
+      userIndexes: health.userIndexes,
+      activeUserIndexes: health.activeUserIndexes,
+      inactiveUserIndexes: health.inactiveUserIndexes,
       activeRatio: health.activeRatio,
+      userActiveRatio: health.userActiveRatio,
       missingActiveTables: health.missingActiveTables,
       currentSizeBytes: health.currentSizeBytes,
       currentSizeCheckedAt: health.checkedAt,
