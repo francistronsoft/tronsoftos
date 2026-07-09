@@ -3929,7 +3929,7 @@ function primaryHostIp() {
 }
 
 async function centralDatabaseInfoFromTronFire() {
-  if (centralDatabaseInfoCache.value && Date.now() - centralDatabaseInfoCache.checkedAt < 10 * 60 * 1000) {
+  if (centralDatabaseInfoCache.value && Date.now() - centralDatabaseInfoCache.checkedAt < 60 * 1000) {
     return centralDatabaseInfoCache.value;
   }
   const token = internalTokenValue();
