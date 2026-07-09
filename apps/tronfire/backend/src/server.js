@@ -597,7 +597,7 @@ function classifyIndexHealth(summary) {
     .filter(table => criticalIndexTables.includes(table.tableName) && table.total > 0 && table.active === 0)
     .map(table => table.tableName);
   const hasUserIndexLoss = summary.userNonConstraint.total > 0 && summary.userNonConstraint.active === 0;
-  const hasCriticalIndexLoss = hasUserIndexLoss || (summary.total > 0 && (summary.active <= 100 || activeRatio < 0.2 || criticalTables.length >= 3));
+  const hasCriticalIndexLoss = hasUserIndexLoss || (summary.total > 0 && (activeRatio < 0.2 || criticalTables.length >= 3));
   const hasInactiveIndexes = summary.inactive > 0;
   return {
     severity: hasCriticalIndexLoss ? 'CRITICAL' : hasInactiveIndexes ? 'INFO' : 'OK',
