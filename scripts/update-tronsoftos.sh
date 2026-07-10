@@ -72,6 +72,16 @@ path_total_bytes() {
   du -sb "$target" 2>/dev/null | awk '{print $1}'
 }
 
+allows_file_count_decrease() {
+  local target="$1"
+  case "$target" in
+    "$STORAGE_ROOT/firebird/backups"|"$STORAGE_ROOT/config-backups"|"$STORAGE_ROOT/update-backups")
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 persistent_paths() {
   printf '%s\n' \
     "$STORAGE_ROOT/firebird/data" \
@@ -109,8 +119,13 @@ verify_persistent_snapshot() {
       continue
     fi
     if [ "$before_count" != "MISSING" ] && [ "$after_count" -lt "$before_count" ]; then
-      echo "Diretorio persistente perdeu arquivos durante a atualizacao: $target ($before_count -> $after_count)" >&2
-      failures=$((failures + 1))
+      if allows_file_count_decrease "$target"; then
+        log "aviso: diretorio persistente com retencao reduziu arquivos durante a atualizacao: $target ($before_count -> $after_count)"
+        warnings=$((warnings + 1))
+      else
+        echo "Diretorio persistente perdeu arquivos durante a atualizacao: $target ($before_count -> $after_count)" >&2
+        failures=$((failures + 1))
+      fi
     fi
     if [ "$before_bytes" -gt 0 ] && [ "$after_bytes" -lt "$before_bytes" ]; then
       log "aviso: diretorio persistente reduziu tamanho durante a atualizacao: $target ($before_bytes -> $after_bytes bytes)"
