@@ -212,7 +212,11 @@ usermod -aG docker "$USER_NAME" || true
 usermod --home "$APP_DIR" --shell /bin/bash "$USER_NAME" || true
 
 mkdir -p "$APP_DIR" "$ENV_DIR" "$APP_DIR/state" "$APP_DIR/config" "$APP_DIR/logs" /opt/tronfire-storage
-mkdir -p /opt/tronfire-storage/troncomanda/qr-static
+mkdir -p \
+  /opt/tronfire-storage/troncomanda/qr-static \
+  /opt/tronfire-storage/troncomanda/arquivos-nfe \
+  /opt/tronfire-storage/troncomanda/sped-fiscal-sintegra \
+  /opt/tronfire-storage/troncomanda/empresas
 
 echo "Copiando arquivos..."
 rsync -a --delete \

@@ -611,11 +611,13 @@ TRONCOMANDA_STORAGE_ROOT=/opt/tronfire-storage/troncomanda
 
 TRONCOMANDA_WEB_PORT=8000
 TRONCOMANDA_API_PORT=9000
+TSRETAGUARDA_API_PORT=9001
 TSRETAGUARDA_WEB_PORT=8010
 TRONCOMANDA_LAN_HOST=${HA_VIP:-$SERVER_IP}
 TRONCOMANDA_PUBLIC_URL=http://$SERVER_IP:8000/qr/
 
 TRONCOMANDA_SECRET_KEY=$TRONCOMANDA_SECRET_KEY
+OPENAI_API_KEY=
 TRONCOMANDA_FIREBIRD_HOST=host.docker.internal
 TRONCOMANDA_FIREBIRD_USER=sysdba
 TRONCOMANDA_FIREBIRD_PASSWORD=$FIREBIRD_PASSWORD
@@ -695,6 +697,7 @@ if [ "$FIREBIRD_MODE" = "host" ]; then
         "troncomanda_api",
         "troncomanda_qr",
         "troncomanda_cardapio_lite",
+        "tsretaguarda-api",
         "tsretaguarda-web"
       ],
       "haAware": false
@@ -738,6 +741,7 @@ else
         "troncomanda_api",
         "troncomanda_qr",
         "troncomanda_cardapio_lite",
+        "tsretaguarda-api",
         "tsretaguarda-web"
       ],
       "haAware": false

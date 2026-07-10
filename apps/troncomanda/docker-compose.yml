@@ -13,7 +13,7 @@ services:
       - ./nginx-web.conf:/etc/nginx/conf.d/default.conf:ro
 
   api:
-    image: ghcr.io/tronsoft-solucoes/ts-restaurant:main
+    image: ghcr.io/tronsoft-solucoes/ts-restaurant${API_IMAGE_TAG:-:main}
     container_name: troncomanda_api
     restart: unless-stopped
     ports:
@@ -32,7 +32,7 @@ services:
       - "host.docker.internal:host-gateway"
 
   qr:
-    image: ghcr.io/tronsoft-solucoes/tron-comanda:main
+    image: ghcr.io/tronsoft-solucoes/tron-comanda${QR_IMAGE_TAG:-:main}
     container_name: troncomanda_qr
     restart: unless-stopped
     environment:
@@ -41,7 +41,7 @@ services:
       - ${TRONCOMANDA_STORAGE_ROOT:-/opt/tronfire-storage/troncomanda}/qr-static:/usr/share/nginx/html/public
 
   cardapio-lite:
-    image: ghcr.io/tronsoft-solucoes/tscardapio-lite:main
+    image: ghcr.io/tronsoft-solucoes/tscardapio-lite${CARDAPIO_IMAGE_TAG:-:main}
     container_name: troncomanda_cardapio_lite
     restart: unless-stopped
     environment:
@@ -49,17 +49,41 @@ services:
     volumes:
       - ${TRONCOMANDA_STORAGE_ROOT:-/opt/tronfire-storage/troncomanda}/qr-static:/usr/share/nginx/html/public/img
 
+  tsretaguarda-api:
+    image: ghcr.io/tronsoft-solucoes/tsretaguarda-web-lite-api${RETAGUARDA_API_IMAGE_TAG:-:main}
+    container_name: tsretaguarda-api
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:${TSRETAGUARDA_API_PORT:-9001}:9000"
+    environment:
+      TZ: ${TZ:-America/Sao_Paulo}
+      DATABASE_URL: firebird://${TRONCOMANDA_FIREBIRD_USER:-sysdba}:${TRONCOMANDA_FIREBIRD_PASSWORD:-masterkey}@${TRONCOMANDA_FIREBIRD_HOST:-host.docker.internal}/${TRONCOMANDA_DATABASE_ALIAS:-ERP_TRONSOFT}?charset=${TRONCOMANDA_DATABASE_CHARSET:-win1252}
+      STATIC_ASSETS_PATH: /app/TRONSOFT/imagens
+      STATIC_ASSETS_URL: /tsretaguarda-api/public
+    volumes:
+      - ${TRONCOMANDA_STORAGE_ROOT:-/opt/tronfire-storage/troncomanda}/arquivos-nfe:/app/Arquivos_NFE
+      - ${TRONCOMANDA_STORAGE_ROOT:-/opt/tronfire-storage/troncomanda}/sped-fiscal-sintegra:/app/SpedFiscal_e_Sintegra
+      - ${TRONCOMANDA_STORAGE_ROOT:-/opt/tronfire-storage/troncomanda}/empresas:/app/empresas
+      - ${TRONCOMANDA_STORAGE_ROOT:-/opt/tronfire-storage/troncomanda}/qr-static:/app/TRONSOFT/imagens
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
   tsretaguarda-web:
-    image: httpd:2.4-alpine
+    image: ghcr.io/tronsoft-solucoes/retaguarda-web-nextjs${RETAGUARDA_WEB_IMAGE_TAG:-:main}
     container_name: tsretaguarda-web
     restart: unless-stopped
     ports:
       - "0.0.0.0:${TSRETAGUARDA_WEB_PORT:-8010}:8010"
     environment:
       TZ: ${TZ:-America/Sao_Paulo}
+      NEXT_PUBLIC_API_BASE_URL: http://tsretaguarda-api:9000
+      API_BASE_URL: http://tsretaguarda-api:9000
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      NEXT_PUBLIC_MENU_ITEM_IMAGE_ORIGIN: http://tsretaguarda-api:9000
     volumes:
-      - ./httpd.conf:/usr/local/apache2/conf/httpd.conf:ro
-      - ./retaguarda-html:/usr/local/apache2/htdocs:ro
+      - ${TRONCOMANDA_STORAGE_ROOT:-/opt/tronfire-storage/troncomanda}/qr-static:/app/public/public
+    depends_on:
+      - tsretaguarda-api
 
 networks:
   default:

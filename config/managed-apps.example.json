@@ -36,6 +36,7 @@
         "troncomanda_api",
         "troncomanda_qr",
         "troncomanda_cardapio_lite",
+        "tsretaguarda-api",
         "tsretaguarda-web"
       ],
       "haAware": false

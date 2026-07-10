@@ -8,11 +8,15 @@ Servicos:
 - `troncomanda_api`: API, porta padrao `9000`.
 - `troncomanda_qr`: frontend QR interno.
 - `troncomanda_cardapio_lite`: cardapio lite interno.
-- `tsretaguarda-web`: publicacao HTTP para rota Cloudflare, porta padrao `8010`.
+- `tsretaguarda-api`: API da Retaguarda, porta padrao `9001`.
+- `tsretaguarda-web`: frontend da Retaguarda, porta padrao `8010`.
 
 Dados persistentes:
 
 - `/opt/tronfire-storage/troncomanda/qr-static`
+- `/opt/tronfire-storage/troncomanda/arquivos-nfe`
+- `/opt/tronfire-storage/troncomanda/sped-fiscal-sintegra`
+- `/opt/tronfire-storage/troncomanda/empresas`
 
 Banco Firebird:
 
