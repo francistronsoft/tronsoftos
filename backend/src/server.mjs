@@ -2251,6 +2251,16 @@ function writeCloudflareSettings(body) {
   return publicCloudflareSettings(settings);
 }
 
+async function applyCloudflareTunnelConnector() {
+  const script = '/usr/local/sbin/tronsoftos-cloudflare-tunnel';
+  if (!fs.existsSync(script)) return { ok: false, skipped: true, message: 'script do connector ainda nao instalado' };
+  const { stdout, stderr } = await privilegedRun(script, ['apply'], {
+    timeout: 120_000,
+    maxBuffer: 1024 * 1024
+  });
+  return { ok: true, stdout: stdout.trim(), stderr: stderr.trim() };
+}
+
 async function cloudflareRequest(settings, method, pathname, body = null) {
   if (!settings.apiToken) throw new Error('token Cloudflare nao configurado');
   const response = await fetch(`https://api.cloudflare.com/client/v4${pathname}`, {
@@ -2273,10 +2283,12 @@ async function cloudflareTest() {
   const settings = rawCloudflareSettings();
   const normalized = normalizeCloudflareSettings(settings);
   if (!normalized.tunnelToken) throw new Error('token do Cloudflare Tunnel nao configurado');
+  const connector = await applyCloudflareTunnelConnector();
   appendEvent('CLOUDFLARE_TUNNEL_TEST_OK', { enabled: normalized.enabled });
   return {
     ok: true,
-    message: 'Token do Cloudflare Tunnel configurado.'
+    message: connector.ok ? 'Token configurado e connector aplicado.' : 'Token do Cloudflare Tunnel configurado.',
+    connector
   };
 }
 
@@ -2293,6 +2305,18 @@ async function cloudflareSync() {
 
 function cloudflareStatus() {
   return publicCloudflareSettings();
+}
+
+async function saveCloudflareSettings(body) {
+  const settings = writeCloudflareSettings(body);
+  let connector = null;
+  try {
+    connector = await applyCloudflareTunnelConnector();
+  } catch (err) {
+    appendEvent('CLOUDFLARE_TUNNEL_APPLY_FAILED', { error: err.message });
+    throw err;
+  }
+  return { ...settings, connector };
 }
 
 async function hostFirebirdStatus() {
@@ -4361,7 +4385,7 @@ async function handleApi(req, reply, url) {
   if (req.method === 'POST' && url.pathname === '/api/backups/google/start') return json(reply, 200, startGoogleDriveOauth(req, await readBody(req)));
   if (req.method === 'GET' && url.pathname === '/api/backups/google/callback') return await completeGoogleDriveOauth(reply, url);
   if (req.method === 'GET' && url.pathname === '/api/cloudflare') return json(reply, 200, cloudflareStatus());
-  if (req.method === 'PATCH' && url.pathname === '/api/cloudflare') return json(reply, 200, writeCloudflareSettings(await readBody(req)));
+  if (req.method === 'PATCH' && url.pathname === '/api/cloudflare') return json(reply, 200, await saveCloudflareSettings(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/cloudflare/test') return json(reply, 200, await cloudflareTest());
   if (req.method === 'POST' && url.pathname === '/api/cloudflare/sync') return json(reply, 200, await cloudflareSync());
   if (req.method === 'GET' && url.pathname === '/api/settings/central') return json(reply, 200, publicCentralSettings());

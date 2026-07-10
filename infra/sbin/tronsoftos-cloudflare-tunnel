@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_DIR="${TRONSOFTOS_APP_DIR:-/opt/tronsoftos}"
+SETTINGS_FILE="${TRONSOFTOS_CLOUDFLARE_SETTINGS:-$APP_DIR/state/cloudflare-settings.json}"
+CONTAINER_NAME="${TRONSOFTOS_CLOUDFLARED_CONTAINER:-tronsoftos_cloudflared}"
+IMAGE="${TRONSOFTOS_CLOUDFLARED_IMAGE:-cloudflare/cloudflared:latest}"
+
+read_setting() {
+  local key="$1"
+  node -e '
+const fs = require("fs");
+const file = process.argv[1];
+const key = process.argv[2];
+let value = {};
+try { value = JSON.parse(fs.readFileSync(file, "utf8")); } catch {}
+const out = value[key];
+if (out !== undefined && out !== null) process.stdout.write(String(out));
+' "$SETTINGS_FILE" "$key"
+}
+
+stop_connector() {
+  docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+}
+
+custom_networks() {
+  docker network ls --format '{{.Name}}' | grep -Ev '^(bridge|host|none)$' || true
+}
+
+apply_connector() {
+  local enabled token networks primary_network network
+  enabled="$(read_setting enabled)"
+  token="$(read_setting tunnelToken)"
+
+  if [ "$enabled" != "true" ]; then
+    stop_connector
+    echo "Cloudflare Tunnel desabilitado; connector parado."
+    return 0
+  fi
+
+  [ -n "$token" ] || { echo "Token do Cloudflare Tunnel nao configurado." >&2; exit 64; }
+  command -v docker >/dev/null 2>&1 || { echo "Docker nao encontrado." >&2; exit 65; }
+  docker info >/dev/null 2>&1 || { echo "Docker nao esta acessivel." >&2; exit 66; }
+
+  networks="$(custom_networks)"
+  primary_network="$(printf '%s\n' "$networks" | awk 'NF { print; exit }')"
+
+  stop_connector
+  docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull "$IMAGE"
+
+  if [ -n "$primary_network" ]; then
+    docker run -d \
+      --name "$CONTAINER_NAME" \
+      --restart unless-stopped \
+      --network "$primary_network" \
+      -e TUNNEL_TOKEN="$token" \
+      "$IMAGE" tunnel --no-autoupdate run >/dev/null
+
+    while IFS= read -r network; do
+      [ -n "$network" ] || continue
+      [ "$network" = "$primary_network" ] && continue
+      docker network connect "$network" "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    done <<EOF
+$networks
+EOF
+  else
+    docker run -d \
+      --name "$CONTAINER_NAME" \
+      --restart unless-stopped \
+      -e TUNNEL_TOKEN="$token" \
+      "$IMAGE" tunnel --no-autoupdate run >/dev/null
+  fi
+
+  echo "Cloudflare Tunnel connector iniciado em Docker."
+}
+
+status_connector() {
+  docker ps --filter "name=^/${CONTAINER_NAME}$" --format '{{.Names}} {{.Status}} {{.Networks}}' || true
+}
+
+case "${1:-apply}" in
+  apply)
+    apply_connector
+    ;;
+  stop)
+    stop_connector
+    echo "Cloudflare Tunnel connector parado."
+    ;;
+  status)
+    status_connector
+    ;;
+  *)
+    echo "Uso: $0 {apply|stop|status}" >&2
+    exit 2
+    ;;
+esac

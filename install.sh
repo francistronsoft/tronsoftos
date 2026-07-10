@@ -298,6 +298,7 @@ fi
 
 echo "Instalando systemd..."
 install -m 0755 "$APP_DIR/infra/sbin/tronsoftos-network" /usr/local/sbin/tronsoftos-network
+install -m 0755 "$APP_DIR/infra/sbin/tronsoftos-cloudflare-tunnel" /usr/local/sbin/tronsoftos-cloudflare-tunnel
 install -m 0440 "$APP_DIR/infra/sudoers/tronsoftos" /etc/sudoers.d/tronsoftos
 cp "$APP_DIR/infra/systemd/tronsoftos.service" /etc/systemd/system/tronsoftos.service
 cp "$APP_DIR/infra/systemd/tronsoftos-rclone-backup.service" /etc/systemd/system/tronsoftos-rclone-backup.service
