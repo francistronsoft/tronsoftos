@@ -158,10 +158,14 @@ backup_and_reset_local_source_changes() {
   git -c "safe.directory=$APP_DIR" reset --hard HEAD
 }
 
-if [ "$BRANCH" != "dev" ]; then
+case "$BRANCH" in
+  main|dev)
+    ;;
+  *)
   echo "Branch nao permitida para atualizacao pelo painel: $BRANCH" >&2
   exit 64
-fi
+    ;;
+esac
 
 cd "$APP_DIR"
 snapshot_file="$(mktemp)"
