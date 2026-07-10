@@ -2215,9 +2215,7 @@ function rawCloudflareSettings() {
   return {
     mode: 'tunnel',
     enabled: saved.enabled === true || process.env.CLOUDFLARE_TUNNEL_ENABLED === 'true',
-    tunnelToken: saved.tunnelToken || saved.apiToken || process.env.CLOUDFLARE_TUNNEL_TOKEN || process.env.CLOUDFLARE_API_TOKEN || '',
-    serviceUrl: saved.serviceUrl || process.env.CLOUDFLARE_TUNNEL_SERVICE_URL || 'http://127.0.0.1:8080',
-    publicHostname: saved.publicHostname || saved.recordName || process.env.CLOUDFLARE_TUNNEL_HOSTNAME || process.env.CLOUDFLARE_RECORD_NAME || ''
+    tunnelToken: saved.tunnelToken || saved.apiToken || process.env.CLOUDFLARE_TUNNEL_TOKEN || process.env.CLOUDFLARE_API_TOKEN || ''
   };
 }
 
@@ -2225,15 +2223,7 @@ function publicCloudflareSettings(settings = rawCloudflareSettings()) {
   return {
     mode: 'tunnel',
     enabled: settings.enabled === true,
-    serviceUrl: settings.serviceUrl || 'http://127.0.0.1:8080',
-    publicHostname: settings.publicHostname || null,
-    recordName: settings.publicHostname || null,
-    tokenConfigured: !!settings.tunnelToken && settings.tunnelToken !== 'change-me',
-    serviceExamples: [
-      'http://127.0.0.1:8080',
-      'http://web',
-      'http://tsretaguarda-web:8010'
-    ]
+    tokenConfigured: !!settings.tunnelToken && settings.tunnelToken !== 'change-me'
   };
 }
 
@@ -2242,20 +2232,10 @@ function normalizeCloudflareSettings(body) {
   const next = {
     mode: 'tunnel',
     enabled: body.enabled === true,
-    tunnelToken: body.tunnelToken ? String(body.tunnelToken).trim() : current.tunnelToken || '',
-    serviceUrl: String(body.serviceUrl || current.serviceUrl || 'http://127.0.0.1:8080').trim(),
-    publicHostname: String(body.publicHostname || '').trim()
+    tunnelToken: body.tunnelToken ? String(body.tunnelToken).trim() : current.tunnelToken || ''
   };
-  let parsedServiceUrl;
-  try {
-    parsedServiceUrl = new URL(next.serviceUrl);
-  } catch {
-    throw new Error('service url do Tunnel invalida');
-  }
-  if (!['http:', 'https:'].includes(parsedServiceUrl.protocol)) throw new Error('service url do Tunnel deve iniciar com http:// ou https://');
   if (next.enabled) {
     if (!next.tunnelToken) throw new Error('token do Cloudflare Tunnel nao informado');
-    if (!next.serviceUrl) throw new Error('service url do Cloudflare Tunnel nao informado');
   }
   return next;
 }
@@ -2266,9 +2246,7 @@ function writeCloudflareSettings(body) {
   fs.writeFileSync(cloudflareSettingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
   appendEvent('CLOUDFLARE_SETTINGS_UPDATED', {
     enabled: settings.enabled,
-    mode: settings.mode,
-    publicHostname: settings.publicHostname,
-    serviceUrl: settings.serviceUrl
+    mode: settings.mode
   });
   return publicCloudflareSettings(settings);
 }
@@ -2295,15 +2273,10 @@ async function cloudflareTest() {
   const settings = rawCloudflareSettings();
   const normalized = normalizeCloudflareSettings(settings);
   if (!normalized.tunnelToken) throw new Error('token do Cloudflare Tunnel nao configurado');
-  appendEvent('CLOUDFLARE_TUNNEL_TEST_OK', {
-    publicHostname: normalized.publicHostname,
-    serviceUrl: normalized.serviceUrl
-  });
+  appendEvent('CLOUDFLARE_TUNNEL_TEST_OK', { enabled: normalized.enabled });
   return {
     ok: true,
-    message: 'Configuracao do Tunnel validada localmente.',
-    serviceUrl: normalized.serviceUrl,
-    publicHostname: normalized.publicHostname || null
+    message: 'Token do Cloudflare Tunnel configurado.'
   };
 }
 
@@ -2311,15 +2284,10 @@ async function cloudflareSync() {
   const settings = rawCloudflareSettings();
   if (settings.enabled !== true) throw new Error('Cloudflare Tunnel desabilitado');
   const normalized = normalizeCloudflareSettings(settings);
-  appendEvent('CLOUDFLARE_TUNNEL_READY', {
-    publicHostname: normalized.publicHostname,
-    serviceUrl: normalized.serviceUrl
-  });
+  appendEvent('CLOUDFLARE_TUNNEL_READY', { enabled: normalized.enabled });
   return {
     ok: true,
-    message: 'Use este Service URL no Public Hostname do Tunnel no painel da Cloudflare.',
-    serviceUrl: normalized.serviceUrl,
-    publicHostname: normalized.publicHostname || null
+    message: 'Tunnel configurado. As rotas sao gerenciadas no painel da Cloudflare.'
   };
 }
 
@@ -2512,9 +2480,6 @@ async function clusterNetworkImpact(proposedAddressCidr = '') {
     actions.push('Atualizar o outro no para usar este novo IP real em SSH/rsync.');
     actions.push('Recriar/reiniciar containers para recarregar arquivos .env que dependem do IP.');
   }
-  if (cloudflare.enabled && cloudflare.serviceUrl) {
-    actions.push(`Conferir se o Public Hostname do Cloudflare Tunnel continua apontando para ${cloudflare.serviceUrl}.`);
-  }
   if (identity.deploymentMode === 'ha' && proposed && currentAddress && proposed.address !== currentAddress.address) {
     warnings.push({ level: 'info', message: 'A troca do IP real nao altera o VIP automaticamente.' });
   }
@@ -2538,8 +2503,7 @@ async function clusterNetworkImpact(proposedAddressCidr = '') {
     },
     cloudflare: {
       enabled: cloudflare.enabled,
-      publicHostname: cloudflare.publicHostname,
-      serviceUrl: cloudflare.serviceUrl
+      tokenConfigured: cloudflare.tokenConfigured
     },
     warnings,
     actions: [...new Set(actions)]
