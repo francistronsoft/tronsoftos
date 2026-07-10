@@ -85,6 +85,31 @@ services:
     depends_on:
       - tsretaguarda-api
 
+  tsgerente-api:
+    image: ghcr.io/tronsoft-solucoes/tsgerente-web-api${TSGERENTE_API_IMAGE_TAG:-:main}
+    container_name: tsgerente-api
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:${TSGERENTE_API_PORT:-9002}:9002"
+    environment:
+      TZ: ${TZ:-America/Sao_Paulo}
+      DATABASE_URL: firebird://${TRONCOMANDA_FIREBIRD_USER:-sysdba}:${TRONCOMANDA_FIREBIRD_PASSWORD:-masterkey}@${TRONCOMANDA_FIREBIRD_HOST:-host.docker.internal}/${TRONCOMANDA_DATABASE_ALIAS:-ERP_TRONSOFT}?charset=${TRONCOMANDA_DATABASE_CHARSET:-win1252}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  tsgerente-web:
+    image: ghcr.io/tronsoft-solucoes/tsgerente-web-nextjs${TSGERENTE_WEB_IMAGE_TAG:-:main}
+    container_name: tsgerente-web
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:${TSGERENTE_WEB_PORT:-8011}:8011"
+    environment:
+      TZ: ${TZ:-America/Sao_Paulo}
+      NEXT_PUBLIC_API_BASE_URL: http://tsgerente-api:9002
+      API_BASE_URL: http://tsgerente-api:9002
+    depends_on:
+      - tsgerente-api
+
 networks:
   default:
     name: troncomanda_net
