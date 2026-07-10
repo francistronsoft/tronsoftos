@@ -43,7 +43,7 @@ const FIXED_HA_SYNC_INTERVAL_MINUTES = 3;
 const HA_SYNC_CRITICAL_LAG_MINUTES = 20;
 const DEFAULT_HA_SYNC_MODE = 'physical';
 const UPDATE_MAINTENANCE_TIMEOUT_MINUTES = 30;
-const UPDATE_ALLOWED_BRANCHES = new Set(['dev']);
+const UPDATE_ALLOWED_BRANCHES = new Set(['main', 'dev']);
 const SESSION_COOKIE = 'tronsoftos_session';
 const SESSION_DURATION_SECONDS = 12 * 60 * 60;
 const LOGIN_WINDOW_MS = 10 * 60 * 1000;
@@ -3711,9 +3711,9 @@ function startStandbyKeepalived(action, body = {}) {
 }
 
 function startTronsoftosUpdate(body = {}) {
-  const branch = String(body.branch || 'dev').trim();
-  requireConfirmation(body, 'ATUALIZAR DEV');
+  const branch = String(body.branch || 'main').trim();
   if (!UPDATE_ALLOWED_BRANCHES.has(branch)) throw new Error(`branch nao permitida para atualizacao pelo painel: ${branch}`);
+  requireConfirmation(body, `ATUALIZAR ${branch.toUpperCase()}`);
   const identity = nodeIdentity();
   const settings = rawHaSyncSettings();
   const timeoutMinutes = Number(body.timeoutMinutes || UPDATE_MAINTENANCE_TIMEOUT_MINUTES);

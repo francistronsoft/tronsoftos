@@ -1750,6 +1750,7 @@ function CloudflareView({ dashboard }) {
 function UpdatesView({ dashboard }) {
   const queryClient = useQueryClient();
   const [jobId, setJobId] = useState(null);
+  const [targetBranch, setTargetBranch] = useState('main');
   const updateMutation = useMutation({
     mutationFn: payload => postApi('/api/maintenance/update', payload),
     onSuccess: data => {
@@ -1771,6 +1772,8 @@ function UpdatesView({ dashboard }) {
   const standbyHost = dashboard.cluster?.sync?.standbyHost || '';
   const maintenanceBlock = dashboard.cluster?.failover?.maintenanceBlock || {};
   const busy = updateMutation.isPending || jobQuery.data?.status === 'running';
+  const branchLabel = targetBranch === 'main' ? 'main' : 'dev';
+  const branchConfirmation = `ATUALIZAR ${branchLabel.toUpperCase()}`;
   return (
     <div className="space-y-5">
       <div className="grid gap-4 lg:grid-cols-4">
@@ -1783,8 +1786,20 @@ function UpdatesView({ dashboard }) {
       {jobQuery.data ? <ActionTerminal job={jobQuery.data} /> : null}
 
       <div className="grid gap-5 xl:grid-cols-2">
-        <Card title="Atualizar branch dev" icon={RefreshCw} action={<StatusPill value={busy ? 'running' : 'dev'} />}>
+        <Card title="Atualizar TronSoftOS" icon={RefreshCw} action={<StatusPill value={busy ? 'running' : branchLabel} />}>
           <div className="space-y-3 text-sm text-slate-700">
+            <label className="block">
+              <span className="text-xs font-medium uppercase text-slate-500">Branch para atualizar</span>
+              <select
+                value={targetBranch}
+                onChange={event => setTargetBranch(event.target.value)}
+                disabled={busy}
+                className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100 disabled:bg-slate-50 disabled:text-slate-500"
+              >
+                <option value="main">main - estavel</option>
+                <option value="dev">dev - testes</option>
+              </select>
+            </label>
             <div className={`rounded-md border px-3 py-2 ${isHaMode ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-sky-200 bg-sky-50 text-sky-800'}`}>
               {isHaMode
                 ? 'Em HA, atualize primeiro o standby. Ao atualizar o primary, o TronSoftOS bloqueia a promocao automatica no standby por manutencao planejada e libera novamente ao concluir.'
@@ -1794,11 +1809,11 @@ function UpdatesView({ dashboard }) {
               {(isHaMode ? [
                 'Entrar em manutencao local',
                 'Bloquear promocao automatica no standby quando este no for primary',
-                'Baixar e aplicar a branch dev',
+                `Baixar e aplicar a branch ${branchLabel}`,
                 'Executar install.sh e migrations do TronFire',
                 'Liberar o standby e reiniciar o servico TronSoftOS'
               ] : [
-                'Baixar e aplicar a branch dev',
+                `Baixar e aplicar a branch ${branchLabel}`,
                 'Executar install.sh e migrations do TronFire',
                 'Reiniciar o servico TronSoftOS'
               ]).map(item => (
@@ -1806,12 +1821,12 @@ function UpdatesView({ dashboard }) {
               ))}
             </ol>
             <ConfirmAction
-              label="Atualizar para dev"
+              label={`Atualizar para ${branchLabel}`}
               icon={RefreshCw}
-              confirmation="ATUALIZAR DEV"
+              confirmation={branchConfirmation}
               tone="amber"
               disabled={busy}
-              onConfirm={({ confirmation }) => updateMutation.mutate({ confirmation, branch: 'dev', timeoutMinutes: 30 })}
+              onConfirm={({ confirmation }) => updateMutation.mutate({ confirmation, branch: targetBranch, timeoutMinutes: 30 })}
             />
             {updateMutation.isError ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{updateMutation.error.message}</div> : null}
           </div>
