@@ -105,7 +105,7 @@ services:
       - "0.0.0.0:${TSGERENTE_WEB_PORT:-8011}:8011"
     environment:
       TZ: ${TZ:-America/Sao_Paulo}
-      NEXT_PUBLIC_API_BASE_URL: /tsgerente-api
+      NEXT_PUBLIC_API_BASE_URL: http://tsgerente-api:9002
       API_BASE_URL: http://tsgerente-api:9002
     depends_on:
       - tsgerente-api
