@@ -8,6 +8,7 @@ Servicos:
 - `troncomanda_api`: API, porta padrao `9000`.
 - `troncomanda_qr`: frontend QR interno.
 - `troncomanda_cardapio_lite`: cardapio lite interno.
+- `tsretaguarda-web`: publicacao HTTP para rota Cloudflare, porta padrao `8010`.
 
 Dados persistentes:
 

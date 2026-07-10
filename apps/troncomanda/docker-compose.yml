@@ -49,6 +49,18 @@ services:
     volumes:
       - ${TRONCOMANDA_STORAGE_ROOT:-/opt/tronfire-storage/troncomanda}/qr-static:/usr/share/nginx/html/public/img
 
+  tsretaguarda-web:
+    image: httpd:2.4-alpine
+    container_name: tsretaguarda-web
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:${TSRETAGUARDA_WEB_PORT:-8010}:8010"
+    environment:
+      TZ: ${TZ:-America/Sao_Paulo}
+    volumes:
+      - ./httpd.conf:/usr/local/apache2/conf/httpd.conf:ro
+      - ./retaguarda-html:/usr/local/apache2/htdocs:ro
+
 networks:
   default:
     name: troncomanda_net

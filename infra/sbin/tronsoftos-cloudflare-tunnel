@@ -20,7 +20,28 @@ if (out !== undefined && out !== null) process.stdout.write(String(out));
 }
 
 stop_connector() {
-  docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  local ids id attempt
+  ids="$(docker container ls -aq --filter "name=^/${CONTAINER_NAME}$" || true)"
+  [ -n "$ids" ] || return 0
+
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    docker container update --restart=no "$id" >/dev/null 2>&1 || true
+    docker container rm -f "$id" >/dev/null 2>&1 || true
+
+    attempt=1
+    while docker container inspect "$id" >/dev/null 2>&1; do
+      [ "$attempt" -le 10 ] || {
+        echo "Nao foi possivel remover o container Cloudflare existente: $id" >&2
+        exit 67
+      }
+      sleep 1
+      docker container rm -f "$id" >/dev/null 2>&1 || true
+      attempt=$((attempt + 1))
+    done
+  done <<EOF
+$ids
+EOF
 }
 
 custom_networks() {
