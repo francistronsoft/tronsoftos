@@ -29,8 +29,7 @@ import {
   Terminal,
   Thermometer,
   UploadCloud,
-  XCircle,
-  Zap
+  XCircle
 } from 'lucide-react';
 import {
   Area,
@@ -95,7 +94,7 @@ const fallbackDashboard = {
     quota: null,
     recentFiles: []
   },
-  cloudflare: { recordName: null, recordType: 'A', targetIp: null, tokenConfigured: false },
+  cloudflare: { mode: 'tunnel', publicHostname: null, serviceUrl: 'http://127.0.0.1:8080', tokenConfigured: false },
   systemMetrics: { latest: [], series: [] },
   hostUptimeSeconds: 0,
   alerts: [{ severity: 'warning', message: 'Backend ainda nao retornou dados reais' }]
@@ -324,7 +323,7 @@ function Topology({ dashboard }) {
   const cluster = dashboard.cluster;
   const tronfire = dashboard.apps.find(app => app.name === 'tronfire');
   const nodes = [
-    { id: 'cloudflare', type: 'service', position: { x: 20, y: 40 }, data: { label: 'Cloudflare', detail: dashboard.cloudflare.recordName || 'DNS/Tunnel' } },
+    { id: 'cloudflare', type: 'service', position: { x: 20, y: 40 }, data: { label: 'Cloudflare', detail: dashboard.cloudflare.publicHostname || dashboard.cloudflare.serviceUrl || 'Tunnel' } },
     { id: 'vip', type: 'service', position: { x: 250, y: 40 }, data: { label: 'VIP', detail: cluster.vip || 'nao configurado' } },
     { id: 'primary', type: 'service', position: { x: 480, y: 0 }, data: { label: cluster.nodeName || 'Servidor', detail: cluster.nodeRole || 'primary' } },
     { id: 'standby', type: 'service', position: { x: 480, y: 110 }, data: { label: 'Standby', detail: cluster.mode === 'ha' ? 'aguardando sync' : 'desativado' } },
@@ -1108,7 +1107,7 @@ function ClusterView({ dashboard }) {
                   ['VIP', networkImpact.vip || 'nao configurado'],
                   ['VIP na mesma rede', networkImpact.vipSameSubnet === null || networkImpact.vipSameSubnet === undefined ? '-' : networkImpact.vipSameSubnet ? 'sim' : 'nao'],
                   ['Sync HA standby', networkImpact.sync?.standbyHost || 'nao configurado'],
-                  ['Cloudflare destino', networkImpact.cloudflare?.targetIp || 'nao configurado']
+                  ['Cloudflare service URL', networkImpact.cloudflare?.serviceUrl || 'nao configurado']
                 ].map(([label, value]) => (
                   <div key={label} className="flex items-center justify-between gap-4 border-b border-slate-100 pb-2">
                     <span className="text-slate-500">{label}</span>
@@ -1675,14 +1674,9 @@ function CloudflareView({ dashboard }) {
   const [form, setForm] = useState(null);
   const values = form || {
     enabled: cloudflare.enabled || false,
-    apiToken: '',
-    zoneId: cloudflare.zoneId || '',
-    recordId: cloudflare.recordId || '',
-    recordName: cloudflare.recordName || '',
-    recordType: cloudflare.recordType || 'A',
-    targetIp: cloudflare.targetIp || '',
-    proxied: cloudflare.proxied !== false,
-    ttl: cloudflare.ttl || 60
+    tunnelToken: '',
+    publicHostname: cloudflare.publicHostname || '',
+    serviceUrl: cloudflare.serviceUrl || 'http://127.0.0.1:8080'
   };
   const saveMutation = useMutation({
     mutationFn: payload => fetch('/api/cloudflare', {
@@ -1694,25 +1688,18 @@ function CloudflareView({ dashboard }) {
       return response.json();
     }),
     onSuccess: data => {
-      setForm({ ...data, apiToken: '' });
+      setForm({ ...data, tunnelToken: '' });
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
       queryClient.invalidateQueries({ queryKey: ['cloudflare-settings'] });
       queryClient.invalidateQueries({ queryKey: ['events'] });
     }
   });
   const testMutation = useMutation({ mutationFn: () => postApi('/api/cloudflare/test') });
-  const syncMutation = useMutation({
-    mutationFn: () => postApi('/api/cloudflare/sync'),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
-      queryClient.invalidateQueries({ queryKey: ['cloudflare-settings'] });
-      queryClient.invalidateQueries({ queryKey: ['events'] });
-    }
-  });
   const setValue = (key, value) => setForm(previous => ({ ...(previous || values), [key]: value }));
+  const examples = cloudflare.serviceExamples || ['http://127.0.0.1:8080', 'http://web', 'http://tsretaguarda-web:8010'];
   return (
     <div className="max-w-5xl">
-      <Card title="Cloudflare" icon={Cloud} action={<StatusPill value={cloudflare.tokenConfigured ? 'online' : 'warning'} />}>
+      <Card title="Cloudflare Tunnel" icon={Cloud} action={<StatusPill value={cloudflare.tokenConfigured ? 'online' : 'warning'} />}>
         <form
           className="grid gap-3 md:grid-cols-2"
           onSubmit={event => {
@@ -1721,24 +1708,25 @@ function CloudflareView({ dashboard }) {
           }}
         >
           <div className="md:col-span-2">
-            <Checkbox label="Habilitar gerenciamento DNS" checked={values.enabled} onChange={value => setValue('enabled', value)} />
+            <Checkbox label="Habilitar Cloudflare Tunnel" checked={values.enabled} onChange={value => setValue('enabled', value)} />
           </div>
-          <Field label="API Token" type="password" value={values.apiToken} onChange={value => setValue('apiToken', value)} placeholder={cloudflare.tokenConfigured ? 'token ja configurado' : 'token Cloudflare'} />
-          <Field label="Zone ID" value={values.zoneId} onChange={value => setValue('zoneId', value)} placeholder="zone id" />
-          <Field label="Record ID" value={values.recordId} onChange={value => setValue('recordId', value)} placeholder="opcional" />
-          <Field label="Registro" value={values.recordName} onChange={value => setValue('recordName', value)} placeholder="cliente.tronsoft.app.br" />
-          <label className="block">
-            <span className="text-xs font-medium uppercase text-slate-500">Tipo</span>
-            <select value={values.recordType} onChange={event => setValue('recordType', event.target.value)} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100">
-              <option value="A">A</option>
-              <option value="AAAA">AAAA</option>
-              <option value="CNAME">CNAME</option>
-            </select>
-          </label>
-          <Field label="Destino" value={values.targetIp} onChange={value => setValue('targetIp', value)} placeholder="IP, VIP ou hostname" />
-          <Field label="TTL" type="number" value={values.ttl} onChange={value => setValue('ttl', Number(value))} placeholder="60" />
-          <div className="flex items-end">
-            <Checkbox label="Proxy Cloudflare" checked={values.proxied} onChange={value => setValue('proxied', value)} />
+          <Field label="Token do Tunnel" type="password" value={values.tunnelToken} onChange={value => setValue('tunnelToken', value)} placeholder={cloudflare.tokenConfigured ? 'token ja configurado' : 'cole o token do tunnel'} autoComplete="off" />
+          <Field label="Hostname publico" value={values.publicHostname} onChange={value => setValue('publicHostname', value)} placeholder="cliente.tronsoft.app.br" />
+          <div className="md:col-span-2">
+            <Field label="Service URL" value={values.serviceUrl} onChange={value => setValue('serviceUrl', value)} placeholder="http://127.0.0.1:8080" />
+          </div>
+          <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600 md:col-span-2">
+            <div className="font-medium text-slate-800">Exemplos de Service URL no Public Hostname do Cloudflare</div>
+            <div className="mt-2 grid gap-2 md:grid-cols-3">
+              {examples.map(example => (
+                <button key={example} type="button" onClick={() => setValue('serviceUrl', example)} className="rounded-md border border-slate-200 bg-white px-3 py-2 text-left font-mono text-xs text-slate-700 hover:border-sky-300 hover:bg-sky-50">
+                  {example}
+                </button>
+              ))}
+            </div>
+            <div className="mt-2 text-xs text-slate-500">
+              Use nomes de containers quando o tunnel estiver na mesma rede Docker, como <code>http://web</code> ou <code>http://tsretaguarda-web:8010</code>. Use <code>http://127.0.0.1:8080</code> quando o cloudflared rodar direto no host Debian.
+            </div>
           </div>
           <div className="flex flex-wrap items-center gap-3 md:col-span-2">
             <button disabled={saveMutation.isPending} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
@@ -1747,17 +1735,12 @@ function CloudflareView({ dashboard }) {
             </button>
             <button type="button" disabled={testMutation.isPending} onClick={() => testMutation.mutate()} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
               <RefreshCw className="h-4 w-4" />
-              Testar token
-            </button>
-            <button type="button" disabled={syncMutation.isPending} onClick={() => syncMutation.mutate()} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
-              <Zap className="h-4 w-4" />
-              Sincronizar DNS
+              Validar tunnel
             </button>
           </div>
           {saveMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">Configuracao salva.</div> : null}
-          {testMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">Token OK: {testMutation.data.zone}</div> : null}
-          {syncMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">DNS sincronizado.</div> : null}
-          {saveMutation.isError || testMutation.isError || syncMutation.isError ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 md:col-span-2">{saveMutation.error?.message || testMutation.error?.message || syncMutation.error?.message}</div> : null}
+          {testMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">{testMutation.data.message} Service URL: {testMutation.data.serviceUrl}</div> : null}
+          {saveMutation.isError || testMutation.isError ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 md:col-span-2">{saveMutation.error?.message || testMutation.error?.message}</div> : null}
         </form>
       </Card>
     </div>

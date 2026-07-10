@@ -2211,54 +2211,51 @@ async function backupStatus() {
 }
 
 function rawCloudflareSettings() {
+  const saved = readJson(cloudflareSettingsPath, {});
   return {
-    enabled: false,
-    apiToken: process.env.CLOUDFLARE_API_TOKEN || '',
-    zoneId: process.env.CLOUDFLARE_ZONE_ID || '',
-    recordId: process.env.CLOUDFLARE_RECORD_ID || '',
-    recordName: process.env.CLOUDFLARE_RECORD_NAME || '',
-    recordType: process.env.CLOUDFLARE_RECORD_TYPE || 'A',
-    targetIp: process.env.CLOUDFLARE_TARGET_IP || process.env.HA_VIP || '',
-    proxied: process.env.CLOUDFLARE_PROXIED ? process.env.CLOUDFLARE_PROXIED === 'true' : true,
-    ttl: Number(process.env.CLOUDFLARE_TTL || 60),
-    ...readJson(cloudflareSettingsPath, {})
+    mode: 'tunnel',
+    enabled: saved.enabled === true || process.env.CLOUDFLARE_TUNNEL_ENABLED === 'true',
+    tunnelToken: saved.tunnelToken || saved.apiToken || process.env.CLOUDFLARE_TUNNEL_TOKEN || process.env.CLOUDFLARE_API_TOKEN || '',
+    serviceUrl: saved.serviceUrl || process.env.CLOUDFLARE_TUNNEL_SERVICE_URL || 'http://127.0.0.1:8080',
+    publicHostname: saved.publicHostname || saved.recordName || process.env.CLOUDFLARE_TUNNEL_HOSTNAME || process.env.CLOUDFLARE_RECORD_NAME || ''
   };
 }
 
 function publicCloudflareSettings(settings = rawCloudflareSettings()) {
   return {
+    mode: 'tunnel',
     enabled: settings.enabled === true,
-    zoneId: settings.zoneId || '',
-    recordId: settings.recordId || '',
-    recordName: settings.recordName || null,
-    recordType: settings.recordType || 'A',
-    targetIp: settings.targetIp || null,
-    tokenConfigured: !!settings.apiToken && settings.apiToken !== 'change-me',
-    proxied: settings.proxied !== false,
-    ttl: Number(settings.ttl || 60)
+    serviceUrl: settings.serviceUrl || 'http://127.0.0.1:8080',
+    publicHostname: settings.publicHostname || null,
+    recordName: settings.publicHostname || null,
+    tokenConfigured: !!settings.tunnelToken && settings.tunnelToken !== 'change-me',
+    serviceExamples: [
+      'http://127.0.0.1:8080',
+      'http://web',
+      'http://tsretaguarda-web:8010'
+    ]
   };
 }
 
 function normalizeCloudflareSettings(body) {
   const current = rawCloudflareSettings();
   const next = {
+    mode: 'tunnel',
     enabled: body.enabled === true,
-    apiToken: body.apiToken ? String(body.apiToken).trim() : current.apiToken || '',
-    zoneId: String(body.zoneId || current.zoneId || '').trim(),
-    recordId: String(body.recordId || current.recordId || '').trim(),
-    recordName: String(body.recordName || '').trim(),
-    recordType: String(body.recordType || 'A').trim().toUpperCase(),
-    targetIp: String(body.targetIp || '').trim(),
-    proxied: body.proxied !== false,
-    ttl: Number(body.ttl || 60)
+    tunnelToken: body.tunnelToken ? String(body.tunnelToken).trim() : current.tunnelToken || '',
+    serviceUrl: String(body.serviceUrl || current.serviceUrl || 'http://127.0.0.1:8080').trim(),
+    publicHostname: String(body.publicHostname || '').trim()
   };
-  if (!['A', 'AAAA', 'CNAME'].includes(next.recordType)) throw new Error('tipo de registro Cloudflare invalido');
-  if (next.ttl !== 1 && (next.ttl < 60 || next.ttl > 86400)) throw new Error('TTL Cloudflare invalido');
+  let parsedServiceUrl;
+  try {
+    parsedServiceUrl = new URL(next.serviceUrl);
+  } catch {
+    throw new Error('service url do Tunnel invalida');
+  }
+  if (!['http:', 'https:'].includes(parsedServiceUrl.protocol)) throw new Error('service url do Tunnel deve iniciar com http:// ou https://');
   if (next.enabled) {
-    if (!next.apiToken) throw new Error('token Cloudflare nao informado');
-    if (!next.zoneId) throw new Error('zone id Cloudflare nao informado');
-    if (!next.recordName) throw new Error('nome do registro Cloudflare nao informado');
-    if (!next.targetIp) throw new Error('destino Cloudflare nao informado');
+    if (!next.tunnelToken) throw new Error('token do Cloudflare Tunnel nao informado');
+    if (!next.serviceUrl) throw new Error('service url do Cloudflare Tunnel nao informado');
   }
   return next;
 }
@@ -2269,9 +2266,9 @@ function writeCloudflareSettings(body) {
   fs.writeFileSync(cloudflareSettingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
   appendEvent('CLOUDFLARE_SETTINGS_UPDATED', {
     enabled: settings.enabled,
-    recordName: settings.recordName,
-    recordType: settings.recordType,
-    targetIp: settings.targetIp
+    mode: settings.mode,
+    publicHostname: settings.publicHostname,
+    serviceUrl: settings.serviceUrl
   });
   return publicCloudflareSettings(settings);
 }
@@ -2296,34 +2293,34 @@ async function cloudflareRequest(settings, method, pathname, body = null) {
 
 async function cloudflareTest() {
   const settings = rawCloudflareSettings();
-  if (!settings.zoneId) throw new Error('zone id Cloudflare nao configurado');
-  const payload = await cloudflareRequest(settings, 'GET', `/zones/${settings.zoneId}`);
-  appendEvent('CLOUDFLARE_TEST_OK', { zoneId: settings.zoneId, name: payload.result?.name });
-  return { ok: true, zone: payload.result?.name || settings.zoneId };
+  const normalized = normalizeCloudflareSettings(settings);
+  if (!normalized.tunnelToken) throw new Error('token do Cloudflare Tunnel nao configurado');
+  appendEvent('CLOUDFLARE_TUNNEL_TEST_OK', {
+    publicHostname: normalized.publicHostname,
+    serviceUrl: normalized.serviceUrl
+  });
+  return {
+    ok: true,
+    message: 'Configuracao do Tunnel validada localmente.',
+    serviceUrl: normalized.serviceUrl,
+    publicHostname: normalized.publicHostname || null
+  };
 }
 
 async function cloudflareSync() {
   const settings = rawCloudflareSettings();
-  if (settings.enabled !== true) throw new Error('Cloudflare desabilitado');
-  const body = {
-    type: settings.recordType || 'A',
-    name: settings.recordName,
-    content: settings.targetIp,
-    ttl: Number(settings.ttl || 60),
-    proxied: settings.proxied !== false
+  if (settings.enabled !== true) throw new Error('Cloudflare Tunnel desabilitado');
+  const normalized = normalizeCloudflareSettings(settings);
+  appendEvent('CLOUDFLARE_TUNNEL_READY', {
+    publicHostname: normalized.publicHostname,
+    serviceUrl: normalized.serviceUrl
+  });
+  return {
+    ok: true,
+    message: 'Use este Service URL no Public Hostname do Tunnel no painel da Cloudflare.',
+    serviceUrl: normalized.serviceUrl,
+    publicHostname: normalized.publicHostname || null
   };
-  let recordId = settings.recordId || '';
-  if (!recordId) {
-    const query = new URLSearchParams({ type: body.type, name: body.name });
-    const found = await cloudflareRequest(settings, 'GET', `/zones/${settings.zoneId}/dns_records?${query.toString()}`);
-    recordId = found.result?.[0]?.id || '';
-  }
-  const payload = recordId
-    ? await cloudflareRequest(settings, 'PUT', `/zones/${settings.zoneId}/dns_records/${recordId}`, body)
-    : await cloudflareRequest(settings, 'POST', `/zones/${settings.zoneId}/dns_records`, body);
-  const next = writeCloudflareSettings({ ...settings, recordId: payload.result?.id || recordId });
-  appendEvent('CLOUDFLARE_DNS_SYNCED', { recordName: next.recordName, targetIp: next.targetIp });
-  return { ok: true, record: publicCloudflareSettings({ ...settings, recordId: payload.result?.id || recordId }) };
 }
 
 function cloudflareStatus() {
@@ -2499,31 +2496,27 @@ async function clusterNetworkImpact(proposedAddressCidr = '') {
   const actions = [];
   if (identity.deploymentMode === 'ha') {
     if (!vip) {
-      warnings.push({ level: 'warning', message: 'HA está ativo, mas HA_VIP não está configurado.' });
+      warnings.push({ level: 'warning', message: 'HA esta ativo, mas HA_VIP nao esta configurado.' });
     } else if (proposed && sameIpv4Subnet(proposedCidr, vipCidr) === false) {
-      warnings.push({ level: 'danger', message: `VIP ${vip} não está na mesma faixa do IP ${proposedCidr}.` });
+      warnings.push({ level: 'danger', message: `VIP ${vip} nao esta na mesma faixa do IP ${proposedCidr}.` });
       actions.push('Escolher um VIP na mesma rede do IP real do servidor.');
     }
     if (identity.nodeRole === 'primary' && syncSettings.enabled && !syncSettings.standbyHost) {
-      warnings.push({ level: 'warning', message: 'Sync HA está habilitado, mas o IP real do standby não foi informado.' });
+      warnings.push({ level: 'warning', message: 'Sync HA esta habilitado, mas o IP real do standby nao foi informado.' });
     }
     if (identity.nodeRole === 'standby' && currentAddress && syncSettings.standbyHost === currentAddress.address) {
       warnings.push({ level: 'warning', message: 'Este standby parece apontar o Sync HA para ele mesmo.' });
     }
   }
   if (proposed && currentAddress && proposed.address !== currentAddress.address) {
-    actions.push('Atualizar o outro nó para usar este novo IP real em SSH/rsync.');
+    actions.push('Atualizar o outro no para usar este novo IP real em SSH/rsync.');
     actions.push('Recriar/reiniciar containers para recarregar arquivos .env que dependem do IP.');
-    if (cloudflare.enabled && cloudflare.targetIp === currentAddress.address) {
-      warnings.push({ level: 'warning', message: 'Cloudflare aponta para o IP real atual; ao trocar IP, atualize o destino ou use o VIP.' });
-      actions.push('Atualizar Cloudflare para o novo IP real ou para o VIP.');
-    }
   }
-  if (cloudflare.enabled && vip && cloudflare.targetIp && cloudflare.targetIp !== vip) {
-    warnings.push({ level: 'info', message: `Cloudflare aponta para ${cloudflare.targetIp}; em HA, o mais estável costuma ser apontar para o VIP ${vip}.` });
+  if (cloudflare.enabled && cloudflare.serviceUrl) {
+    actions.push(`Conferir se o Public Hostname do Cloudflare Tunnel continua apontando para ${cloudflare.serviceUrl}.`);
   }
   if (identity.deploymentMode === 'ha' && proposed && currentAddress && proposed.address !== currentAddress.address) {
-    warnings.push({ level: 'info', message: 'A troca do IP real não altera o VIP automaticamente.' });
+    warnings.push({ level: 'info', message: 'A troca do IP real nao altera o VIP automaticamente.' });
   }
   return {
     identity,
@@ -2545,14 +2538,13 @@ async function clusterNetworkImpact(proposedAddressCidr = '') {
     },
     cloudflare: {
       enabled: cloudflare.enabled,
-      recordName: cloudflare.recordName,
-      targetIp: cloudflare.targetIp
+      publicHostname: cloudflare.publicHostname,
+      serviceUrl: cloudflare.serviceUrl
     },
     warnings,
     actions: [...new Set(actions)]
   };
 }
-
 function assertNetworkPayload(body) {
   const payload = {
     interfaceName: String(body.interfaceName || '').trim(),
