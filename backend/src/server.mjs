@@ -34,6 +34,7 @@ const rcloneSettingsPath = process.env.TRONSOFTOS_RCLONE_SETTINGS || path.join(s
 const haSyncSettingsPath = process.env.TRONSOFTOS_HA_SYNC_SETTINGS || path.join(stateDir, 'ha-sync-settings.json');
 const haFailoverSettingsPath = process.env.TRONSOFTOS_HA_FAILOVER_SETTINGS || path.join(stateDir, 'ha-failover-settings.json');
 const maintenanceStatePath = process.env.TRONSOFTOS_MAINTENANCE_STATE || path.join(stateDir, 'maintenance-state.json');
+const updateStatusPath = process.env.TRONSOFTOS_UPDATE_STATUS || path.join(stateDir, 'update-status.json');
 const googleCredentialsPath = process.env.TRONSOFTOS_GOOGLE_CREDENTIALS || path.join(stateDir, 'google-drive-credentials.json');
 const googleOauthDir = process.env.TRONSOFTOS_GOOGLE_OAUTH_DIR || path.join(stateDir, 'google-oauth');
 const frontendDist = process.env.TRONSOFTOS_FRONTEND_DIST || path.join(appRoot, 'frontend/dist');
@@ -3218,6 +3219,30 @@ function publicActionJob(job) {
   };
 }
 
+function updateStatusJob(id) {
+  const state = readJson(updateStatusPath, null);
+  if (!state || state.id !== id) return null;
+  return publicActionJob({
+    id: state.id,
+    app: state.app || 'tronsoftos',
+    action: state.action || `update-${state.branch || 'main'}`,
+    command: state.command || 'sudo',
+    args: state.args || ['/usr/bin/bash', path.join(appRoot, 'scripts/update-tronsoftos.sh'), state.branch || 'main'],
+    status: state.status || 'running',
+    startedAt: state.startedAt || null,
+    finishedAt: state.finishedAt || null,
+    exitCode: state.exitCode ?? null,
+    error: state.error || null,
+    stdout: state.stdout || state.message || '',
+    stderr: state.stderr || ''
+  });
+}
+
+function writeUpdateStatus(state) {
+  ensureStateDir();
+  fs.writeFileSync(updateStatusPath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+}
+
 function appendActionLog(job, stream, chunk) {
   job[stream] += chunk.toString();
   if (job[stream].length > maxActionLogLength) {
@@ -3494,8 +3519,27 @@ function restartHaFailoverWatchdog() {
   startHaFailoverWatchdog();
 }
 
-function startCommandJob({ app, action, command, args, env = process.env, cwd = appRoot, eventPrefix = 'MAINTENANCE', timeoutMs = 0 }) {
-  const id = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
+function persistUpdateJob(job, message = '') {
+  if (job.app !== 'tronsoftos' || !String(job.action || '').startsWith('update-')) return;
+  writeUpdateStatus({
+    id: job.id,
+    app: job.app,
+    action: job.action,
+    branch: String(job.action || '').replace(/^update-/, '') || 'main',
+    command: job.command,
+    args: job.args,
+    status: job.status,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    exitCode: job.exitCode,
+    error: job.error,
+    message: message || (job.status === 'success' ? 'Atualizacao concluida com sucesso.' : job.error || 'Atualizacao em andamento.'),
+    stdout: job.stdout,
+    stderr: job.stderr
+  });
+}
+
+function startCommandJob({ id = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`, app, action, command, args, env = process.env, cwd = appRoot, eventPrefix = 'MAINTENANCE', timeoutMs = 0 }) {
   const job = {
     id,
     app,
@@ -3511,6 +3555,7 @@ function startCommandJob({ app, action, command, args, env = process.env, cwd = 
     stderr: ''
   };
   actionJobs.set(id, job);
+  persistUpdateJob(job);
   const child = spawn(command, args, { cwd, env, windowsHide: true });
   let timedOut = false;
   let timeoutTimer = null;
@@ -3521,6 +3566,7 @@ function startCommandJob({ app, action, command, args, env = process.env, cwd = 
       job.error = `tempo limite excedido apos ${Math.round(timeoutMs / 60000)} minuto(s)`;
       job.finishedAt = new Date().toISOString();
       appendActionLog(job, 'stderr', `\n[tronsoftos] ${job.error}; encerrando processo de atualizacao.\n`);
+      persistUpdateJob(job, job.error);
       appendEvent(`${eventPrefix}_${action.toUpperCase()}_TIMEOUT`, { app, timeoutMs });
       child.kill('SIGTERM');
       setTimeout(() => {
@@ -3536,6 +3582,7 @@ function startCommandJob({ app, action, command, args, env = process.env, cwd = 
     job.status = 'failed';
     job.error = err.message;
     job.finishedAt = new Date().toISOString();
+    persistUpdateJob(job, err.message);
     appendEvent(`${eventPrefix}_${action.toUpperCase()}_FAILED`, { app, error: err.message });
   });
   child.on('close', code => {
@@ -3545,6 +3592,7 @@ function startCommandJob({ app, action, command, args, env = process.env, cwd = 
       job.status = code === 0 ? 'success' : 'failed';
       job.finishedAt = new Date().toISOString();
     }
+    persistUpdateJob(job, job.status === 'success' ? 'Atualizacao concluida com sucesso.' : 'Atualizacao falhou.');
     appendEvent(`${eventPrefix}_${action.toUpperCase()}`, { app, exitCode: code, stdout: job.stdout, stderr: job.stderr });
   });
   return publicActionJob(job);
@@ -3869,9 +3917,12 @@ function startTronsoftosUpdate(body = {}) {
   }
 
   const cmd = privilegedCommandArgs('/usr/bin/bash', [script, branch]);
+  const updateJobId = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
   const env = {
     ...process.env,
     TRONSOFTOS_APP_DIR: appRoot,
+    TRONSOFTOS_UPDATE_JOB_ID: updateJobId,
+    TRONSOFTOS_UPDATE_STATUS: updateStatusPath,
     TRONSOFTOS_UPDATE_TIMEOUT_MINUTES: String(timeoutMinutes),
     TRONSOFTOS_UPDATE_STANDBY_HOST: identity.deploymentMode === 'ha' && identity.nodeRole === 'primary' ? settings.standbyHost || '' : '',
     TRONSOFTOS_UPDATE_SSH_USER: settings.sshUser || 'tronsoft',
@@ -3884,6 +3935,7 @@ function startTronsoftosUpdate(body = {}) {
   };
   appendEvent('TRONSOFTOS_UPDATE_STARTED', { branch, nodeRole: identity.nodeRole, standbyHost: env.TRONSOFTOS_UPDATE_STANDBY_HOST || null });
   return startCommandJob({
+    id: updateJobId,
     app: 'tronsoftos',
     action: `update-${branch}`,
     ...cmd,
@@ -4496,9 +4548,11 @@ async function handleApi(req, reply, url) {
   if (req.method === 'POST' && url.pathname === '/api/apps/registry-login') return json(reply, 200, await dockerRegistryLogin(await readBody(req)));
   const actionJobMatch = url.pathname.match(/^\/api\/actions\/([^/]+)$/);
   if (req.method === 'GET' && actionJobMatch) {
-    const job = actionJobs.get(actionJobMatch[1]);
-    if (!job) return json(reply, 404, { error: 'action not found' });
-    return json(reply, 200, publicActionJob(job));
+    const liveJob = actionJobs.get(actionJobMatch[1]);
+    if (liveJob) return json(reply, 200, publicActionJob(liveJob));
+    const persistedJob = updateStatusJob(actionJobMatch[1]);
+    if (!persistedJob) return json(reply, 404, { error: 'action not found' });
+    return json(reply, 200, persistedJob);
   }
   if (req.method === 'GET' && url.pathname === '/api/cluster') return json(reply, 200, clusterStatus());
   if (req.method === 'GET' && url.pathname === '/api/cluster/standby-status') {

@@ -153,6 +153,7 @@ function statusClass(status) {
     disabled: 'bg-slate-100 text-slate-700 border-slate-200',
     offline: 'bg-red-100 text-red-800 border-red-200',
     missing: 'bg-red-100 text-red-800 border-red-200',
+    failed: 'bg-red-100 text-red-800 border-red-200',
     error: 'bg-red-100 text-red-800 border-red-200'
   }[status] || 'bg-slate-100 text-slate-700 border-slate-200';
 }
@@ -562,13 +563,26 @@ function AppsView({ dashboard, onAction, actionPending, actionJob }) {
 function ActionTerminal({ job }) {
   const output = [job.stdout, job.stderr].filter(Boolean).join('\n').trim();
   const statusText = job.status === 'running' ? 'Executando' : job.status === 'success' ? 'Concluido' : 'Falhou';
+  const done = job.status === 'success';
+  const failed = job.status === 'failed';
   return (
     <Card title={`Execucao: ${job.app} ${job.action}`} icon={Terminal} action={<StatusPill value={job.status} />}>
       <div className="mb-3 flex flex-wrap items-center gap-3 text-xs text-slate-500">
         <span>{statusText}</span>
         <span className="font-mono">{job.command} {(job.args || []).join(' ')}</span>
         {job.exitCode !== null && job.exitCode !== undefined ? <span>exit {job.exitCode}</span> : null}
+        {job.finishedAt ? <span>finalizado {formatDateTime(job.finishedAt)}</span> : null}
       </div>
+      {done ? (
+        <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-800">
+          Atualizacao concluida. O servico ja voltou; atualize a pagina para ver o build mais recente.
+        </div>
+      ) : null}
+      {failed ? (
+        <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          Atualizacao falhou. Verifique o log abaixo antes de tentar novamente.
+        </div>
+      ) : null}
       <pre className="max-h-80 overflow-auto rounded-md bg-slate-950 p-4 text-xs leading-relaxed text-slate-100">{output || 'Aguardando saida do comando...'}</pre>
       {job.error ? <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{job.error}</div> : null}
     </Card>
@@ -1783,8 +1797,15 @@ function UpdatesView({ dashboard }) {
   const standbyHost = dashboard.cluster?.sync?.standbyHost || '';
   const maintenanceBlock = dashboard.cluster?.failover?.maintenanceBlock || {};
   const busy = updateMutation.isPending || jobQuery.data?.status === 'running';
+  const lastUpdateStatus = jobQuery.data?.status;
   const branchLabel = targetBranch === 'main' ? 'main' : 'dev';
   const branchConfirmation = `ATUALIZAR ${branchLabel.toUpperCase()}`;
+  useEffect(() => {
+    if (lastUpdateStatus && lastUpdateStatus !== 'running') {
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    }
+  }, [lastUpdateStatus, queryClient]);
   return (
     <div className="space-y-5">
       <div className="grid gap-4 lg:grid-cols-4">
@@ -1797,7 +1818,7 @@ function UpdatesView({ dashboard }) {
       {jobQuery.data ? <ActionTerminal job={jobQuery.data} /> : null}
 
       <div className="grid gap-5 xl:grid-cols-2">
-        <Card title="Atualizar TronSoftOS" icon={RefreshCw} action={<StatusPill value={busy ? 'running' : branchLabel} />}>
+        <Card title="Atualizar TronSoftOS" icon={RefreshCw} action={<StatusPill value={busy ? 'running' : lastUpdateStatus || branchLabel} />}>
           <div className="space-y-3 text-sm text-slate-700">
             <label className="block">
               <span className="text-xs font-medium uppercase text-slate-500">Branch para atualizar</span>

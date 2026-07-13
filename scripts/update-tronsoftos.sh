@@ -14,10 +14,62 @@ INTERNAL_TOKEN="${TRONSOFTOS_INTERNAL_TOKEN:-}"
 TRONSOFTOS_PORT="${TRONSOFTOS_PORT:-8080}"
 MAINTENANCE_STATE="${TRONSOFTOS_MAINTENANCE_STATE:-$APP_DIR/state/maintenance-state.json}"
 STORAGE_ROOT="${STORAGE_ROOT:-/opt/tronfire-storage}"
+UPDATE_JOB_ID="${TRONSOFTOS_UPDATE_JOB_ID:-}"
+UPDATE_STATUS="${TRONSOFTOS_UPDATE_STATUS:-$APP_DIR/state/update-status.json}"
+UPDATE_STARTED_AT="$(date -Is)"
+UPDATE_STATUS_FINALIZED=false
+snapshot_file=""
 
 log() {
   printf '[update] %s\n' "$*"
 }
+
+json_escape() {
+  local value="${1:-}"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/}"
+  printf '%s' "$value"
+}
+
+write_update_status() {
+  local status="$1"
+  local exit_code="$2"
+  local message="$3"
+  [ -n "$UPDATE_JOB_ID" ] || return 0
+  mkdir -p "$(dirname "$UPDATE_STATUS")"
+  local finished_json="null"
+  if [ "$status" != "running" ]; then
+    finished_json="\"$(date -Is)\""
+  fi
+  cat > "$UPDATE_STATUS" <<EOF
+{
+  "id": "$(json_escape "$UPDATE_JOB_ID")",
+  "app": "tronsoftos",
+  "action": "update-$(json_escape "$BRANCH")",
+  "branch": "$(json_escape "$BRANCH")",
+  "status": "$(json_escape "$status")",
+  "startedAt": "$(json_escape "$UPDATE_STARTED_AT")",
+  "finishedAt": $finished_json,
+  "exitCode": $exit_code,
+  "message": "$(json_escape "$message")"
+}
+EOF
+}
+
+finish_update_status() {
+  local code=$?
+  if [ -n "${snapshot_file:-}" ]; then
+    rm -f "$snapshot_file"
+  fi
+  if [ "$UPDATE_STATUS_FINALIZED" != "true" ]; then
+    write_update_status "failed" "$code" "Atualizacao falhou antes de concluir. Verifique o log da execucao."
+  fi
+  exit "$code"
+}
+
+trap finish_update_status EXIT
 
 ssh_remote_curl() {
   local path="$1"
@@ -168,8 +220,8 @@ case "$BRANCH" in
 esac
 
 cd "$APP_DIR"
+write_update_status "running" "null" "Atualizacao em andamento."
 snapshot_file="$(mktemp)"
-trap 'rm -f "$snapshot_file"' EXIT
 log "registrando fotografia de seguranca dos dados persistentes"
 capture_persistent_snapshot "$snapshot_file"
 
@@ -227,6 +279,8 @@ clear_local_maintenance
 
 update_version="$(tr -d '[:space:]' < "$APP_DIR/VERSION" 2>/dev/null || printf 'unknown')"
 log "atualizacao concluida com sucesso: versao ${update_version}, build ${update_build}, commit ${update_commit}, branch ${update_branch}"
+write_update_status "success" "0" "Atualizacao concluida com sucesso: versao ${update_version}, build ${update_build}, commit ${update_commit}, branch ${update_branch}."
+UPDATE_STATUS_FINALIZED=true
 log "agendando reinicio do servico TronSoftOS"
 if command -v systemd-run >/dev/null 2>&1; then
   if ! systemd-run --unit=tronsoftos-restart-after-update --on-active=3s /bin/systemctl restart tronsoftos.service >/dev/null 2>&1; then
