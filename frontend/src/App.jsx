@@ -2467,7 +2467,6 @@ function TroncomandaSettings() {
         >
           <ToggleSwitch
             label="Mesa obrigatoria"
-            description="Controla TABLE_REQUERID no frontend QR."
             icon={Table2}
             checked={values.tableRequired}
             onChange={value => setValue('tableRequired', value)}
