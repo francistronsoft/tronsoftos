@@ -52,7 +52,6 @@ import 'reactflow/dist/style.css';
 const navItems = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'apps', label: 'Apps', icon: Boxes },
-  { id: 'settings', label: 'Ajustes', icon: Settings },
   { id: 'tronfire', label: 'TronFire', icon: Database },
   { id: 'cluster', label: 'Cluster HA', icon: GitBranch },
   { id: 'backups', label: 'Backups', icon: UploadCloud },
@@ -2510,13 +2509,6 @@ function TroncomandaSettings() {
         </form>
 
         <div className="space-y-3 text-sm">
-          <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-            <div className="text-xs font-medium uppercase text-slate-500">Arquivos</div>
-            <div className="mt-2 space-y-1 text-xs text-slate-600">
-              <div className="break-all">{settings.envPath || 'apps/troncomanda/.env'}</div>
-              <div className="break-all">{settings.qrEnvPath || '/opt/tronfire-storage/troncomanda/qr-static/.env'}</div>
-            </div>
-          </div>
           {[
             ['Cardapio Lite', containerStatus('troncomanda_cardapio_lite')],
             ['Retaguarda API', containerStatus('tsretaguarda-api')],
@@ -2718,7 +2710,6 @@ function AuthenticatedApp({ user, onLogout }) {
     dashboard: <DashboardView dashboard={dashboard} />,
     apps: <AppsView dashboard={dashboard} actionPending={appActionPending} actionJob={actionJobQuery.data} onAction={(app, action) => actionMutation.mutate({ app, action })} />,
     tronfire: <TronFireView section="dashboard" />,
-    settings: <SettingsView dashboard={dashboard} />,
     cluster: <ClusterView dashboard={dashboard} />,
     backups: <BackupsView dashboard={dashboard} />,
     cloudflare: <CloudflareView dashboard={dashboard} />,
