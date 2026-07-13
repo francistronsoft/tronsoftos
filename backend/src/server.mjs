@@ -1573,6 +1573,30 @@ function parseEnvFile(filePath) {
   }
 }
 
+function formatEnvValue(value) {
+  const text = String(value ?? '');
+  return /^[A-Za-z0-9_.,:@/+ -]*$/.test(text) ? text : JSON.stringify(text);
+}
+
+function writeEnvValues(filePath, values) {
+  const existing = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : '';
+  const lines = existing ? existing.split(/\r?\n/) : [];
+  const pending = { ...values };
+  const nextLines = lines.map(line => {
+    const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=/);
+    if (!match || !(match[1] in pending)) return line;
+    const key = match[1];
+    const value = formatEnvValue(pending[key]);
+    delete pending[key];
+    return `${key}=${value}`;
+  });
+  for (const [key, value] of Object.entries(pending)) {
+    nextLines.push(`${key}=${formatEnvValue(value)}`);
+  }
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${nextLines.filter((line, index) => line || index < nextLines.length - 1).join('\n')}\n`);
+}
+
 function haSyncLogs(selectedName = '') {
   const safeSelectedName = path.basename(String(selectedName || ''));
   let files = [];
@@ -2934,6 +2958,113 @@ function appActionSteps(app, action) {
 
 function appActionCommand(app, action) {
   return appActionSteps(app, action)[0];
+}
+
+const TRONCOMANDA_OPTIONAL_SERVICES = {
+  cardapio: ['cardapio-lite'],
+  retaguarda: ['tsretaguarda-api', 'tsretaguarda-web'],
+  gerente: ['tsgerente-api', 'tsgerente-web']
+};
+
+function troncomandaEnvPath() {
+  return path.join(appRoot, 'apps/troncomanda/.env');
+}
+
+function troncomandaStorageRoot(env = parseEnvFile(troncomandaEnvPath())) {
+  return env.TRONCOMANDA_STORAGE_ROOT || '/opt/tronfire-storage/troncomanda';
+}
+
+function troncomandaQrEnvPath(env = parseEnvFile(troncomandaEnvPath())) {
+  return path.join(troncomandaStorageRoot(env), 'qr-static/.env');
+}
+
+function normalizedProfiles(value) {
+  return new Set(String(value || '')
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean));
+}
+
+async function troncomandaSettings() {
+  const env = parseEnvFile(troncomandaEnvPath());
+  const qrEnvPath = troncomandaQrEnvPath(env);
+  const qrEnv = parseEnvFile(qrEnvPath);
+  const profiles = normalizedProfiles(env.COMPOSE_PROFILES);
+  const containers = await containerStatus([
+    'troncomanda_cardapio_lite',
+    'tsretaguarda-api',
+    'tsretaguarda-web',
+    'tsgerente-api',
+    'tsgerente-web',
+    'troncomanda_qr'
+  ]);
+  return {
+    tableRequired: String(qrEnv.TABLE_REQUERID ?? env.TRONCOMANDA_TABLE_REQUIRED ?? '0') === '1',
+    cardapioLiteEnabled: profiles.has('cardapio'),
+    retaguardaWebEnabled: profiles.has('retaguarda'),
+    gerenteWebEnabled: profiles.has('gerente'),
+    composeProfiles: Array.from(profiles),
+    envPath: troncomandaEnvPath(),
+    qrEnvPath,
+    containers
+  };
+}
+
+function troncomandaComposeBaseArgs() {
+  return ['compose', '-p', 'troncomanda', '-f', path.join(appRoot, 'apps/troncomanda/docker-compose.yml')];
+}
+
+async function runTroncomandaCompose(args, options = {}) {
+  return run('docker', [...troncomandaComposeBaseArgs(), ...args], {
+    timeout: options.timeout || 1000 * 60 * 10,
+    maxBuffer: options.maxBuffer || 1024 * 1024 * 10,
+    env: dockerEnv()
+  });
+}
+
+async function writeTroncomandaSettings(body = {}) {
+  const current = await troncomandaSettings();
+  const next = {
+    tableRequired: body.tableRequired !== undefined ? !!body.tableRequired : current.tableRequired,
+    cardapioLiteEnabled: body.cardapioLiteEnabled !== undefined ? !!body.cardapioLiteEnabled : current.cardapioLiteEnabled,
+    retaguardaWebEnabled: body.retaguardaWebEnabled !== undefined ? !!body.retaguardaWebEnabled : current.retaguardaWebEnabled,
+    gerenteWebEnabled: body.gerenteWebEnabled !== undefined ? !!body.gerenteWebEnabled : current.gerenteWebEnabled
+  };
+  const profiles = [];
+  if (next.cardapioLiteEnabled) profiles.push('cardapio');
+  if (next.retaguardaWebEnabled) profiles.push('retaguarda');
+  if (next.gerenteWebEnabled) profiles.push('gerente');
+
+  const envPath = troncomandaEnvPath();
+  const env = parseEnvFile(envPath);
+  const qrEnvPath = troncomandaQrEnvPath(env);
+  writeEnvValues(envPath, {
+    COMPOSE_PROFILES: profiles.join(','),
+    TRONCOMANDA_TABLE_REQUIRED: next.tableRequired ? '1' : '0'
+  });
+  writeEnvValues(qrEnvPath, { TABLE_REQUERID: next.tableRequired ? '1' : '0' });
+
+  const enabledServices = [
+    ...(next.cardapioLiteEnabled ? TRONCOMANDA_OPTIONAL_SERVICES.cardapio : []),
+    ...(next.retaguardaWebEnabled ? TRONCOMANDA_OPTIONAL_SERVICES.retaguarda : []),
+    ...(next.gerenteWebEnabled ? TRONCOMANDA_OPTIONAL_SERVICES.gerente : [])
+  ];
+  const disabledServices = [
+    ...(next.cardapioLiteEnabled ? [] : TRONCOMANDA_OPTIONAL_SERVICES.cardapio),
+    ...(next.retaguardaWebEnabled ? [] : TRONCOMANDA_OPTIONAL_SERVICES.retaguarda),
+    ...(next.gerenteWebEnabled ? [] : TRONCOMANDA_OPTIONAL_SERVICES.gerente)
+  ];
+  const outputs = [];
+  if (enabledServices.length) {
+    outputs.push({ action: 'up', services: enabledServices, ...(await runTroncomandaCompose(['up', '-d', ...enabledServices])) });
+  }
+  if (disabledServices.length) {
+    outputs.push({ action: 'stop', services: disabledServices, ...(await runTroncomandaCompose(['stop', ...disabledServices])) });
+  }
+  outputs.push({ action: 'qr-refresh', services: ['troncomanda_qr'], ...(await runTroncomandaCompose(['up', '-d', '--force-recreate', 'qr'])) });
+
+  appendEvent('TRONCOMANDA_SETTINGS_UPDATED', { next, profiles, outputs: outputs.map(item => ({ action: item.action, services: item.services })) });
+  return { ...(await troncomandaSettings()), outputs };
 }
 
 function dockerEnv() {
@@ -4343,6 +4474,8 @@ async function handleApi(req, reply, url) {
   if (req.method === 'GET' && url.pathname === '/api/dashboard') return json(reply, 200, await dashboard());
   if (req.method === 'GET' && url.pathname === '/api/diagnostics') return json(reply, 200, await diagnostics());
   if (req.method === 'GET' && url.pathname === '/api/apps') return json(reply, 200, { apps: await appsStatus() });
+  if (req.method === 'GET' && url.pathname === '/api/troncomanda/settings') return json(reply, 200, await troncomandaSettings());
+  if (req.method === 'PATCH' && url.pathname === '/api/troncomanda/settings') return json(reply, 200, await writeTroncomandaSettings(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/apps/registry-login') return json(reply, 200, await dockerRegistryLogin(await readBody(req)));
   const actionJobMatch = url.pathname.match(/^\/api\/actions\/([^/]+)$/);
   if (req.method === 'GET' && actionJobMatch) {

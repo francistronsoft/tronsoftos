@@ -3,7 +3,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Activity,
   AlertTriangle,
+  BookOpen,
   Boxes,
+  Briefcase,
   Cloud,
   Database,
   ExternalLink,
@@ -26,8 +28,10 @@ import {
   ShieldCheck,
   Square,
   Sun,
+  Table2,
   Terminal,
   Thermometer,
+  Utensils,
   UploadCloud,
   XCircle
 } from 'lucide-react';
@@ -281,6 +285,31 @@ function Checkbox({ label, checked, onChange }) {
       />
       {label}
     </label>
+  );
+}
+
+function ToggleSwitch({ label, description, icon: Icon, checked, onChange, disabled }) {
+  return (
+    <div className="flex items-center justify-between gap-4 rounded-md border border-slate-200 bg-white px-3 py-3">
+      <div className="flex min-w-0 items-start gap-3">
+        <div className={`rounded-md p-2 ${checked ? 'bg-green-50 text-green-700' : 'bg-slate-100 text-slate-500'}`}>
+          {Icon ? <Icon className="h-4 w-4" /> : null}
+        </div>
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-slate-950">{label}</div>
+          {description ? <div className="mt-0.5 text-xs text-slate-500">{description}</div> : null}
+        </div>
+      </div>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => onChange(!checked)}
+        className={`relative h-7 w-12 shrink-0 rounded-full transition ${checked ? 'bg-slate-950' : 'bg-slate-200'} disabled:opacity-50`}
+        aria-pressed={checked}
+      >
+        <span className={`absolute top-1 h-5 w-5 rounded-full bg-white shadow transition ${checked ? 'left-6' : 'left-1'}`} />
+      </button>
+    </div>
   );
 }
 
@@ -2368,10 +2397,133 @@ function CentralSettings() {
   );
 }
 
+function TroncomandaSettings() {
+  const queryClient = useQueryClient();
+  const settingsQuery = useQuery({ queryKey: ['troncomanda-settings'], queryFn: () => api('/api/troncomanda/settings') });
+  const settings = settingsQuery.data || {};
+  const [form, setForm] = useState(null);
+  const values = form || {
+    tableRequired: settings.tableRequired || false,
+    cardapioLiteEnabled: settings.cardapioLiteEnabled || false,
+    retaguardaWebEnabled: settings.retaguardaWebEnabled || false,
+    gerenteWebEnabled: settings.gerenteWebEnabled || false
+  };
+  const mutation = useMutation({
+    mutationFn: payload => fetch('/api/troncomanda/settings', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).then(async response => {
+      if (!response.ok) throw new Error((await response.json()).error || `HTTP ${response.status}`);
+      return response.json();
+    }),
+    onSuccess: data => {
+      setForm({
+        tableRequired: data.tableRequired,
+        cardapioLiteEnabled: data.cardapioLiteEnabled,
+        retaguardaWebEnabled: data.retaguardaWebEnabled,
+        gerenteWebEnabled: data.gerenteWebEnabled
+      });
+      queryClient.invalidateQueries({ queryKey: ['troncomanda-settings'] });
+      queryClient.invalidateQueries({ queryKey: ['apps'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    }
+  });
+  const setValue = (key, value) => setForm(previous => ({ ...(previous || values), [key]: value }));
+  const busy = settingsQuery.isFetching || mutation.isPending;
+  const containerStatus = name => settings.containers?.find(item => item.name === name)?.status || '-';
+
+  return (
+    <Card title="TronComanda" icon={Utensils} action={<StatusPill value={settingsQuery.isError ? 'warning' : 'config'} />}>
+      <div className="grid gap-5 xl:grid-cols-[1fr_0.9fr]">
+        <form
+          className="space-y-3"
+          onSubmit={event => {
+            event.preventDefault();
+            mutation.mutate(values);
+          }}
+        >
+          <ToggleSwitch
+            label="Mesa obrigatoria"
+            description="Controla TABLE_REQUERID no frontend QR."
+            icon={Table2}
+            checked={values.tableRequired}
+            onChange={value => setValue('tableRequired', value)}
+            disabled={busy}
+          />
+          <ToggleSwitch
+            label="Cardapio Lite"
+            description="Liga ou para o container cardapio_lite."
+            icon={BookOpen}
+            checked={values.cardapioLiteEnabled}
+            onChange={value => setValue('cardapioLiteEnabled', value)}
+            disabled={busy}
+          />
+          <ToggleSwitch
+            label="Retaguarda Web"
+            description="Liga ou para API e web da Retaguarda."
+            icon={Briefcase}
+            checked={values.retaguardaWebEnabled}
+            onChange={value => setValue('retaguardaWebEnabled', value)}
+            disabled={busy}
+          />
+          <ToggleSwitch
+            label="TS Gerente Web"
+            description="Liga ou para API e web do Gerente."
+            icon={Gauge}
+            checked={values.gerenteWebEnabled}
+            onChange={value => setValue('gerenteWebEnabled', value)}
+            disabled={busy}
+          />
+
+          <div className="flex flex-wrap items-center gap-3 pt-2">
+            <button disabled={busy} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
+              <Save className="h-4 w-4" />
+              Aplicar configuracao
+            </button>
+            {mutation.isSuccess ? <StatusPill value="online" /> : null}
+            {mutation.isError ? <span className="text-sm text-red-700">{mutation.error.message}</span> : null}
+          </div>
+        </form>
+
+        <div className="space-y-3 text-sm">
+          <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+            <div className="text-xs font-medium uppercase text-slate-500">Arquivos</div>
+            <div className="mt-2 space-y-1 text-xs text-slate-600">
+              <div className="break-all">{settings.envPath || 'apps/troncomanda/.env'}</div>
+              <div className="break-all">{settings.qrEnvPath || '/opt/tronfire-storage/troncomanda/qr-static/.env'}</div>
+            </div>
+          </div>
+          {[
+            ['Cardapio Lite', containerStatus('troncomanda_cardapio_lite')],
+            ['Retaguarda API', containerStatus('tsretaguarda-api')],
+            ['Retaguarda Web', containerStatus('tsretaguarda-web')],
+            ['Gerente API', containerStatus('tsgerente-api')],
+            ['Gerente Web', containerStatus('tsgerente-web')],
+            ['QR', containerStatus('troncomanda_qr')]
+          ].map(([label, value]) => (
+            <div key={label} className="flex items-center justify-between gap-4 border-b border-slate-100 pb-2">
+              <span className="text-slate-500">{label}</span>
+              <span className="font-medium text-slate-950">{value}</span>
+            </div>
+          ))}
+          {settingsQuery.isError ? (
+            <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              {settingsQuery.error.message}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
 function SettingsView({ dashboard }) {
   return (
     <div className="space-y-5">
       <CentralSettings />
+      <TroncomandaSettings />
       <NetworkSettings />
       <SmtpSettings />
     </div>

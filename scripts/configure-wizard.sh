@@ -608,11 +608,15 @@ TRONCOMANDA_SECRET_KEY="$(openssl rand -base64 32 | tr -d '\n')"
 cat > "$TRONCOMANDA_ENV" <<EOF
 TZ=America/Sao_Paulo
 TRONCOMANDA_STORAGE_ROOT=/opt/tronfire-storage/troncomanda
+COMPOSE_PROFILES=cardapio,retaguarda,gerente
+TRONCOMANDA_TABLE_REQUIRED=0
 
 TRONCOMANDA_WEB_PORT=8000
 TRONCOMANDA_API_PORT=9000
 TSRETAGUARDA_API_PORT=9001
 TSRETAGUARDA_WEB_PORT=8010
+TSGERENTE_API_PORT=9002
+TSGERENTE_WEB_PORT=8011
 TRONCOMANDA_LAN_HOST=${HA_VIP:-$SERVER_IP}
 TRONCOMANDA_PUBLIC_URL=http://$SERVER_IP:8000/qr/
 
@@ -623,6 +627,11 @@ TRONCOMANDA_FIREBIRD_USER=sysdba
 TRONCOMANDA_FIREBIRD_PASSWORD=$FIREBIRD_PASSWORD
 TRONCOMANDA_DATABASE_ALIAS=ERP_TRONSOFT
 TRONCOMANDA_DATABASE_CHARSET=win1252
+EOF
+
+mkdir -p /opt/tronfire-storage/troncomanda/qr-static
+cat > /opt/tronfire-storage/troncomanda/qr-static/.env <<EOF
+TABLE_REQUERID=0
 EOF
 
 cat > "$CLUSTER_SECRETS" <<EOF
@@ -698,7 +707,9 @@ if [ "$FIREBIRD_MODE" = "host" ]; then
         "troncomanda_qr",
         "troncomanda_cardapio_lite",
         "tsretaguarda-api",
-        "tsretaguarda-web"
+        "tsretaguarda-web",
+        "tsgerente-api",
+        "tsgerente-web"
       ],
       "haAware": false
     }
@@ -742,7 +753,9 @@ else
         "troncomanda_qr",
         "troncomanda_cardapio_lite",
         "tsretaguarda-api",
-        "tsretaguarda-web"
+        "tsretaguarda-web",
+        "tsgerente-api",
+        "tsgerente-web"
       ],
       "haAware": false
     }

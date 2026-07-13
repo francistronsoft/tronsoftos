@@ -217,6 +217,9 @@ mkdir -p \
   /opt/tronfire-storage/troncomanda/arquivos-nfe \
   /opt/tronfire-storage/troncomanda/sped-fiscal-sintegra \
   /opt/tronfire-storage/troncomanda/empresas
+if [ ! -f /opt/tronfire-storage/troncomanda/qr-static/.env ]; then
+  printf 'TABLE_REQUERID=0\n' > /opt/tronfire-storage/troncomanda/qr-static/.env
+fi
 
 echo "Copiando arquivos..."
 rsync -a --delete \
