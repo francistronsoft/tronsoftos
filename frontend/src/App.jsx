@@ -52,6 +52,7 @@ import 'reactflow/dist/style.css';
 const navItems = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'apps', label: 'Apps', icon: Boxes },
+  { id: 'settings', label: 'Ajustes', icon: Settings },
   { id: 'tronfire', label: 'TronFire', icon: Database },
   { id: 'cluster', label: 'Cluster HA', icon: GitBranch },
   { id: 'backups', label: 'Backups', icon: UploadCloud },
@@ -2717,6 +2718,7 @@ function AuthenticatedApp({ user, onLogout }) {
     dashboard: <DashboardView dashboard={dashboard} />,
     apps: <AppsView dashboard={dashboard} actionPending={appActionPending} actionJob={actionJobQuery.data} onAction={(app, action) => actionMutation.mutate({ app, action })} />,
     tronfire: <TronFireView section="dashboard" />,
+    settings: <SettingsView dashboard={dashboard} />,
     cluster: <ClusterView dashboard={dashboard} />,
     backups: <BackupsView dashboard={dashboard} />,
     cloudflare: <CloudflareView dashboard={dashboard} />,
