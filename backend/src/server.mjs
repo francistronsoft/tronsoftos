@@ -1578,8 +1578,7 @@ function formatEnvValue(value) {
   return /^[A-Za-z0-9_.,:@/+ -]*$/.test(text) ? text : JSON.stringify(text);
 }
 
-function writeEnvValues(filePath, values) {
-  const existing = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : '';
+function renderEnvValues(existing, values) {
   const lines = existing ? existing.split(/\r?\n/) : [];
   const pending = { ...values };
   const nextLines = lines.map(line => {
@@ -1593,8 +1592,35 @@ function writeEnvValues(filePath, values) {
   for (const [key, value] of Object.entries(pending)) {
     nextLines.push(`${key}=${formatEnvValue(value)}`);
   }
+  return `${nextLines.filter((line, index) => line || index < nextLines.length - 1).join('\n')}\n`;
+}
+
+function writeEnvValues(filePath, values) {
+  const existing = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : '';
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${nextLines.filter((line, index) => line || index < nextLines.length - 1).join('\n')}\n`);
+  fs.writeFileSync(filePath, renderEnvValues(existing, values));
+}
+
+async function writeEnvValuesPrivileged(filePath, values) {
+  const existing = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8') : '';
+  const content = renderEnvValues(existing, values);
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, content);
+    return;
+  } catch (err) {
+    if (!['EACCES', 'EPERM', 'ENOENT'].includes(err.code)) throw err;
+  }
+
+  ensureStateDir();
+  const tempPath = path.join(stateDir, `env-write-${crypto.randomUUID()}.tmp`);
+  fs.writeFileSync(tempPath, content, { mode: 0o600 });
+  try {
+    await privilegedRun('mkdir', ['-p', path.dirname(filePath)], { timeout: 30_000 });
+    await privilegedRun('install', ['-m', '0644', tempPath, filePath], { timeout: 30_000 });
+  } finally {
+    fs.rmSync(tempPath, { force: true });
+  }
 }
 
 function haSyncLogs(selectedName = '') {
@@ -3038,11 +3064,11 @@ async function writeTroncomandaSettings(body = {}) {
   const envPath = troncomandaEnvPath();
   const env = parseEnvFile(envPath);
   const qrEnvPath = troncomandaQrEnvPath(env);
-  writeEnvValues(envPath, {
+  await writeEnvValuesPrivileged(envPath, {
     COMPOSE_PROFILES: profiles.join(','),
     TRONCOMANDA_TABLE_REQUIRED: next.tableRequired ? '1' : '0'
   });
-  writeEnvValues(qrEnvPath, { TABLE_REQUERID: next.tableRequired ? '1' : '0' });
+  await writeEnvValuesPrivileged(qrEnvPath, { TABLE_REQUERID: next.tableRequired ? '1' : '0' });
 
   const enabledServices = [
     ...(next.cardapioLiteEnabled ? TRONCOMANDA_OPTIONAL_SERVICES.cardapio : []),
