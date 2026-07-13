@@ -1610,16 +1610,7 @@ async function writeEnvValuesPrivileged(filePath, values) {
     return;
   } catch (err) {
     if (!['EACCES', 'EPERM', 'ENOENT'].includes(err.code)) throw err;
-  }
-
-  ensureStateDir();
-  const tempPath = path.join(stateDir, `env-write-${crypto.randomUUID()}.tmp`);
-  fs.writeFileSync(tempPath, content, { mode: 0o600 });
-  try {
-    await privilegedRun('mkdir', ['-p', path.dirname(filePath)], { timeout: 30_000 });
-    await privilegedRun('install', ['-m', '0644', tempPath, filePath], { timeout: 30_000 });
-  } finally {
-    fs.rmSync(tempPath, { force: true });
+    throw new Error(`Sem permissao para gravar ${filePath}. Execute a atualizacao do TronSoftOS para ajustar as permissoes.`);
   }
 }
 

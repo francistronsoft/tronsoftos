@@ -221,19 +221,26 @@ if [ ! -f /opt/tronfire-storage/troncomanda/qr-static/.env ]; then
   printf 'TABLE_REQUERID=0\n' > /opt/tronfire-storage/troncomanda/qr-static/.env
 fi
 
+SOURCE_DIR="$(cd "$SCRIPT_DIR" && pwd)"
+TARGET_DIR="$(cd "$APP_DIR" && pwd)"
+
 echo "Copiando arquivos..."
-rsync -a --delete \
-  --exclude '.git' \
-  --exclude 'node_modules' \
-  --exclude 'frontend/node_modules' \
-  --exclude '.ssh/' \
-  --exclude 'state/' \
-  --exclude 'logs/' \
-  --exclude 'config/rclone/' \
-  --exclude 'config/managed-apps.json' \
-  --exclude 'apps/tronfire/.env' \
-  --exclude 'apps/troncomanda/.env' \
-  ./ "$APP_DIR/"
+if [ "$SOURCE_DIR" = "$TARGET_DIR" ]; then
+  echo "Origem e destino sao o mesmo diretorio; copia de arquivos ignorada."
+else
+  rsync -a --delete \
+    --exclude '.git' \
+    --exclude 'node_modules' \
+    --exclude 'frontend/node_modules' \
+    --exclude '.ssh/' \
+    --exclude 'state/' \
+    --exclude 'logs/' \
+    --exclude 'config/rclone/' \
+    --exclude 'config/managed-apps.json' \
+    --exclude 'apps/tronfire/.env' \
+    --exclude 'apps/troncomanda/.env' \
+    "$SOURCE_DIR/" "$APP_DIR/"
+fi
 
 if [ ! -f "$ENV_FILE" ]; then
   cp "$APP_DIR/.env.example" "$ENV_FILE"
