@@ -31,19 +31,29 @@ prepare_frontend() {
 
   echo "Preparando frontend..."
   cd "$APP_DIR/frontend"
-  npm config set fetch-timeout "${NPM_FETCH_TIMEOUT:-120000}"
-  npm config set fetch-retries "${NPM_FETCH_RETRIES:-5}"
-  npm config set fetch-retry-mintimeout "${NPM_FETCH_RETRY_MINTIMEOUT:-20000}"
-  npm config set fetch-retry-maxtimeout "${NPM_FETCH_RETRY_MAXTIMEOUT:-120000}"
-  npm config set audit false
-  npm config set fund false
+  local npm_common_args=(
+    --prefer-offline
+    --no-audit
+    --fund=false
+    --fetch-timeout "${NPM_FETCH_TIMEOUT:-120000}"
+    --fetch-retries "${NPM_FETCH_RETRIES:-5}"
+    --fetch-retry-mintimeout "${NPM_FETCH_RETRY_MINTIMEOUT:-20000}"
+    --fetch-retry-maxtimeout "${NPM_FETCH_RETRY_MAXTIMEOUT:-120000}"
+  )
 
   local attempt
   for attempt in 1 2 3; do
     echo "Instalando dependencias frontend (tentativa $attempt/3)..."
-    if npm install --prefer-offline --no-audit --fund=false; then
-      npm run build
-      return 0
+    if [ -f package-lock.json ]; then
+      if npm ci "${npm_common_args[@]}"; then
+        npm run build
+        return 0
+      fi
+    else
+      if npm install "${npm_common_args[@]}"; then
+        npm run build
+        return 0
+      fi
     fi
     sleep $((attempt * 10))
   done
