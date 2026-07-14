@@ -1333,8 +1333,8 @@ function rcloneRemoteObject(settings, remotePath) {
 
 async function rcloneRemoteBackups() {
   const settings = rawRcloneSettings();
-  if (!settings.remote) throw new Error('remote rclone nao configurado');
-  if (!fs.existsSync(settings.config || defaultRcloneConfigPath())) throw new Error('rclone.conf nao encontrado');
+  if (!settings.remote) throw new Error('Google Drive nao configurado para backups');
+  if (!fs.existsSync(settings.config || defaultRcloneConfigPath())) throw new Error('Configuracao do Google Drive nao aplicada');
   const out = await run(settings.bin || '/usr/bin/rclone', [
     'lsjson',
     rcloneTarget(settings),
@@ -1366,8 +1366,8 @@ async function rcloneRemoteBackups() {
 
 function startRcloneRemoteBackupDownload(body = {}) {
   const settings = rawRcloneSettings();
-  if (!settings.remote) throw new Error('remote rclone nao configurado');
-  if (!fs.existsSync(settings.config || defaultRcloneConfigPath())) throw new Error('rclone.conf nao encontrado');
+  if (!settings.remote) throw new Error('Google Drive nao configurado para backups');
+  if (!fs.existsSync(settings.config || defaultRcloneConfigPath())) throw new Error('Configuracao do Google Drive nao aplicada');
   const remotePath = normalizeRemoteBackupPath(body.path);
   const backupDir = process.env.FIREBIRD_BACKUP_DIR || '/opt/tronfire-storage/firebird/backups';
   const localName = path.basename(remotePath).replace(/[^a-zA-Z0-9_.-]/g, '_');
@@ -1390,9 +1390,9 @@ function startRcloneRemoteBackupDownload(body = {}) {
 
 async function rcloneTest() {
   const settings = rawRcloneSettings();
-  if (!settings.remote) throw new Error('remote rclone nao configurado');
+  if (!settings.remote) throw new Error('Google Drive nao configurado para backups');
   if (!fs.existsSync(settings.bin || '/usr/bin/rclone')) throw new Error(`binario rclone nao encontrado: ${settings.bin || '/usr/bin/rclone'}`);
-  if (!fs.existsSync(settings.config || defaultRcloneConfigPath())) throw new Error(`rclone.conf nao encontrado: ${settings.config || defaultRcloneConfigPath()}`);
+  if (!fs.existsSync(settings.config || defaultRcloneConfigPath())) throw new Error(`Configuracao do Google Drive nao aplicada: ${settings.config || defaultRcloneConfigPath()}`);
   const out = await run(settings.bin || '/usr/bin/rclone', ['lsd', rcloneRemoteRoot(settings), '--config', settings.config || defaultRcloneConfigPath()], {
     timeout: 60_000,
     maxBuffer: 1024 * 1024 * 2
@@ -1409,9 +1409,9 @@ async function rcloneTest() {
 
 async function rcloneUploadTest() {
   const settings = rawRcloneSettings();
-  if (!settings.remote) throw new Error('remote rclone nao configurado');
+  if (!settings.remote) throw new Error('Google Drive nao configurado para backups');
   if (!fs.existsSync(settings.bin || '/usr/bin/rclone')) throw new Error(`binario rclone nao encontrado: ${settings.bin || '/usr/bin/rclone'}`);
-  if (!fs.existsSync(settings.config || defaultRcloneConfigPath())) throw new Error(`rclone.conf nao encontrado: ${settings.config || defaultRcloneConfigPath()}`);
+  if (!fs.existsSync(settings.config || defaultRcloneConfigPath())) throw new Error(`Configuracao do Google Drive nao aplicada: ${settings.config || defaultRcloneConfigPath()}`);
   ensureStateDir();
   const testPath = path.join(stateDir, `rclone-upload-test-${Date.now()}.txt`);
   fs.writeFileSync(testPath, `TronSoftOS rclone test ${new Date().toISOString()}\n`);
@@ -2821,7 +2821,7 @@ async function dashboard() {
       alerts.push({ severity: 'warning', message: `Backup validado atrasado: ${backupAgeMinutes} min desde o ultimo manifesto aprovado` });
     }
   }
-  if (!backups.rclone.remote) alerts.push({ severity: 'warning', message: 'Remote rclone nao configurado' });
+  if (!backups.rclone.remote || !backups.rclone.configConfigured) alerts.push({ severity: 'warning', message: 'Google Drive nao configurado para backups' });
   if (backups.disk?.percentUsed >= 97) alerts.push({ severity: 'critical', message: `Disco de backup com ${backups.disk.percentUsed}% de uso` });
   else if (backups.disk?.percentUsed >= 90) alerts.push({ severity: 'warning', message: `Disco de backup com ${backups.disk.percentUsed}% de uso` });
   if (backups.quota?.percentUsed >= 97) alerts.push({ severity: 'critical', message: `Google Drive com ${backups.quota.percentUsed}% de uso` });
@@ -4247,7 +4247,7 @@ async function centralGoogleApply(body = {}) {
   });
   const rclone = payload.rclone || {};
   if (!rclone.configContent) {
-    throw new Error('Central nao retornou configuracao rclone.');
+    throw new Error('Central nao retornou configuracao do Google Drive.');
   }
 
   const result = writeRcloneSettings({
@@ -4267,7 +4267,7 @@ async function centralGoogleApply(body = {}) {
   return {
     ...result,
     account: payload.account || null,
-    message: 'Google Drive autenticado pela Central e rclone.conf aplicado.'
+    message: 'Google Drive autenticado pela Central e configuracao aplicada.'
   };
 }
 

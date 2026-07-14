@@ -352,6 +352,12 @@ const nodeTypes = { service: ServiceNode };
 function Topology({ dashboard }) {
   const cluster = dashboard.cluster;
   const tronfire = dashboard.apps.find(app => app.name === 'tronfire');
+  const drive = dashboard.backups?.rclone || {};
+  const driveConfigured = Boolean(drive.remote && drive.configConfigured);
+  const driveQuota = dashboard.backups?.quota;
+  const driveDetail = driveConfigured
+    ? (driveQuota?.percentUsed != null ? `quota ${driveQuota.percentUsed}% usada` : `${drive.remote}:${drive.path || ''}`.replace(/:$/, ''))
+    : 'nao configurado';
   const nodes = [
     { id: 'cloudflare', type: 'service', position: { x: 20, y: 40 }, data: { label: 'Cloudflare', detail: dashboard.cloudflare.tokenConfigured ? 'Tunnel configurado' : 'Tunnel' } },
     { id: 'vip', type: 'service', position: { x: 250, y: 40 }, data: { label: 'VIP', detail: cluster.vip || 'nao configurado' } },
@@ -359,7 +365,7 @@ function Topology({ dashboard }) {
     { id: 'standby', type: 'service', position: { x: 480, y: 110 }, data: { label: 'Standby', detail: cluster.mode === 'ha' ? 'aguardando sync' : 'desativado' } },
     { id: 'firebird', type: 'service', position: { x: 700, y: 0 }, data: { label: 'Firebird Host', detail: '2.5.9 / porta 3050' } },
     { id: 'tronfire', type: 'service', position: { x: 920, y: 0 }, data: { label: 'TronFire', detail: tronfire?.status || 'unknown' } },
-    { id: 'backup', type: 'service', position: { x: 920, y: 110 }, data: { label: 'Rclone', detail: dashboard.backups.rclone.remote || 'sem remote' } }
+    { id: 'backup', type: 'service', position: { x: 920, y: 110 }, data: { label: 'Google Drive', detail: driveDetail } }
   ];
   const edges = [
     { id: 'e1', source: 'cloudflare', target: 'vip', animated: true },
@@ -367,7 +373,7 @@ function Topology({ dashboard }) {
     { id: 'e3', source: 'primary', target: 'standby', animated: cluster.mode === 'ha' },
     { id: 'e4', source: 'primary', target: 'firebird' },
     { id: 'e5', source: 'firebird', target: 'tronfire' },
-    { id: 'e6', source: 'tronfire', target: 'backup', animated: !!dashboard.backups.rclone.remote }
+    { id: 'e6', source: 'tronfire', target: 'backup', animated: driveConfigured }
   ];
   return (
     <div className="h-72 rounded-lg border border-slate-200 bg-slate-50">
@@ -1527,8 +1533,14 @@ function BackupsView({ dashboard }) {
   const rclone = rcloneQuery.data || dashboard.backups.rclone || {};
   const centralGoogleQuery = useQuery({ queryKey: ['central-google-oauth'], queryFn: () => api('/api/backups/google/central'), retry: false });
   const centralGoogle = centralGoogleQuery.data || {};
-  const remoteBackupsQuery = useQuery({ queryKey: ['rclone-remote-backups'], queryFn: () => api('/api/backups/rclone/remote-files'), enabled: !!(rclone.remote && rclone.configConfigured), staleTime: 30000 });
+  const driveConfigured = Boolean(rclone.remote && rclone.configConfigured);
+  const remoteBackupsQuery = useQuery({ queryKey: ['rclone-remote-backups'], queryFn: () => api('/api/backups/rclone/remote-files'), enabled: driveConfigured, staleTime: 30000 });
   const quota = dashboard.backups.quota;
+  const quotaLabel = quota?.ok === false
+    ? `Quota Google Drive: falha ao consultar - ${quota.error}`
+    : quota
+      ? `Quota Google Drive: ${formatBytes(quota.free)} livres de ${formatBytes(quota.total)} (${quota.percentUsed}% usado)`
+      : 'Quota Google Drive: aguardando configuracao';
   const remoteFiles = remoteBackupsQuery.data?.files || [];
   const [downloadJobId, setDownloadJobId] = useState(null);
   const [form, setForm] = useState(null);
@@ -1600,15 +1612,15 @@ function BackupsView({ dashboard }) {
 
   return (
     <div className="grid gap-5 xl:grid-cols-[1fr_1fr]">
-      <Card title="Backups no Google Drive" icon={Cloud} action={<StatusPill value={remoteBackupsQuery.isError ? 'warning' : rclone.configConfigured ? 'online' : 'disabled'} />} className="xl:col-span-2">
+      <Card title="Backups no Google Drive" icon={Cloud} action={<StatusPill value={remoteBackupsQuery.isError ? 'warning' : driveConfigured ? 'online' : centralGoogle.connected ? 'warning' : 'disabled'} />} className="xl:col-span-2">
         <div className="mb-4 grid gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-700 lg:grid-cols-[minmax(0,1fr)_auto]">
           <div>
-            <div className="font-medium text-slate-900">{remoteBackupsQuery.data?.target || (rclone.configConfigured ? `${values.remote}:${values.path}` : 'Google Drive ainda nao aplicado')}</div>
+            <div className="font-medium text-slate-900">{remoteBackupsQuery.data?.target || (driveConfigured ? `${values.remote}:${values.path}` : 'Google Drive ainda nao aplicado')}</div>
             <div className="text-xs text-slate-500">Use a Central para autorizar o Google Drive, aplique a configuracao e confirme com upload de teste.</div>
             <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
               <StatusPill value={centralGoogleQuery.isError ? 'Central indisponivel' : centralGoogle.connected ? 'Google conectado' : 'Google pendente'} />
               <span className="text-slate-500">{centralGoogle.connected ? centralGoogle.account?.accountEmail || 'Conta Google autorizada' : 'Aguardando autenticacao'}</span>
-              {quota?.ok === false ? <span className="text-amber-700">{quota.error}</span> : quota ? <span className="text-slate-500">Drive: {formatBytes(quota.used)} de {formatBytes(quota.total)} usados</span> : null}
+              <span className={quota?.ok === false ? 'text-amber-700' : 'text-slate-500'}>{quotaLabel}</span>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 lg:justify-end">
@@ -1630,17 +1642,17 @@ function BackupsView({ dashboard }) {
               <Save className="h-4 w-4" />
               Aplicar Drive
             </button>
-            <button type="button" disabled={testMutation.isPending || !rclone.configConfigured} onClick={() => testMutation.mutate()} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
+            <button type="button" disabled={testMutation.isPending || !driveConfigured} onClick={() => testMutation.mutate()} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
               <RefreshCw className="h-4 w-4" />
               Testar conexao
             </button>
-            <button type="button" disabled={uploadTestMutation.isPending || !rclone.configConfigured} onClick={() => uploadTestMutation.mutate()} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
+            <button type="button" disabled={uploadTestMutation.isPending || !driveConfigured} onClick={() => uploadTestMutation.mutate()} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
               <UploadCloud className="h-4 w-4" />
               Upload teste
             </button>
             <button
               type="button"
-              disabled={remoteBackupsQuery.isFetching || !rclone.configConfigured}
+              disabled={remoteBackupsQuery.isFetching || !driveConfigured}
               onClick={() => queryClient.invalidateQueries({ queryKey: ['rclone-remote-backups'] })}
               className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"
             >
