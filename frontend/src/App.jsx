@@ -1525,6 +1525,8 @@ function BackupsView({ dashboard }) {
   const rcloneQuery = useQuery({ queryKey: ['rclone-settings'], queryFn: () => api('/api/backups/rclone') });
   const files = dashboard.backups.recentFiles || [];
   const rclone = rcloneQuery.data || dashboard.backups.rclone || {};
+  const centralGoogleQuery = useQuery({ queryKey: ['central-google-oauth'], queryFn: () => api('/api/backups/google/central'), retry: false });
+  const centralGoogle = centralGoogleQuery.data || {};
   const remoteBackupsQuery = useQuery({ queryKey: ['rclone-remote-backups'], queryFn: () => api('/api/backups/rclone/remote-files'), enabled: !!(rclone.remote && rclone.configConfigured), staleTime: 30000 });
   const quota = dashboard.backups.quota;
   const remoteFiles = remoteBackupsQuery.data?.files || [];
@@ -1557,6 +1559,24 @@ function BackupsView({ dashboard }) {
   });
   const testMutation = useMutation({ mutationFn: () => postApi('/api/backups/rclone/test') });
   const uploadTestMutation = useMutation({ mutationFn: () => postApi('/api/backups/rclone/upload-test') });
+  const centralGoogleStartMutation = useMutation({
+    mutationFn: () => postApi('/api/backups/google/central/start', { remote: values.remote, path: values.path }),
+    onSuccess: data => {
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+      if (data.authUrl) window.open(data.authUrl, '_blank', 'noopener,noreferrer');
+    }
+  });
+  const centralGoogleApplyMutation = useMutation({
+    mutationFn: () => postApi('/api/backups/google/central/apply', values),
+    onSuccess: data => {
+      setForm({ ...data, configContent: '' });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['rclone-settings'] });
+      queryClient.invalidateQueries({ queryKey: ['rclone-remote-backups'] });
+      queryClient.invalidateQueries({ queryKey: ['central-google-oauth'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    }
+  });
   const downloadMutation = useMutation({
     mutationFn: remotePath => postApi('/api/backups/rclone/download', { path: remotePath }),
     onSuccess: data => {
@@ -1641,20 +1661,54 @@ function BackupsView({ dashboard }) {
             {saveMutation.isError || testMutation.isError || uploadTestMutation.isError ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 md:col-span-2">{saveMutation.error?.message || testMutation.error?.message || uploadTestMutation.error?.message}</div> : null}
           </form>
           <aside className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
-            <div className="mb-2 font-semibold text-slate-900">Como gerar o rclone.conf</div>
-            <ol className="space-y-2 pl-5 text-sm leading-5 list-decimal">
-              <li>Baixe o rclone em <a className="font-medium text-sky-700 hover:underline" href="https://rclone.org/downloads/" target="_blank" rel="noreferrer">rclone.org/downloads</a>.</li>
-              <li>No Windows, extraia o ZIP em uma pasta simples, por exemplo <code className="rounded bg-white px-1 py-0.5 text-xs">C:\rclone</code>.</li>
-              <li>Abra o Prompt de Comando nessa pasta e execute <code className="rounded bg-white px-1 py-0.5 text-xs">rclone config</code>.</li>
-              <li>No menu, digite <code className="rounded bg-white px-1 py-0.5 text-xs">n</code> para criar um remote e informe um nome, por exemplo <code className="rounded bg-white px-1 py-0.5 text-xs">gdrive</code>.</li>
-              <li>Escolha <code className="rounded bg-white px-1 py-0.5 text-xs">Google Drive</code>, deixe client_id e client_secret vazios e aceite a configuracao automatica.</li>
-              <li>Quando o navegador abrir, entre na conta Google, autorize o acesso, confirme com <code className="rounded bg-white px-1 py-0.5 text-xs">y</code> e saia com <code className="rounded bg-white px-1 py-0.5 text-xs">q</code>.</li>
-              <li>Ao finalizar, abra o arquivo <code className="rounded bg-white px-1 py-0.5 text-xs">%APPDATA%\rclone\rclone.conf</code> e cole o conteudo no campo ao lado.</li>
-              <li>Salve, teste a conexao e rode um upload teste antes de habilitar em producao.</li>
-            </ol>
-            <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-              Por enquanto a integracao usa o rclone.conf colado manualmente. A tela de OAuth/credenciais Google foi removida ate definirmos se ficara no rclone ou em um worker de autorizacao.
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div>
+                <div className="font-semibold text-slate-900">Autenticacao pela Central</div>
+                <div className="text-xs text-slate-500">{centralGoogle.connected ? centralGoogle.account?.accountEmail || 'Google conectado' : 'Use a Central para autorizar o Google Drive.'}</div>
+              </div>
+              <StatusPill value={centralGoogleQuery.isError ? 'warning' : centralGoogle.connected ? 'online' : 'config'} />
             </div>
+            <div className="space-y-2">
+              <button
+                type="button"
+                disabled={centralGoogleStartMutation.isPending || centralGoogle.configured === false}
+                onClick={() => centralGoogleStartMutation.mutate()}
+                className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
+              >
+                <Cloud className="h-4 w-4" />
+                Autenticar Google
+              </button>
+              <button
+                type="button"
+                disabled={centralGoogleApplyMutation.isPending}
+                onClick={() => centralGoogleApplyMutation.mutate()}
+                className="inline-flex w-full items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"
+              >
+                <Save className="h-4 w-4" />
+                Aplicar configuracao autorizada
+              </button>
+            </div>
+            <div className="mt-3 space-y-2 text-xs">
+              <div className="flex justify-between gap-3 border-b border-slate-200 pb-2">
+                <span className="text-slate-500">Central</span>
+                <span className="text-right font-medium text-slate-900">{centralGoogle.configured === false ? 'OAuth nao configurado' : centralGoogleQuery.isError ? 'indisponivel' : 'pronta'}</span>
+              </div>
+              <div className="flex justify-between gap-3 border-b border-slate-200 pb-2">
+                <span className="text-slate-500">Remote</span>
+                <span className="text-right font-medium text-slate-900">{values.remote}</span>
+              </div>
+              <div className="flex justify-between gap-3">
+                <span className="text-slate-500">Destino</span>
+                <span className="text-right font-medium text-slate-900">{values.path}</span>
+              </div>
+            </div>
+            {centralGoogleStartMutation.data?.authUrl ? (
+              <a className="mt-3 inline-flex w-full items-center justify-center rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-medium text-sky-700 hover:bg-sky-100" href={centralGoogleStartMutation.data.authUrl} target="_blank" rel="noreferrer">
+                Abrir autorizacao novamente
+              </a>
+            ) : null}
+            {centralGoogleApplyMutation.isSuccess ? <div className="mt-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-700">{centralGoogleApplyMutation.data.message}</div> : null}
+            {centralGoogleQuery.isError || centralGoogleStartMutation.isError || centralGoogleApplyMutation.isError ? <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{centralGoogleQuery.error?.message || centralGoogleStartMutation.error?.message || centralGoogleApplyMutation.error?.message}</div> : null}
           </aside>
         </div>
       </Card>

@@ -4207,6 +4207,70 @@ async function centralRequest(pathname, { method = 'GET', token = '', body = nul
   return payload;
 }
 
+function requireCentralInstallationToken() {
+  const token = centralToken();
+  if (!token) {
+    const error = new Error('TronSoftOS ainda nao esta pareado com a Central.');
+    error.statusCode = 400;
+    throw error;
+  }
+  return token;
+}
+
+async function centralGoogleStatus() {
+  const token = requireCentralInstallationToken();
+  return centralRequest('/api/tronsoftos/oauth/google/status', { token });
+}
+
+async function centralGoogleStart(body = {}) {
+  const token = requireCentralInstallationToken();
+  const settings = rawRcloneSettings();
+  const payload = {
+    remote: normalizeRemoteName(body.remote || settings.remote || 'gdrive'),
+    path: String(body.path || settings.path || 'tronsoftos/backups').trim() || 'tronsoftos/backups'
+  };
+  const result = await centralRequest('/api/tronsoftos/oauth/google/start', {
+    method: 'POST',
+    token,
+    body: payload
+  });
+  appendEvent('CENTRAL_GOOGLE_OAUTH_STARTED', { remote: payload.remote, path: payload.path });
+  return result;
+}
+
+async function centralGoogleApply(body = {}) {
+  const token = requireCentralInstallationToken();
+  const current = rawRcloneSettings();
+  const payload = await centralRequest('/api/tronsoftos/oauth/google/token', {
+    method: 'POST',
+    token
+  });
+  const rclone = payload.rclone || {};
+  if (!rclone.configContent) {
+    throw new Error('Central nao retornou configuracao rclone.');
+  }
+
+  const result = writeRcloneSettings({
+    enabled: true,
+    bin: body.bin || current.bin || '/usr/bin/rclone',
+    config: body.config || current.config || defaultRcloneConfigPath(),
+    remote: rclone.remote || body.remote || current.remote || 'gdrive',
+    path: rclone.path || body.path || current.path || 'tronsoftos/backups',
+    uploadOnlyRole: body.uploadOnlyRole || current.uploadOnlyRole || 'primary',
+    configContent: rclone.configContent
+  });
+  appendEvent('CENTRAL_GOOGLE_OAUTH_APPLIED', {
+    accountEmail: payload.account?.accountEmail || '',
+    remote: result.remote,
+    path: result.path
+  });
+  return {
+    ...result,
+    account: payload.account || null,
+    message: 'Google Drive autenticado pela Central e rclone.conf aplicado.'
+  };
+}
+
 async function centralPair(pairingToken, url = '') {
   if (!pairingToken) throw new Error('Token da Central obrigatorio');
   const settings = writeCentralSettings({ enabled: false, url: url || centralBaseUrl() });
@@ -4584,6 +4648,9 @@ async function handleApi(req, reply, url) {
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/token') return json(reply, 200, saveGoogleDriveToken(await readBody(req)));
   if (req.method === 'GET' && url.pathname === '/api/backups/rclone/remote-files') return json(reply, 200, await rcloneRemoteBackups());
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/download') return json(reply, 202, { ok: true, job: startRcloneRemoteBackupDownload(await readBody(req)) });
+  if (req.method === 'GET' && url.pathname === '/api/backups/google/central') return json(reply, 200, await centralGoogleStatus());
+  if (req.method === 'POST' && url.pathname === '/api/backups/google/central/start') return json(reply, 200, await centralGoogleStart(await readBody(req)));
+  if (req.method === 'POST' && url.pathname === '/api/backups/google/central/apply') return json(reply, 200, await centralGoogleApply(await readBody(req)));
   if (req.method === 'GET' && url.pathname === '/api/backups/google/credentials') return json(reply, 200, publicGoogleCredentials());
   if (req.method === 'POST' && url.pathname === '/api/backups/google/credentials') return json(reply, 200, saveGoogleCredentials(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/backups/google/start') return json(reply, 200, startGoogleDriveOauth(req, await readBody(req)));
