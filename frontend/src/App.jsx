@@ -2380,7 +2380,6 @@ function CentralSettings() {
             mutation.mutate(values);
           }}
         >
-          <Field label="URL da Central" value={values.url} onChange={value => setValue('url', value)} placeholder="https://central.tronsoft.app.br" />
           <Field label="Token do cliente" type="password" value={values.token} onChange={value => setValue('token', value)} placeholder="cole o token gerado na Central" autoComplete="off" />
           <div className="flex items-center gap-3 md:col-span-2">
             <button disabled={mutation.isPending || !values.token} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
