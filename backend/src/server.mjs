@@ -1331,6 +1331,28 @@ function rcloneRemoteObject(settings, remotePath) {
   return `${target}/${remotePath.replace(/^\/+/, '')}`;
 }
 
+function googleDriveErrorDetails(error) {
+  const raw = String(error?.message || error || 'Falha ao acessar Google Drive');
+  const activationUrl = raw.match(/https:\/\/console\.developers\.google\.com\/apis\/api\/drive\.googleapis\.com\/overview\?project=\d+/)?.[0] || '';
+  if (/SERVICE_DISABLED|accessNotConfigured|Google Drive API has not been used|drive\.googleapis\.com/i.test(raw)) {
+    return {
+      code: 'google_drive_api_disabled',
+      activationUrl,
+      message: activationUrl
+        ? `Google Drive API desativada no projeto Google. Habilite em ${activationUrl} e aguarde alguns minutos antes de testar novamente.`
+        : 'Google Drive API desativada no projeto Google das credenciais OAuth da Central. Habilite a API e aguarde alguns minutos antes de testar novamente.'
+    };
+  }
+  if (/invalid_grant|refresh token|Token has been expired|revoked/i.test(raw)) {
+    return {
+      code: 'google_drive_auth_expired',
+      activationUrl: '',
+      message: 'Autorizacao do Google Drive expirou ou foi revogada. Autentique o Google novamente pela Central e aplique o Drive.'
+    };
+  }
+  return { code: 'google_drive_error', activationUrl: '', message: raw };
+}
+
 async function rcloneRemoteBackups() {
   const settings = rawRcloneSettings();
   if (!settings.remote) throw new Error('Google Drive nao configurado para backups');
@@ -1457,7 +1479,8 @@ async function rcloneAbout() {
     rcloneQuotaCache = { key: cacheKey, checkedAt: Date.now(), value };
     return value;
   } catch (err) {
-    const value = { ok: false, target: rcloneTarget(settings), error: err.message };
+    const details = googleDriveErrorDetails(err);
+    const value = { ok: false, target: rcloneTarget(settings), error: details.message, code: details.code, activationUrl: details.activationUrl };
     rcloneQuotaCache = { key: cacheKey, checkedAt: Date.now(), value };
     return value;
   }

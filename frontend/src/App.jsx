@@ -1537,7 +1537,7 @@ function BackupsView({ dashboard }) {
   const remoteBackupsQuery = useQuery({ queryKey: ['rclone-remote-backups'], queryFn: () => api('/api/backups/rclone/remote-files'), enabled: driveConfigured, staleTime: 30000 });
   const quota = dashboard.backups.quota;
   const quotaLabel = quota?.ok === false
-    ? `Quota Google Drive: falha ao consultar - ${quota.error}`
+    ? `Quota Google Drive: ${quota.error}`
     : quota
       ? `Quota Google Drive: ${formatBytes(quota.free)} livres de ${formatBytes(quota.total)} (${quota.percentUsed}% usado)`
       : 'Quota Google Drive: aguardando configuracao';
@@ -1621,6 +1621,7 @@ function BackupsView({ dashboard }) {
               <StatusPill value={centralGoogleQuery.isError ? 'Central indisponivel' : centralGoogle.connected ? 'Google conectado' : 'Google pendente'} />
               <span className="text-slate-500">{centralGoogle.connected ? centralGoogle.account?.accountEmail || 'Conta Google autorizada' : 'Aguardando autenticacao'}</span>
               <span className={quota?.ok === false ? 'text-amber-700' : 'text-slate-500'}>{quotaLabel}</span>
+              {quota?.activationUrl ? <a className="font-medium text-sky-700 hover:text-sky-900" href={quota.activationUrl} target="_blank" rel="noreferrer">Habilitar Google Drive API</a> : null}
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 lg:justify-end">
