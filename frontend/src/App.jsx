@@ -441,6 +441,18 @@ function DashboardView({ dashboard }) {
   const temperatureTone = Number.isFinite(temperatureValue)
     ? temperatureValue >= 85 ? 'red' : temperatureValue >= 70 ? 'amber' : 'green'
     : 'slate';
+  const driveQuota = dashboard.backups?.quota;
+  const driveUsageValue = driveQuota?.ok === false
+    ? 'falha'
+    : driveQuota
+      ? `${formatBytes(driveQuota.used)} usado`
+      : 'pendente';
+  const driveUsageDetail = driveQuota?.ok === false
+    ? driveQuota.error || 'falha ao consultar quota'
+    : driveQuota
+      ? `${formatBytes(driveQuota.free)} livre de ${formatBytes(driveQuota.total)} (${driveQuota.percentUsed}% usado)`
+      : 'aguardando Google Drive';
+  const driveUsageTone = driveQuota?.ok === false ? 'amber' : driveQuota ? 'green' : 'slate';
   return (
     <div className="space-y-5">
       <div className="grid gap-4 lg:grid-cols-6">
@@ -464,10 +476,11 @@ function DashboardView({ dashboard }) {
           <Stat label="Standby restaurado" value={standbyDbSummary} detail={sync.tronfireStandby?.latestValidatedAt ? `restore ${formatDateTime(sync.tronfireStandby.latestValidatedAt)}` : 'nao validado'} icon={ShieldCheck} tone={sync.standbyReady ? 'green' : 'amber'} />
         ) : null}
       </div>
-      <div className="grid gap-4 lg:grid-cols-4">
+      <div className="grid gap-4 lg:grid-cols-5">
         <Stat label="CPU host" value={formatPercent(hostLatest.cpuPercent)} detail={hostLatest.createdAt ? `coleta ${formatDateTime(hostLatest.createdAt)}` : 'aguardando coleta'} icon={Activity} tone="sky" />
         <Stat label="Memoria host" value={formatPercent(hostLatest.memoryPercent)} detail={`${formatBytes(hostLatest.memoryUsageBytes)} de ${formatBytes(hostLatest.memoryLimitBytes)}`} icon={Gauge} tone="green" />
         <Stat label="Disco host" value={formatPercent(hostLatest.diskUsedPercent)} detail={`${formatBytes(hostLatest.diskFreeBytes)} livre`} icon={HardDrive} tone="slate" />
+        <Stat label="Google Drive" value={driveUsageValue} detail={driveUsageDetail} icon={Cloud} tone={driveUsageTone} />
         <Stat label="Temperatura" value={formatTemperature(hostLatest.temperatureCelsius)} detail={hostLatest.temperatureCelsius === null || hostLatest.temperatureCelsius === undefined ? 'sensor indisponivel' : hostLatest.createdAt ? `coleta ${formatDateTime(hostLatest.createdAt)}` : 'aguardando coleta'} icon={Thermometer} tone={temperatureTone} />
       </div>
       {isStandbyNode ? (
@@ -1529,7 +1542,6 @@ function ClusterView({ dashboard }) {
 function BackupsView({ dashboard }) {
   const queryClient = useQueryClient();
   const rcloneQuery = useQuery({ queryKey: ['rclone-settings'], queryFn: () => api('/api/backups/rclone') });
-  const files = dashboard.backups.recentFiles || [];
   const rclone = rcloneQuery.data || dashboard.backups.rclone || {};
   const centralGoogleQuery = useQuery({ queryKey: ['central-google-oauth'], queryFn: () => api('/api/backups/google/central'), retry: false });
   const centralGoogle = centralGoogleQuery.data || {};
@@ -1690,17 +1702,6 @@ function BackupsView({ dashboard }) {
         </div>
         {downloadMutation.isError ? <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{downloadMutation.error.message}</div> : null}
         {downloadJobQuery.data ? <div className="mt-4"><InlineTerminal job={downloadJobQuery.data} /></div> : null}
-      </Card>
-      <Card title="Arquivos recentes" icon={FileClock}>
-        <div className="overflow-hidden rounded-md border border-slate-200">
-          {files.length ? files.map(file => (
-            <div key={file.path} className="grid grid-cols-[1fr_100px_170px] gap-3 border-b border-slate-100 px-3 py-2 text-sm last:border-0">
-              <span className="truncate font-medium">{file.name}</span>
-              <span className="text-right text-slate-500">{Math.round(file.size / 1024)} KB</span>
-              <span className="text-right text-slate-500">{new Date(file.modifiedAt).toLocaleString()}</span>
-            </div>
-          )) : <div className="px-3 py-8 text-center text-sm text-slate-500">Nenhum backup encontrado</div>}
-        </div>
       </Card>
     </div>
   );
