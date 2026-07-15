@@ -1085,7 +1085,13 @@ function writeRcloneSettings(body) {
     try {
       fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
       fs.writeFileSync(settings.config, body.configContent.trimEnd() + '\n', { mode: 0o600 });
+      fs.chmodSync(configDir, 0o700);
       fs.chmodSync(settings.config, 0o600);
+      if (typeof process.getuid === 'function' && process.getuid() === 0) {
+        const owner = fs.statSync(appRoot);
+        fs.chownSync(configDir, owner.uid, owner.gid);
+        fs.chownSync(settings.config, owner.uid, owner.gid);
+      }
     } catch (err) {
       const error = new Error(`Nao foi possivel salvar o rclone.conf em ${settings.config}: ${err.message}. Verifique se a pasta pertence ao usuario tronsoftos.`);
       error.statusCode = 500;
