@@ -2465,10 +2465,13 @@ async function backupStatus() {
 
 function rawCloudflareSettings() {
   const saved = readJson(cloudflareSettingsPath, {});
+  const savedToken = Object.prototype.hasOwnProperty.call(saved, 'tunnelToken') ? saved.tunnelToken : saved.apiToken;
+  const envToken = process.env.CLOUDFLARE_TUNNEL_TOKEN || process.env.CLOUDFLARE_API_TOKEN || '';
   return {
     mode: 'tunnel',
     enabled: saved.enabled === true || process.env.CLOUDFLARE_TUNNEL_ENABLED === 'true',
-    tunnelToken: saved.tunnelToken || saved.apiToken || process.env.CLOUDFLARE_TUNNEL_TOKEN || process.env.CLOUDFLARE_API_TOKEN || ''
+    tokenCleared: saved.tokenCleared === true,
+    tunnelToken: saved.tokenCleared === true ? String(savedToken || '') : savedToken || envToken || ''
   };
 }
 
@@ -2482,10 +2485,12 @@ function publicCloudflareSettings(settings = rawCloudflareSettings()) {
 
 function normalizeCloudflareSettings(body) {
   const current = rawCloudflareSettings();
+  const providedToken = body.tunnelToken ? String(body.tunnelToken).trim() : '';
   const next = {
     mode: 'tunnel',
     enabled: body.enabled === true,
-    tunnelToken: body.tunnelToken ? String(body.tunnelToken).trim() : current.tunnelToken || ''
+    tokenCleared: providedToken ? false : current.tokenCleared === true,
+    tunnelToken: providedToken || current.tunnelToken || ''
   };
   if (next.enabled) {
     if (!next.tunnelToken) throw new Error('token do Cloudflare Tunnel nao informado');
@@ -2508,6 +2513,16 @@ async function applyCloudflareTunnelConnector() {
   const script = '/usr/local/sbin/tronsoftos-cloudflare-tunnel';
   if (!fs.existsSync(script)) return { ok: false, skipped: true, message: 'script do connector ainda nao instalado' };
   const { stdout, stderr } = await privilegedRun(script, ['apply'], {
+    timeout: 120_000,
+    maxBuffer: 1024 * 1024
+  });
+  return { ok: true, stdout: stdout.trim(), stderr: stderr.trim() };
+}
+
+async function stopCloudflareTunnelConnector() {
+  const script = '/usr/local/sbin/tronsoftos-cloudflare-tunnel';
+  if (!fs.existsSync(script)) return { ok: false, skipped: true, message: 'script do connector ainda nao instalado' };
+  const { stdout, stderr } = await privilegedRun(script, ['stop'], {
     timeout: 120_000,
     maxBuffer: 1024 * 1024
   });
@@ -2570,6 +2585,26 @@ async function saveCloudflareSettings(body) {
     throw err;
   }
   return { ...settings, connector };
+}
+
+async function resetCloudflareSettings() {
+  ensureStateDir();
+  const settings = {
+    mode: 'tunnel',
+    enabled: false,
+    tokenCleared: true,
+    tunnelToken: ''
+  };
+  fs.writeFileSync(cloudflareSettingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
+  let connector = null;
+  try {
+    connector = await stopCloudflareTunnelConnector();
+  } catch (err) {
+    appendEvent('CLOUDFLARE_TUNNEL_RESET_STOP_FAILED', { error: err.message });
+    throw err;
+  }
+  appendEvent('CLOUDFLARE_TUNNEL_TOKEN_RESET', { enabled: false });
+  return { ...publicCloudflareSettings(settings), connector, message: 'Token removido e connector parado.' };
 }
 
 async function hostFirebirdStatus() {
@@ -4870,6 +4905,7 @@ async function handleApi(req, reply, url) {
   if (req.method === 'PATCH' && url.pathname === '/api/drive') return json(reply, 200, await writeDriveSettings(await readBody(req)));
   if (req.method === 'GET' && url.pathname === '/api/cloudflare') return json(reply, 200, cloudflareStatus());
   if (req.method === 'PATCH' && url.pathname === '/api/cloudflare') return json(reply, 200, await saveCloudflareSettings(await readBody(req)));
+  if (req.method === 'POST' && url.pathname === '/api/cloudflare/reset') return json(reply, 200, await resetCloudflareSettings());
   if (req.method === 'POST' && url.pathname === '/api/cloudflare/test') return json(reply, 200, await cloudflareTest());
   if (req.method === 'POST' && url.pathname === '/api/cloudflare/sync') return json(reply, 200, await cloudflareSync());
   if (req.method === 'GET' && url.pathname === '/api/settings/central') return json(reply, 200, publicCentralSettings());

@@ -1881,7 +1881,17 @@ function CloudflareView({ dashboard }) {
     }
   });
   const testMutation = useMutation({ mutationFn: () => postApi('/api/cloudflare/test') });
+  const resetMutation = useMutation({
+    mutationFn: () => postApi('/api/cloudflare/reset'),
+    onSuccess: data => {
+      setForm({ ...data, tunnelToken: '' });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['cloudflare-settings'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    }
+  });
   const setValue = (key, value) => setForm(previous => ({ ...(previous || values), [key]: value }));
+  const busy = saveMutation.isPending || testMutation.isPending || resetMutation.isPending;
   return (
     <div className="max-w-5xl">
       <Card title="Cloudflare Tunnel" icon={Cloud} action={<StatusPill value={cloudflare.tokenConfigured ? 'online' : 'warning'} />}>
@@ -1899,18 +1909,32 @@ function CloudflareView({ dashboard }) {
             <Field label="Token do Tunnel" type="password" value={values.tunnelToken} onChange={value => setValue('tunnelToken', value)} placeholder={cloudflare.tokenConfigured ? 'token ja configurado' : 'cole o token do tunnel'} autoComplete="off" />
           </div>
           <div className="flex flex-wrap items-center gap-3 md:col-span-2">
-            <button disabled={saveMutation.isPending} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
+            <button disabled={busy} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
               <Save className="h-4 w-4" />
               Salvar
             </button>
-            <button type="button" disabled={testMutation.isPending} onClick={() => testMutation.mutate()} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
+            <button type="button" disabled={busy} onClick={() => testMutation.mutate()} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
               <RefreshCw className="h-4 w-4" />
               Validar tunnel
+            </button>
+            <button
+              type="button"
+              disabled={busy || !cloudflare.tokenConfigured}
+              onClick={() => {
+                if (window.confirm('Remover o token salvo e parar o connector Cloudflare Tunnel?')) {
+                  resetMutation.mutate();
+                }
+              }}
+              className="inline-flex items-center justify-center gap-2 rounded-md border border-red-200 px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
+            >
+              <XCircle className="h-4 w-4" />
+              Resetar token
             </button>
           </div>
           {saveMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">Configuracao salva.</div> : null}
           {testMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">{testMutation.data.message}</div> : null}
-          {saveMutation.isError || testMutation.isError ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 md:col-span-2">{saveMutation.error?.message || testMutation.error?.message}</div> : null}
+          {resetMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700 md:col-span-2">{resetMutation.data.message}</div> : null}
+          {saveMutation.isError || testMutation.isError || resetMutation.isError ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 md:col-span-2">{saveMutation.error?.message || testMutation.error?.message || resetMutation.error?.message}</div> : null}
         </form>
       </Card>
     </div>
