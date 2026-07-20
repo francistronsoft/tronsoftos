@@ -31,6 +31,7 @@ const centralTokenPath = process.env.TRONSOFTOS_CENTRAL_TOKEN_FILE || path.join(
 const centralAlertStatePath = process.env.TRONSOFTOS_CENTRAL_ALERT_STATE || path.join(stateDir, 'central-alert-state.json');
 const cloudflareSettingsPath = process.env.TRONSOFTOS_CLOUDFLARE_SETTINGS || path.join(stateDir, 'cloudflare-settings.json');
 const rcloneSettingsPath = process.env.TRONSOFTOS_RCLONE_SETTINGS || path.join(stateDir, 'rclone-settings.json');
+const driveSettingsPath = process.env.TRONSOFTOS_DRIVE_SETTINGS || path.join(stateDir, 'drive-settings.json');
 const haSyncSettingsPath = process.env.TRONSOFTOS_HA_SYNC_SETTINGS || path.join(stateDir, 'ha-sync-settings.json');
 const haFailoverSettingsPath = process.env.TRONSOFTOS_HA_FAILOVER_SETTINGS || path.join(stateDir, 'ha-failover-settings.json');
 const maintenanceStatePath = process.env.TRONSOFTOS_MAINTENANCE_STATE || path.join(stateDir, 'maintenance-state.json');
@@ -1515,6 +1516,187 @@ async function diskUsageForPath(targetPath) {
   } catch (err) {
     return { ok: false, path: dirPath, error: err.message };
   }
+}
+
+const hiddenDriveFsTypes = new Set([
+  'autofs',
+  'binfmt_misc',
+  'bpf',
+  'cgroup',
+  'cgroup2',
+  'configfs',
+  'debugfs',
+  'devpts',
+  'devtmpfs',
+  'efivarfs',
+  'fusectl',
+  'hugetlbfs',
+  'mqueue',
+  'nsfs',
+  'overlay',
+  'proc',
+  'pstore',
+  'rpc_pipefs',
+  'securityfs',
+  'squashfs',
+  'sysfs',
+  'tmpfs',
+  'tracefs'
+]);
+
+function defaultDriveSettings() {
+  return {
+    enabled: false,
+    shareName: 'tronsoftos-drive',
+    mountPath: '',
+    directoryName: 'drive',
+    path: '',
+    quotaGb: 0,
+    sambaEnabled: false,
+    updatedAt: null
+  };
+}
+
+function normalizeMountPath(value) {
+  const mountPath = path.resolve(String(value || '/').trim() || '/');
+  return mountPath === path.parse(mountPath).root ? mountPath : mountPath.replace(/\/+$/, '');
+}
+
+function publicDriveSettings(settings = readJson(driveSettingsPath, {})) {
+  const merged = { ...defaultDriveSettings(), ...settings };
+  const mountPath = merged.mountPath ? normalizeMountPath(merged.mountPath) : '';
+  const directoryName = String(merged.directoryName || 'drive').trim() || 'drive';
+  return {
+    enabled: !!merged.enabled,
+    shareName: String(merged.shareName || 'tronsoftos-drive'),
+    mountPath,
+    directoryName,
+    path: mountPath ? path.join(mountPath, directoryName) : String(merged.path || ''),
+    quotaGb: Number(merged.quotaGb || 0),
+    sambaEnabled: !!merged.sambaEnabled,
+    updatedAt: merged.updatedAt || null
+  };
+}
+
+function parseFindmntNumber(value) {
+  const number = Number(String(value || '').replace(/[^0-9.]/g, ''));
+  return Number.isFinite(number) ? number : 0;
+}
+
+function publicMount(item) {
+  const target = normalizeMountPath(item.target || item.TARGET || '/');
+  const fstype = String(item.fstype || item.FSTYPE || '').toLowerCase();
+  const total = parseFindmntNumber(item.total ?? item.SIZE);
+  const used = parseFindmntNumber(item.used ?? item.USED);
+  const free = parseFindmntNumber(item.free ?? item.AVAIL);
+  const percentRaw = item.percentUsed ?? item['USE%'];
+  const percentUsed = Number(String(percentRaw || '').replace('%', ''));
+  const reservedTarget = target === '/' || target.startsWith('/opt/tronfire-storage') || target.startsWith('/opt/tronsoftos');
+  return {
+    target,
+    source: String(item.source || item.SOURCE || ''),
+    fstype,
+    total,
+    used,
+    free,
+    percentUsed: Number.isFinite(percentUsed) ? percentUsed : (total > 0 ? Math.round((used / total) * 100) : null),
+    options: String(item.options || item.OPTIONS || ''),
+    recommended: !reservedTarget && free > 20 * 1024 * 1024 * 1024,
+    warning: reservedTarget ? 'Disco usado pelo sistema, banco ou backups. Prefira um HD dedicado para arquivos dos clientes.' : null
+  };
+}
+
+function visibleDriveMount(mount) {
+  if (!mount.target || hiddenDriveFsTypes.has(mount.fstype)) return false;
+  if (mount.total <= 0) return false;
+  if (mount.target !== '/' && /^\/(boot|dev|proc|run|sys|var\/lib\/docker)(\/|$)/.test(mount.target)) return false;
+  return true;
+}
+
+async function driveMounts() {
+  if (process.platform === 'win32') return [];
+  try {
+    const out = await run('findmnt', ['-J', '-b', '-o', 'TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL,USE%,OPTIONS'], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+    const payload = JSON.parse(out.stdout || '{}');
+    return (payload.filesystems || [])
+      .map(publicMount)
+      .filter(visibleDriveMount)
+      .sort((left, right) => {
+        if (left.recommended !== right.recommended) return left.recommended ? -1 : 1;
+        return right.free - left.free;
+      });
+  } catch {
+    const out = await run('df', ['-PB1', '-x', 'tmpfs', '-x', 'devtmpfs'], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+    return out.stdout.trim().split(/\r?\n/).slice(1).map(line => {
+      const columns = line.trim().split(/\s+/);
+      return publicMount({
+        source: columns[0],
+        total: columns[1],
+        used: columns[2],
+        free: columns[3],
+        percentUsed: columns[4],
+        target: columns.slice(5).join(' ')
+      });
+    }).filter(visibleDriveMount);
+  }
+}
+
+async function driveStatus() {
+  const settings = publicDriveSettings();
+  const mounts = await driveMounts();
+  const selectedMount = settings.mountPath
+    ? mounts.find(item => normalizeMountPath(item.target) === normalizeMountPath(settings.mountPath)) || null
+    : null;
+  const usage = settings.path ? await diskUsageForPath(settings.path) : null;
+  return { settings, mounts, selectedMount, usage };
+}
+
+function safeDriveName(value, fallback) {
+  const normalized = String(value || fallback).trim();
+  if (!/^[A-Za-z0-9_-]{3,40}$/.test(normalized)) {
+    throw Object.assign(new Error('Use apenas letras, numeros, hifen ou underline no nome.'), { statusCode: 400 });
+  }
+  return normalized;
+}
+
+async function writeDriveSettings(body) {
+  const mounts = await driveMounts();
+  if (!String(body.mountPath || '').trim()) {
+    throw Object.assign(new Error('Selecione um disco para ativar o Drive.'), { statusCode: 400 });
+  }
+  const mountPath = normalizeMountPath(body.mountPath || '');
+  const selectedMount = mounts.find(item => normalizeMountPath(item.target) === mountPath);
+  if (!selectedMount) throw Object.assign(new Error('Disco selecionado nao esta disponivel no servidor.'), { statusCode: 400 });
+
+  const directoryName = safeDriveName(body.directoryName, 'drive');
+  const shareName = safeDriveName(body.shareName, 'tronsoftos-drive');
+  const drivePath = path.resolve(path.join(mountPath, directoryName));
+  const relative = path.relative(mountPath, drivePath);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw Object.assign(new Error('Diretorio do Drive precisa ficar dentro do disco selecionado.'), { statusCode: 400 });
+  }
+
+  fs.mkdirSync(drivePath, { recursive: true, mode: 0o770 });
+  try {
+    fs.chmodSync(drivePath, 0o770);
+  } catch {
+    // Some filesystems do not support chmod; the directory still remains usable.
+  }
+
+  const settings = {
+    enabled: body.enabled !== false,
+    shareName,
+    mountPath,
+    directoryName,
+    path: drivePath,
+    quotaGb: Math.max(0, Number(body.quotaGb || 0)),
+    sambaEnabled: body.sambaEnabled === true,
+    updatedAt: new Date().toISOString()
+  };
+  ensureStateDir();
+  fs.writeFileSync(driveSettingsPath, JSON.stringify(settings, null, 2));
+  appendEvent('DRIVE_SETTINGS_UPDATED', { mountPath, path: drivePath, shareName, enabled: settings.enabled });
+  return driveStatus();
 }
 
 function managedConfig() {
@@ -4684,6 +4866,8 @@ async function handleApi(req, reply, url) {
   if (req.method === 'POST' && url.pathname === '/api/backups/google/credentials') return json(reply, 200, saveGoogleCredentials(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/backups/google/start') return json(reply, 200, startGoogleDriveOauth(req, await readBody(req)));
   if (req.method === 'GET' && url.pathname === '/api/backups/google/callback') return await completeGoogleDriveOauth(reply, url);
+  if (req.method === 'GET' && url.pathname === '/api/drive') return json(reply, 200, await driveStatus());
+  if (req.method === 'PATCH' && url.pathname === '/api/drive') return json(reply, 200, await writeDriveSettings(await readBody(req)));
   if (req.method === 'GET' && url.pathname === '/api/cloudflare') return json(reply, 200, cloudflareStatus());
   if (req.method === 'PATCH' && url.pathname === '/api/cloudflare') return json(reply, 200, await saveCloudflareSettings(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/cloudflare/test') return json(reply, 200, await cloudflareTest());

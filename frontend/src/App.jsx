@@ -55,6 +55,7 @@ const navItems = [
   { id: 'tronfire', label: 'TronFire', icon: Database },
   { id: 'cluster', label: 'Cluster HA', icon: GitBranch },
   { id: 'backups', label: 'Backups', icon: UploadCloud },
+  { id: 'drive', label: 'Drive', icon: HardDrive },
   { id: 'cloudflare', label: 'Cloudflare', icon: Cloud },
   { id: 'updates', label: 'Atualizacoes', icon: RefreshCw },
   { id: 'maintenance', label: 'Manutencao', icon: Power }
@@ -1707,6 +1708,153 @@ function BackupsView({ dashboard }) {
   );
 }
 
+function DriveView() {
+  const queryClient = useQueryClient();
+  const driveQuery = useQuery({ queryKey: ['drive-settings'], queryFn: () => api('/api/drive'), refetchInterval: 15000 });
+  const drive = driveQuery.data || {};
+  const settings = drive.settings || {};
+  const mounts = drive.mounts || [];
+  const [form, setForm] = useState(null);
+  const values = form || {
+    enabled: settings.enabled || false,
+    shareName: settings.shareName || 'tronsoftos-drive',
+    mountPath: settings.mountPath || '',
+    directoryName: settings.directoryName || 'drive',
+    quotaGb: settings.quotaGb || 0,
+    sambaEnabled: settings.sambaEnabled || false
+  };
+  const selectedMount = mounts.find(item => item.target === values.mountPath) || drive.selectedMount || null;
+  const setValue = (key, value) => setForm(previous => ({ ...(previous || values), [key]: value }));
+  const saveMutation = useMutation({
+    mutationFn: payload => fetch('/api/drive', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).then(async response => {
+      if (!response.ok) throw new Error((await response.json()).error || `HTTP ${response.status}`);
+      return response.json();
+    }),
+    onSuccess: data => {
+      setForm({
+        enabled: data.settings.enabled,
+        shareName: data.settings.shareName,
+        mountPath: data.settings.mountPath,
+        directoryName: data.settings.directoryName,
+        quotaGb: data.settings.quotaGb,
+        sambaEnabled: data.settings.sambaEnabled
+      });
+      queryClient.invalidateQueries({ queryKey: ['drive-settings'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    }
+  });
+  const projectedPath = values.mountPath ? `${values.mountPath.replace(/\/+$/, '')}/${values.directoryName || 'drive'}`.replace('//', '/') : '-';
+  const percent = selectedMount?.percentUsed ?? 0;
+
+  return (
+    <div className="space-y-5">
+      <div className="grid gap-4 md:grid-cols-3">
+        <Stat label="Drive" value={settings.enabled ? 'Ativo' : 'Desativado'} detail={settings.path || 'Nenhuma pasta configurada'} icon={HardDrive} tone={settings.enabled ? 'green' : 'slate'} />
+        <Stat label="Discos encontrados" value={mounts.length} detail="pontos de montagem disponiveis" icon={Server} tone="sky" />
+        <Stat label="Livre selecionado" value={selectedMount ? formatBytes(selectedMount.free) : '-'} detail={selectedMount ? `${formatBytes(selectedMount.total)} total` : 'selecione um disco'} icon={Gauge} tone={selectedMount?.free > 20 * 1024 * 1024 * 1024 ? 'green' : 'amber'} />
+      </div>
+
+      <Card title="Configurar Drive" icon={HardDrive} action={<StatusPill value={settings.enabled ? 'online' : 'config'} />}>
+        <div className="grid gap-5 xl:grid-cols-[1fr_0.9fr]">
+          <div className="space-y-3">
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              Prefira um HD ou particao dedicada para arquivos compartilhados. Evite misturar esses arquivos com banco de dados, backups do Firebird ou sistema.
+            </div>
+            <div className="grid gap-3">
+              {driveQuery.isLoading ? (
+                <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-4 text-sm text-slate-500">Carregando discos...</div>
+              ) : null}
+              {!driveQuery.isLoading && mounts.length === 0 ? (
+                <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-4 text-sm text-slate-500">Nenhum disco de dados encontrado pelo Debian.</div>
+              ) : null}
+              {mounts.map(mount => {
+                const selected = mount.target === values.mountPath;
+                return (
+                  <button
+                    key={`${mount.source}-${mount.target}`}
+                    type="button"
+                    onClick={() => setValue('mountPath', mount.target)}
+                    className={`w-full rounded-md border p-3 text-left transition ${selected ? 'border-sky-400 bg-sky-50 ring-2 ring-sky-100' : 'border-slate-200 bg-white hover:border-slate-300'}`}
+                  >
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <div className="flex items-center gap-2 text-sm font-semibold text-slate-950">
+                          <HardDrive className="h-4 w-4 text-slate-500" />
+                          {mount.target}
+                        </div>
+                        <div className="mt-1 text-xs text-slate-500">{mount.source || 'origem nao identificada'} · {mount.fstype || 'fs'}</div>
+                      </div>
+                      <div className="text-right text-sm font-medium text-slate-950">{formatBytes(mount.free)} livre</div>
+                    </div>
+                    <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-200">
+                      <div
+                        className={`h-full rounded-full ${mount.percentUsed >= 85 ? 'bg-red-500' : mount.percentUsed >= 70 ? 'bg-amber-500' : 'bg-green-500'}`}
+                        style={{ width: `${Math.min(100, Math.max(0, mount.percentUsed || 0))}%` }}
+                      />
+                    </div>
+                    <div className="mt-2 flex flex-wrap justify-between gap-2 text-xs text-slate-500">
+                      <span>{formatBytes(mount.used)} usado de {formatBytes(mount.total)}</span>
+                      <span>{mount.percentUsed ?? 0}% em uso</span>
+                    </div>
+                    {mount.warning ? <div className="mt-2 text-xs text-amber-700">{mount.warning}</div> : null}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <form
+            className="space-y-4 rounded-md border border-slate-200 bg-slate-50 p-4"
+            onSubmit={event => {
+              event.preventDefault();
+              saveMutation.mutate(values);
+            }}
+          >
+            <ToggleSwitch
+              label="Ativar Drive"
+              description="Salva a pasta escolhida para uso como compartilhamento local."
+              icon={HardDrive}
+              checked={values.enabled}
+              onChange={value => setValue('enabled', value)}
+              disabled={saveMutation.isPending}
+            />
+            <Field label="Nome do compartilhamento" value={values.shareName} onChange={value => setValue('shareName', value)} placeholder="tronsoftos-drive" />
+            <Field label="Pasta no disco" value={values.directoryName} onChange={value => setValue('directoryName', value)} placeholder="drive" />
+            <Field label="Cota em GB" type="number" value={values.quotaGb} onChange={value => setValue('quotaGb', value)} placeholder="0 sem cota" />
+            <ToggleSwitch
+              label="Publicar via Samba"
+              description="Apenas registra a preferencia nesta versao. A aplicacao automatica do Samba entra na proxima etapa."
+              icon={Network}
+              checked={values.sambaEnabled}
+              onChange={value => setValue('sambaEnabled', value)}
+              disabled={saveMutation.isPending}
+            />
+            <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm">
+              <div className="text-xs font-medium uppercase text-slate-500">Caminho previsto</div>
+              <div className="mt-1 break-all font-medium text-slate-950">{projectedPath}</div>
+            </div>
+            {selectedMount ? (
+              <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600">
+                Disco selecionado com {formatBytes(selectedMount.free)} livres. Uso atual: {percent}%.
+              </div>
+            ) : null}
+            <button disabled={saveMutation.isPending || !values.mountPath} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
+              <Save className="h-4 w-4" />
+              Salvar Drive
+            </button>
+            {saveMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Configuracao salva.</div> : null}
+            {saveMutation.isError ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{saveMutation.error.message}</div> : null}
+          </form>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
 function CloudflareView({ dashboard }) {
   const queryClient = useQueryClient();
   const cloudflareQuery = useQuery({ queryKey: ['cloudflare-settings'], queryFn: () => api('/api/cloudflare') });
@@ -2707,6 +2855,7 @@ function AuthenticatedApp({ user, onLogout }) {
     tronfire: <TronFireView section="dashboard" />,
     cluster: <ClusterView dashboard={dashboard} />,
     backups: <BackupsView dashboard={dashboard} />,
+    drive: <DriveView />,
     cloudflare: <CloudflareView dashboard={dashboard} />,
     updates: <UpdatesView dashboard={dashboard} />,
     maintenance: <MaintenanceView dashboard={dashboard} />
