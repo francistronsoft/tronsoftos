@@ -35,13 +35,19 @@ const clusterSecretsPath = process.env.TRONSOFTOS_CLUSTER_SECRETS || path.join(p
 const firebirdExecMode = String(process.env.FIREBIRD_EXEC_MODE || 'container').toLowerCase();
 const tronsoftosApiUrl = String(process.env.TRONSOFTOS_API_URL || 'http://host.docker.internal:8080').replace(/\/+$/, '');
 const defaultProductionAlias = 'erp_tronsoft';
-const fixedBackupFrequencyMinutes = 20;
-const fixedBackupRetentionDays = 30;
+const defaultBackupFrequencyMinutes = normalizeBackupMinutes(process.env.TRONFIRE_BACKUP_FREQUENCY_MINUTES, 20);
+const defaultBackupRetentionDays = normalizeBackupMinutes(process.env.TRONFIRE_BACKUP_RETENTION_DAYS, 30);
 const configuredRunningBackupTtlMinutes = Number(process.env.TRONFIRE_BACKUP_RUNNING_TTL_MINUTES || 360);
 const runningBackupTtlMinutes = Number.isFinite(configuredRunningBackupTtlMinutes)
   ? Math.max(configuredRunningBackupTtlMinutes, 30)
   : 360;
 const runningBackupTtlMs = runningBackupTtlMinutes * 60 * 1000;
+
+function normalizeBackupMinutes(value, fallback, min = 1, max = 10080) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(number)));
+}
 
 await app.register(cors, { origin: true, credentials: true });
 await app.register(cookie, { secret: process.env.SESSION_SECRET || 'dev-secret-change-me' });
@@ -1746,8 +1752,8 @@ app.post('/api/databases', { preHandler: requireOperator }, async (req, reply) =
       accessMode: body.accessMode || 'READ_WRITE',
       isPrimary: !!body.isPrimary,
       backupEnabled: !!body.backupEnabled,
-      backupFrequencyMinutes: fixedBackupFrequencyMinutes,
-      retentionDays: fixedBackupRetentionDays
+      backupFrequencyMinutes: normalizeBackupMinutes(body.backupFrequencyMinutes, defaultBackupFrequencyMinutes),
+      retentionDays: normalizeBackupMinutes(body.retentionDays, defaultBackupRetentionDays)
     }
   });
   await syncFirebirdAliases();
@@ -1787,17 +1793,19 @@ app.patch('/api/databases/:id/backup-settings', { preHandler: requireOperator },
   const body = req.body || {};
   const current = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: req.params.id } });
   const backupEnabled = !!body.backupEnabled;
-  const scheduleChanged = current.backupEnabled !== backupEnabled || current.backupFrequencyMinutes !== fixedBackupFrequencyMinutes || current.retentionDays !== fixedBackupRetentionDays;
+  const backupFrequencyMinutes = normalizeBackupMinutes(body.backupFrequencyMinutes, current.backupFrequencyMinutes || defaultBackupFrequencyMinutes);
+  const retentionDays = normalizeBackupMinutes(body.retentionDays, current.retentionDays || defaultBackupRetentionDays);
+  const scheduleChanged = current.backupEnabled !== backupEnabled || current.backupFrequencyMinutes !== backupFrequencyMinutes || current.retentionDays !== retentionDays;
   const db = await prisma.managedDatabase.update({
     where: { id: req.params.id },
     data: {
       backupEnabled,
-      backupFrequencyMinutes: fixedBackupFrequencyMinutes,
-      retentionDays: fixedBackupRetentionDays,
+      backupFrequencyMinutes,
+      retentionDays,
       ...(scheduleChanged && backupEnabled ? { backupScheduleUpdatedAt: new Date() } : {})
     }
   });
-  await audit(req, 'BACKUP_SETTINGS_UPDATED', { entityType: 'database', entityId: db.id, details: { backupEnabled: db.backupEnabled, backupFrequencyMinutes: fixedBackupFrequencyMinutes, retentionDays: fixedBackupRetentionDays, scheduleChanged } });
+  await audit(req, 'BACKUP_SETTINGS_UPDATED', { entityType: 'database', entityId: db.id, details: { backupEnabled: db.backupEnabled, backupFrequencyMinutes: db.backupFrequencyMinutes, retentionDays: db.retentionDays, scheduleChanged } });
   return db;
 });
 

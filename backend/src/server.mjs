@@ -1326,6 +1326,11 @@ function rcloneRemoteRoot(settings) {
   return `${String(settings.remote || '').replace(/:+$/g, '')}:`;
 }
 
+function rcloneArgs(args = []) {
+  const bind = String(process.env.RCLONE_BIND || '0.0.0.0').trim();
+  return bind ? ['--bind', bind, ...args] : args;
+}
+
 function normalizeRemoteBackupPath(value) {
   const remotePath = String(value || '').trim().replace(/\\/g, '/').replace(/^\/+/, '');
   if (!remotePath || remotePath.includes('..') || remotePath.startsWith('-')) throw new Error('backup remoto invalido');
@@ -1357,6 +1362,13 @@ function googleDriveErrorDetails(error) {
       message: 'Autorizacao do Google Drive expirou ou foi revogada. Autentique o Google novamente pela Central e aplique o Drive.'
     };
   }
+  if (/network is unreachable|dial tcp \[[0-9a-f:]+\]:443/i.test(raw)) {
+    return {
+      code: 'google_drive_ipv6_unreachable',
+      activationUrl: '',
+      message: 'Servidor tentou acessar o Google Drive por IPv6, mas a rede nao possui rota IPv6. O TronSoftOS deve executar o rclone com IPv4 (--bind 0.0.0.0) ou o IPv6 deve ser desativado/corrigido no Debian.'
+    };
+  }
   return { code: 'google_drive_error', activationUrl: '', message: raw };
 }
 
@@ -1364,7 +1376,7 @@ async function rcloneRemoteBackups() {
   const settings = rawRcloneSettings();
   if (!settings.remote) throw new Error('Google Drive nao configurado para backups');
   if (!fs.existsSync(settings.config || defaultRcloneConfigPath())) throw new Error('Configuracao do Google Drive nao aplicada');
-  const out = await run(settings.bin || '/usr/bin/rclone', [
+  const out = await run(settings.bin || '/usr/bin/rclone', rcloneArgs([
     'lsjson',
     rcloneTarget(settings),
     '--files-only',
@@ -1375,7 +1387,7 @@ async function rcloneRemoteBackups() {
     '--include', '*.fbk.gz',
     '--include', '*.manifest.json',
     '--config', settings.config || defaultRcloneConfigPath()
-  ], {
+  ]), {
     timeout: 120_000,
     maxBuffer: 1024 * 1024 * 10
   });
@@ -1406,13 +1418,13 @@ function startRcloneRemoteBackupDownload(body = {}) {
     app: 'rclone',
     action: 'download',
     command: settings.bin || '/usr/bin/rclone',
-    args: [
+    args: rcloneArgs([
       'copyto',
       rcloneRemoteObject(settings, remotePath),
       localPath,
       '--config',
       settings.config || defaultRcloneConfigPath()
-    ],
+    ]),
     eventPrefix: 'RCLONE'
   });
 }
@@ -1422,7 +1434,7 @@ async function rcloneTest() {
   if (!settings.remote) throw new Error('Google Drive nao configurado para backups');
   if (!fs.existsSync(settings.bin || '/usr/bin/rclone')) throw new Error(`binario rclone nao encontrado: ${settings.bin || '/usr/bin/rclone'}`);
   if (!fs.existsSync(settings.config || defaultRcloneConfigPath())) throw new Error(`Configuracao do Google Drive nao aplicada: ${settings.config || defaultRcloneConfigPath()}`);
-  const out = await run(settings.bin || '/usr/bin/rclone', ['lsd', rcloneRemoteRoot(settings), '--config', settings.config || defaultRcloneConfigPath()], {
+  const out = await run(settings.bin || '/usr/bin/rclone', rcloneArgs(['lsd', rcloneRemoteRoot(settings), '--config', settings.config || defaultRcloneConfigPath()]), {
     timeout: 60_000,
     maxBuffer: 1024 * 1024 * 2
   });
@@ -1446,7 +1458,7 @@ async function rcloneUploadTest() {
   fs.writeFileSync(testPath, `TronSoftOS rclone test ${new Date().toISOString()}\n`);
   try {
     const target = `${rcloneTarget(settings).replace(/\/+$/g, '')}/tronsoftos-upload-test.txt`;
-    const out = await run(settings.bin || '/usr/bin/rclone', ['copyto', testPath, target, '--config', settings.config || defaultRcloneConfigPath()], {
+    const out = await run(settings.bin || '/usr/bin/rclone', rcloneArgs(['copyto', testPath, target, '--config', settings.config || defaultRcloneConfigPath()]), {
       timeout: 120_000,
       maxBuffer: 1024 * 1024 * 2
     });
@@ -1460,12 +1472,12 @@ async function rcloneUploadTest() {
 async function rcloneAbout() {
   const settings = rawRcloneSettings();
   if (!settings.remote || !fs.existsSync(settings.config || defaultRcloneConfigPath())) return null;
-  const cacheKey = `${settings.bin || '/usr/bin/rclone'}|${settings.config || defaultRcloneConfigPath()}|${rcloneTarget(settings)}`;
+  const cacheKey = `${settings.bin || '/usr/bin/rclone'}|${process.env.RCLONE_BIND || '0.0.0.0'}|${settings.config || defaultRcloneConfigPath()}|${rcloneTarget(settings)}`;
   if (rcloneQuotaCache.key === cacheKey && Date.now() - rcloneQuotaCache.checkedAt < 5 * 60 * 1000) {
     return rcloneQuotaCache.value;
   }
   try {
-    const out = await run(settings.bin || '/usr/bin/rclone', ['about', rcloneTarget(settings), '--json', '--config', settings.config || defaultRcloneConfigPath()], {
+    const out = await run(settings.bin || '/usr/bin/rclone', rcloneArgs(['about', rcloneTarget(settings), '--json', '--config', settings.config || defaultRcloneConfigPath()]), {
       timeout: 60_000,
       maxBuffer: 1024 * 1024 * 2
     });
@@ -2463,18 +2475,45 @@ async function backupStatus() {
   const backupDir = process.env.FIREBIRD_BACKUP_DIR || '/opt/tronfire-storage/firebird/backups';
   const rclone = publicRcloneSettings();
   const files = [];
+  const backupFiles = [];
+  const manifests = [];
   try {
     for (const entry of fs.readdirSync(backupDir, { withFileTypes: true })) {
       if (!entry.isFile()) continue;
       if (!/\.(gbk|fbk|gbk\.gz|fbk\.gz|manifest\.json)$/i.test(entry.name)) continue;
       const filePath = path.join(backupDir, entry.name);
       const stat = fs.statSync(filePath);
-      files.push({ name: entry.name, path: filePath, size: stat.size, modifiedAt: stat.mtime.toISOString() });
+      const file = { name: entry.name, path: filePath, size: stat.size, modifiedAt: stat.mtime.toISOString() };
+      files.push(file);
+      if (/\.(gbk|fbk)(\.gz)?$/i.test(entry.name)) {
+        backupFiles.push(file);
+      } else if (/\.manifest\.json$/i.test(entry.name)) {
+        try {
+          const manifest = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+          manifests.push({ ...file, manifest });
+        } catch {
+          manifests.push(file);
+        }
+      }
     }
   } catch {
     // Directory may not exist before install.
   }
   files.sort((a, b) => new Date(b.modifiedAt) - new Date(a.modifiedAt));
+  backupFiles.sort((a, b) => new Date(b.modifiedAt) - new Date(a.modifiedAt));
+  manifests.sort((a, b) => {
+    const aDate = a.manifest?.backupFinishedAt || a.modifiedAt;
+    const bDate = b.manifest?.backupFinishedAt || b.modifiedAt;
+    return new Date(bDate) - new Date(aDate);
+  });
+  const latestManifest = manifests[0] || null;
+  const latestBackupFile = backupFiles[0] || null;
+  const latestBackupAt = latestManifest?.manifest?.backupFinishedAt
+    || latestBackupFile?.modifiedAt
+    || null;
+  const latestValidatedBackupAt = latestManifest?.manifest?.validation?.ok
+    ? latestManifest.manifest.backupFinishedAt || latestManifest.modifiedAt
+    : null;
   const [quota, disk] = await Promise.all([
     rcloneAbout(),
     diskUsageForPath(backupDir)
@@ -2484,6 +2523,17 @@ async function backupStatus() {
     rclone,
     quota,
     disk,
+    latestBackupAt,
+    latestValidatedBackupAt,
+    latestFile: latestBackupFile,
+    latestManifest: latestManifest ? {
+      name: latestManifest.name,
+      path: latestManifest.path,
+      size: latestManifest.size,
+      modifiedAt: latestManifest.modifiedAt,
+      backupFinishedAt: latestManifest.manifest?.backupFinishedAt || null,
+      validationOk: latestManifest.manifest?.validation?.ok === true
+    } : null,
     recentFiles: files.slice(0, 20)
   };
 }

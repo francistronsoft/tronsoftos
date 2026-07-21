@@ -22,8 +22,8 @@ const FIREBIRD_HOST_TARGET = 'firebird_host';
 const TRONSOFTOS_STATE_DIR = process.env.TRONSOFTOS_STATE_DIR || '/opt/tronsoftos/state';
 const HA_SYNC_ACTIVE_FILE = process.env.TRONSOFTOS_HA_SYNC_ACTIVE_FILE || `${TRONSOFTOS_STATE_DIR}/ha-sync.active`;
 const CLUSTER_LOCK_FILE = process.env.TRONSOFTOS_CLUSTER_LOCK || `${TRONSOFTOS_STATE_DIR}/cluster-lock.json`;
-const FIXED_BACKUP_FREQUENCY_MINUTES = 20;
-const FIXED_BACKUP_RETENTION_DAYS = 30;
+const DEFAULT_BACKUP_FREQUENCY_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_FREQUENCY_MINUTES, 20);
+const DEFAULT_BACKUP_RETENTION_DAYS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_RETENTION_DAYS, 30);
 const FIREBIRD_SESSION_RETENTION_DAYS = 30;
 const CONFIGURED_RUNNING_BACKUP_TTL_MINUTES = Number(process.env.TRONFIRE_BACKUP_RUNNING_TTL_MINUTES || 360);
 const RUNNING_BACKUP_TTL_MINUTES = Number.isFinite(CONFIGURED_RUNNING_BACKUP_TTL_MINUTES)
@@ -40,6 +40,12 @@ const METRIC_CONTAINERS = [
 ].filter(name => FIREBIRD_EXEC_MODE === 'container' || name !== FIREBIRD_CONTAINER);
 let backupRunning = false;
 let sessionCollectionRunning = false;
+
+function normalizePositiveMinutes(value, fallback, min = 1, max = 10080) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(min, Math.min(max, Math.round(number)));
+}
 
 function haSyncActive() {
   try {
@@ -876,7 +882,7 @@ async function runBackup(db, reason = 'AUTO') {
 }
 
 async function cleanupRetention(db) {
-  const retentionDays = FIXED_BACKUP_RETENTION_DAYS;
+  const retentionDays = normalizePositiveMinutes(db.retentionDays, DEFAULT_BACKUP_RETENTION_DAYS);
   const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
   const latestSuccess = await prisma.backupJob.findFirst({
     where: { databaseId: db.id, status: 'SUCCESS' },
@@ -922,7 +928,8 @@ async function runAutomaticBackups() {
       await markStaleRunningBackupsFailed(db.id, 'before-automatic-backup');
       const running = await prisma.backupJob.count({ where: { databaseId: db.id, status: 'RUNNING' } });
       if (running > 0) continue;
-      const frequencyMs = FIXED_BACKUP_FREQUENCY_MINUTES * 60 * 1000;
+      const frequencyMinutes = normalizePositiveMinutes(db.backupFrequencyMinutes, DEFAULT_BACKUP_FREQUENCY_MINUTES);
+      const frequencyMs = frequencyMinutes * 60 * 1000;
       const lastBackup = db.lastBackupAt ? new Date(db.lastBackupAt).getTime() : 0;
       const lastAttempt = db.lastBackupAttemptAt ? new Date(db.lastBackupAttemptAt).getTime() : 0;
       const scheduleUpdated = db.backupScheduleUpdatedAt ? new Date(db.backupScheduleUpdatedAt).getTime() : 0;

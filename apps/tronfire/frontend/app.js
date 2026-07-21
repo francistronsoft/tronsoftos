@@ -944,11 +944,24 @@ async function databases() {
         <td>${operationBadge(d)}</td>
         <td>${d.isPrimary ? 'Sim' : 'Nao'}</td>
         <td>
-          <div class="d-flex flex-wrap align-items-end gap-2">
-            <input class="form-check-input m-0" type="checkbox" title="Ativar backup automatico" data-backup-enabled="${d.id}" ${d.backupEnabled ? 'checked' : ''}>
-            <div class="small text-muted">
-              <div>Automatico: ${escapeHtml(d.backupFrequencyMinutes)} min</div>
-              <div>Retencao: ${escapeHtml(d.retentionDays)} dias</div>
+          <div class="backup-settings-cell">
+            <label class="form-check small mb-2">
+              <input class="form-check-input" type="checkbox" title="Ativar backup automatico" data-backup-enabled="${d.id}" ${d.backupEnabled ? 'checked' : ''}>
+              <span class="form-check-label">Automatico</span>
+            </label>
+            <div class="d-flex flex-wrap gap-2">
+              <label class="small text-muted">Frequencia
+                <div class="input-group input-group-sm">
+                  <input class="form-control" type="number" min="1" max="10080" step="1" data-backup-frequency="${d.id}" value="${escapeHtml(d.backupFrequencyMinutes || 20)}">
+                  <span class="input-group-text">min</span>
+                </div>
+              </label>
+              <label class="small text-muted">Retencao
+                <div class="input-group input-group-sm">
+                  <input class="form-control" type="number" min="1" max="365" step="1" data-backup-retention="${d.id}" value="${escapeHtml(d.retentionDays || 30)}">
+                  <span class="input-group-text">dias</span>
+                </div>
+              </label>
             </div>
           </div>
         </td>
@@ -1125,7 +1138,9 @@ async function databases() {
   document.querySelectorAll('[data-save-backup]').forEach(b => b.onclick = async () => {
     const id = b.dataset.saveBackup;
     const enabled = document.querySelector(`[data-backup-enabled="${id}"]`).checked;
-    await api(`/api/databases/${id}/backup-settings`, { method:'PATCH', body: JSON.stringify({ backupEnabled: enabled }) });
+    const backupFrequencyMinutes = Number(document.querySelector(`[data-backup-frequency="${id}"]`)?.value || 20);
+    const retentionDays = Number(document.querySelector(`[data-backup-retention="${id}"]`)?.value || 30);
+    await api(`/api/databases/${id}/backup-settings`, { method:'PATCH', body: JSON.stringify({ backupEnabled: enabled, backupFrequencyMinutes, retentionDays }) });
     b.textContent = 'Salvo';
     setTimeout(() => { databases(); }, 600);
   });
