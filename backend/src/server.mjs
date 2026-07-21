@@ -1045,6 +1045,9 @@ function rawRcloneSettings() {
     remote: process.env.RCLONE_REMOTE || '',
     path: process.env.RCLONE_BACKUP_PATH || 'tronsoftos/backups',
     uploadOnlyRole: process.env.RCLONE_UPLOAD_ONLY_ROLE || 'primary',
+    bind: process.env.RCLONE_BIND || '0.0.0.0',
+    remoteRetentionDays: Number(process.env.RCLONE_REMOTE_RETENTION_DAYS || 30),
+    accountEmail: '',
     ...readJson(rcloneSettingsPath, {})
   };
 }
@@ -1057,7 +1060,10 @@ function publicRcloneSettings(settings = rawRcloneSettings()) {
     configConfigured: fs.existsSync(settings.config || defaultRcloneConfigPath()),
     remote: settings.remote || '',
     path: settings.path || 'tronsoftos/backups',
-    uploadOnlyRole: settings.uploadOnlyRole || 'primary'
+    uploadOnlyRole: settings.uploadOnlyRole || 'primary',
+    bind: settings.bind || process.env.RCLONE_BIND || '0.0.0.0',
+    remoteRetentionDays: Number(settings.remoteRetentionDays || 30),
+    accountEmail: settings.accountEmail || ''
   };
 }
 
@@ -1069,12 +1075,16 @@ function normalizeRcloneSettings(body) {
     config: String(body.config || current.config || defaultRcloneConfigPath()).trim(),
     remote: String(body.remote || '').trim(),
     path: String(body.path || '').trim() || 'tronsoftos/backups',
-    uploadOnlyRole: String(body.uploadOnlyRole || 'primary').trim()
+    uploadOnlyRole: String(body.uploadOnlyRole || 'primary').trim(),
+    bind: String(body.bind || current.bind || process.env.RCLONE_BIND || '0.0.0.0').trim(),
+    remoteRetentionDays: Number(body.remoteRetentionDays || current.remoteRetentionDays || 30),
+    accountEmail: String(body.accountEmail || current.accountEmail || '').trim()
   };
   if (!next.bin.startsWith('/')) throw new Error('caminho do rclone deve ser absoluto');
   if (!next.config.startsWith('/')) throw new Error('caminho do rclone.conf deve ser absoluto');
   if (next.enabled && !next.remote) throw new Error('remote rclone nao informado');
   if (!['primary', 'standby', 'recovery', 'any'].includes(next.uploadOnlyRole)) throw new Error('role de upload invalida');
+  next.remoteRetentionDays = Math.max(1, Math.min(365, Math.round(Number.isFinite(next.remoteRetentionDays) ? next.remoteRetentionDays : 30)));
   return next;
 }
 
@@ -1327,7 +1337,7 @@ function rcloneRemoteRoot(settings) {
 }
 
 function rcloneArgs(args = []) {
-  const bind = String(process.env.RCLONE_BIND || '0.0.0.0').trim();
+  const bind = String(rawRcloneSettings().bind || process.env.RCLONE_BIND || '0.0.0.0').trim();
   return bind ? ['--bind', bind, ...args] : args;
 }
 
@@ -1472,7 +1482,7 @@ async function rcloneUploadTest() {
 async function rcloneAbout() {
   const settings = rawRcloneSettings();
   if (!settings.remote || !fs.existsSync(settings.config || defaultRcloneConfigPath())) return null;
-  const cacheKey = `${settings.bin || '/usr/bin/rclone'}|${process.env.RCLONE_BIND || '0.0.0.0'}|${settings.config || defaultRcloneConfigPath()}|${rcloneTarget(settings)}`;
+  const cacheKey = `${settings.bin || '/usr/bin/rclone'}|${settings.bind || process.env.RCLONE_BIND || '0.0.0.0'}|${settings.config || defaultRcloneConfigPath()}|${rcloneTarget(settings)}`;
   if (rcloneQuotaCache.key === cacheKey && Date.now() - rcloneQuotaCache.checkedAt < 5 * 60 * 1000) {
     return rcloneQuotaCache.value;
   }
@@ -4578,6 +4588,9 @@ async function centralGoogleApply(body = {}) {
     remote: rclone.remote || body.remote || current.remote || 'gdrive',
     path: rclone.path || body.path || current.path || 'tronsoftos/backups',
     uploadOnlyRole: body.uploadOnlyRole || current.uploadOnlyRole || 'primary',
+    bind: body.bind || current.bind || '0.0.0.0',
+    remoteRetentionDays: body.remoteRetentionDays || current.remoteRetentionDays || 30,
+    accountEmail: payload.account?.accountEmail || current.accountEmail || '',
     configContent: rclone.configContent
   });
   appendEvent('CENTRAL_GOOGLE_OAUTH_APPLIED', {

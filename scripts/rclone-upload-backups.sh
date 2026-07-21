@@ -5,6 +5,8 @@ RCLONE_BIN="${RCLONE_BIN:-/usr/bin/rclone}"
 RCLONE_CONFIG="${RCLONE_CONFIG:-/opt/tronsoftos/config/rclone/rclone.conf}"
 RCLONE_REMOTE="${RCLONE_REMOTE:-}"
 RCLONE_BACKUP_PATH="${RCLONE_BACKUP_PATH:-tronsoftos/backups}"
+RCLONE_BIND="${RCLONE_BIND:-0.0.0.0}"
+RCLONE_REMOTE_RETENTION_DAYS="${RCLONE_REMOTE_RETENTION_DAYS:-30}"
 FIREBIRD_BACKUP_DIR="${FIREBIRD_BACKUP_DIR:-/opt/tronfire-storage/firebird/backups}"
 NODE_ROLE="${TRONFIRE_NODE_ROLE:-${TRONSOFTOS_NODE_ROLE:-primary}}"
 UPLOAD_ONLY_ROLE="${RCLONE_UPLOAD_ONLY_ROLE:-primary}"
@@ -22,6 +24,8 @@ for (const [env, key] of [
   ['RCLONE_CONFIG', 'config'],
   ['RCLONE_REMOTE', 'remote'],
   ['RCLONE_BACKUP_PATH', 'path'],
+  ['RCLONE_BIND', 'bind'],
+  ['RCLONE_REMOTE_RETENTION_DAYS', 'remoteRetentionDays'],
   ['UPLOAD_ONLY_ROLE', 'uploadOnlyRole']
 ]) {
   if (settings[key]) console.log(`${env}=${q(settings[key])}`);
@@ -46,8 +50,12 @@ if [ -z "${RCLONE_REMOTE:-}" ]; then
 fi
 
 mkdir -p "$LOG_DIR"
+case "${RCLONE_REMOTE_RETENTION_DAYS:-30}" in
+  ''|*[!0-9]*) RCLONE_REMOTE_RETENTION_DAYS=30 ;;
+esac
 
 "$RCLONE_BIN" copy "$FIREBIRD_BACKUP_DIR" "${RCLONE_REMOTE}:${RCLONE_BACKUP_PATH}" \
+  --bind "$RCLONE_BIND" \
   --config "$RCLONE_CONFIG" \
   --include "*.gbk" \
   --include "*.fbk" \
@@ -57,3 +65,19 @@ mkdir -p "$LOG_DIR"
   --exclude "*" \
   --log-file "$LOG_DIR/upload.log" \
   --log-level INFO
+
+if [ "${RCLONE_REMOTE_RETENTION_DAYS:-0}" -gt 0 ]; then
+  "$RCLONE_BIN" delete "${RCLONE_REMOTE}:${RCLONE_BACKUP_PATH}" \
+    --bind "$RCLONE_BIND" \
+    --config "$RCLONE_CONFIG" \
+    --min-age "${RCLONE_REMOTE_RETENTION_DAYS}d" \
+    --include "*.gbk" \
+    --include "*.fbk" \
+    --include "*.gbk.gz" \
+    --include "*.fbk.gz" \
+    --include "*.manifest.json" \
+    --exclude "*" \
+    --drive-use-trash=false \
+    --log-file "$LOG_DIR/retention.log" \
+    --log-level INFO
+fi

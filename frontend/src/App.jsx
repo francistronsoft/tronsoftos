@@ -1564,6 +1564,8 @@ function BackupsView({ dashboard }) {
     remote: rclone.remote || 'gdrive',
     path: rclone.path || 'tronsoftos/backups',
     uploadOnlyRole: rclone.uploadOnlyRole || 'primary',
+    bind: rclone.bind || '0.0.0.0',
+    remoteRetentionDays: rclone.remoteRetentionDays || 30,
     configContent: ''
   };
   const saveMutation = useMutation({
@@ -1632,9 +1634,12 @@ function BackupsView({ dashboard }) {
             <div className="text-xs text-slate-500">Use a Central para autorizar o Google Drive, aplique a configuracao e confirme com upload de teste.</div>
             <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
               <StatusPill value={centralGoogleQuery.isError ? 'Central indisponivel' : centralGoogle.connected ? 'Google conectado' : 'Google pendente'} />
-              <span className="text-slate-500">{centralGoogle.connected ? centralGoogle.account?.accountEmail || 'Conta Google autorizada' : 'Aguardando autenticacao'}</span>
+              <span className="text-slate-500">{rclone.accountEmail || centralGoogle.account?.accountEmail || (centralGoogle.connected ? 'Conta Google autorizada' : 'Aguardando autenticacao')}</span>
               <span className={quota?.ok === false ? 'text-amber-700' : 'text-slate-500'}>{quotaLabel}</span>
               {quota?.activationUrl ? <a className="font-medium text-sky-700 hover:text-sky-900" href={quota.activationUrl} target="_blank" rel="noreferrer">Habilitar Google Drive API</a> : null}
+            </div>
+            <div className="mt-2 text-xs text-slate-500">
+              Retencao remota: backups no Google Drive com mais de {values.remoteRetentionDays || 30} dia(s) serao removidos no proximo upload automatico. Use um valor compativel com a conta Google autorizada.
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2 lg:justify-end">
@@ -1683,7 +1688,13 @@ function BackupsView({ dashboard }) {
         {centralGoogleApplyMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">{centralGoogleApplyMutation.data.message}</div> : null}
         {testMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Conexao com {testMutation.data.remote || rclone.remote} OK. Destino configurado: {testMutation.data.target}</div> : null}
         {uploadTestMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Upload OK: {uploadTestMutation.data.target}</div> : null}
-        {centralGoogleQuery.isError || centralGoogleStartMutation.isError || centralGoogleApplyMutation.isError || testMutation.isError || uploadTestMutation.isError ? <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{centralGoogleQuery.error?.message || centralGoogleStartMutation.error?.message || centralGoogleApplyMutation.error?.message || testMutation.error?.message || uploadTestMutation.error?.message}</div> : null}        <div className="overflow-hidden rounded-md border border-slate-200">
+        {centralGoogleQuery.isError || centralGoogleStartMutation.isError || centralGoogleApplyMutation.isError || testMutation.isError || uploadTestMutation.isError ? <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{centralGoogleQuery.error?.message || centralGoogleStartMutation.error?.message || centralGoogleApplyMutation.error?.message || testMutation.error?.message || uploadTestMutation.error?.message}</div> : null}
+        <div className="mb-4 grid gap-3 rounded-md border border-slate-200 bg-white px-3 py-3 md:grid-cols-3">
+          <Field label="Binario rclone" value={values.bin} onChange={value => setValue('bin', value)} />
+          <Field label="IPv4 bind" value={values.bind} onChange={value => setValue('bind', value)} placeholder="0.0.0.0" />
+          <Field label="Retencao Google Drive (dias)" type="number" value={values.remoteRetentionDays} onChange={value => setValue('remoteRetentionDays', value)} placeholder="30" />
+        </div>
+        <div className="overflow-hidden rounded-md border border-slate-200">
           {remoteFiles.length ? remoteFiles.slice(0, 30).map(file => (
             <div key={file.path} className="grid grid-cols-[1fr_100px_170px_110px] items-center gap-3 border-b border-slate-100 px-3 py-2 text-sm last:border-0">
               <span className="truncate font-medium" title={file.path}>{file.path}</span>
