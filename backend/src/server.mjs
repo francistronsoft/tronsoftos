@@ -1089,7 +1089,7 @@ function writeRcloneSettings(body) {
       fs.chmodSync(configDir, 0o700);
       fs.chmodSync(settings.config, 0o600);
       if (typeof process.getuid === 'function' && process.getuid() === 0) {
-        const owner = fs.statSync(appRoot);
+        const owner = serviceUserIds();
         fs.chownSync(configDir, owner.uid, owner.gid);
         fs.chownSync(settings.config, owner.uid, owner.gid);
       }
@@ -1516,6 +1516,31 @@ async function diskUsageForPath(targetPath) {
   } catch (err) {
     return { ok: false, path: dirPath, error: err.message };
   }
+}
+
+function serviceUserIds() {
+  const fallback = (() => {
+    try {
+      const stat = fs.statSync(appRoot);
+      return { uid: stat.uid, gid: stat.gid };
+    } catch {
+      return { uid: 0, gid: 0 };
+    }
+  })();
+  try {
+    const userLine = fs.readFileSync('/etc/passwd', 'utf8')
+      .split('\n')
+      .find(line => line.startsWith('tronsoftos:'));
+    const groupLine = fs.readFileSync('/etc/group', 'utf8')
+      .split('\n')
+      .find(line => line.startsWith('tronsoftos:'));
+    const uid = Number(userLine?.split(':')[2]);
+    const gid = Number(groupLine?.split(':')[2] ?? userLine?.split(':')[3]);
+    if (Number.isInteger(uid) && Number.isInteger(gid)) return { uid, gid };
+  } catch {
+    // Keep fallback when passwd/group is unavailable.
+  }
+  return fallback;
 }
 
 const hiddenDriveFsTypes = new Set([
