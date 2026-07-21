@@ -332,7 +332,8 @@ sed -i "s|/opt/tronsoftos|$APP_DIR|g" /etc/systemd/system/tronsoftos-rclone-back
 
 chown -R "$USER_NAME:$GROUP_NAME" "$APP_DIR"
 mkdir -p "$APP_DIR/config/rclone"
-chown -R "$USER_NAME:$GROUP_NAME" "$APP_DIR/config/rclone"
+chown -R "$USER_NAME:$GROUP_NAME" "$APP_DIR/config"
+chmod 750 "$APP_DIR/config"
 chmod 700 "$APP_DIR/config/rclone"
 if [ -f "$APP_DIR/config/rclone/rclone.conf" ]; then
   chown "$USER_NAME:$GROUP_NAME" "$APP_DIR/config/rclone/rclone.conf"
