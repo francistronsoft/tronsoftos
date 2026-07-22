@@ -1108,6 +1108,19 @@ function repairRcloneConfigPermissions(configPath) {
   }
 }
 
+function ensureRcloneConfigReadable(configPath = defaultRcloneConfigPath()) {
+  const target = configPath || defaultRcloneConfigPath();
+  if (!fs.existsSync(target)) return false;
+  try {
+    fs.accessSync(target, fs.constants.R_OK);
+    return true;
+  } catch (err) {
+    if (!['EACCES', 'EPERM'].includes(err.code) || !repairRcloneConfigPermissions(target)) throw err;
+    fs.accessSync(target, fs.constants.R_OK);
+    return true;
+  }
+}
+
 function writeRcloneConfigContent(settings, configContent) {
   const configDir = path.dirname(settings.config);
   const write = () => {
@@ -1417,8 +1430,9 @@ function googleDriveErrorDetails(error) {
 
 async function rcloneRemoteBackups() {
   const settings = rawRcloneSettings();
+  const config = settings.config || defaultRcloneConfigPath();
   if (!settings.remote) throw new Error('Google Drive nao configurado para backups');
-  if (!fs.existsSync(settings.config || defaultRcloneConfigPath())) throw new Error('Configuracao do Google Drive nao aplicada');
+  if (!ensureRcloneConfigReadable(config)) throw new Error('Configuracao do Google Drive nao aplicada');
   const out = await run(settings.bin || '/usr/bin/rclone', rcloneArgs([
     'lsjson',
     rcloneTarget(settings),
@@ -1429,7 +1443,7 @@ async function rcloneRemoteBackups() {
     '--include', '*.gbk.gz',
     '--include', '*.fbk.gz',
     '--include', '*.manifest.json',
-    '--config', settings.config || defaultRcloneConfigPath()
+    '--config', config
   ]), {
     timeout: 120_000,
     maxBuffer: 1024 * 1024 * 10
@@ -1450,8 +1464,9 @@ async function rcloneRemoteBackups() {
 
 function startRcloneRemoteBackupDownload(body = {}) {
   const settings = rawRcloneSettings();
+  const config = settings.config || defaultRcloneConfigPath();
   if (!settings.remote) throw new Error('Google Drive nao configurado para backups');
-  if (!fs.existsSync(settings.config || defaultRcloneConfigPath())) throw new Error('Configuracao do Google Drive nao aplicada');
+  if (!ensureRcloneConfigReadable(config)) throw new Error('Configuracao do Google Drive nao aplicada');
   const remotePath = normalizeRemoteBackupPath(body.path);
   const backupDir = process.env.FIREBIRD_BACKUP_DIR || '/opt/tronfire-storage/firebird/backups';
   const localName = path.basename(remotePath).replace(/[^a-zA-Z0-9_.-]/g, '_');
@@ -1466,7 +1481,7 @@ function startRcloneRemoteBackupDownload(body = {}) {
       rcloneRemoteObject(settings, remotePath),
       localPath,
       '--config',
-      settings.config || defaultRcloneConfigPath()
+      config
     ]),
     eventPrefix: 'RCLONE'
   });
@@ -1474,10 +1489,11 @@ function startRcloneRemoteBackupDownload(body = {}) {
 
 async function rcloneTest() {
   const settings = rawRcloneSettings();
+  const config = settings.config || defaultRcloneConfigPath();
   if (!settings.remote) throw new Error('Google Drive nao configurado para backups');
   if (!fs.existsSync(settings.bin || '/usr/bin/rclone')) throw new Error(`binario rclone nao encontrado: ${settings.bin || '/usr/bin/rclone'}`);
-  if (!fs.existsSync(settings.config || defaultRcloneConfigPath())) throw new Error(`Configuracao do Google Drive nao aplicada: ${settings.config || defaultRcloneConfigPath()}`);
-  const out = await run(settings.bin || '/usr/bin/rclone', rcloneArgs(['lsd', rcloneRemoteRoot(settings), '--config', settings.config || defaultRcloneConfigPath()]), {
+  if (!ensureRcloneConfigReadable(config)) throw new Error(`Configuracao do Google Drive nao aplicada: ${config}`);
+  const out = await run(settings.bin || '/usr/bin/rclone', rcloneArgs(['lsd', rcloneRemoteRoot(settings), '--config', config]), {
     timeout: 60_000,
     maxBuffer: 1024 * 1024 * 2
   });
@@ -1493,15 +1509,16 @@ async function rcloneTest() {
 
 async function rcloneUploadTest() {
   const settings = rawRcloneSettings();
+  const config = settings.config || defaultRcloneConfigPath();
   if (!settings.remote) throw new Error('Google Drive nao configurado para backups');
   if (!fs.existsSync(settings.bin || '/usr/bin/rclone')) throw new Error(`binario rclone nao encontrado: ${settings.bin || '/usr/bin/rclone'}`);
-  if (!fs.existsSync(settings.config || defaultRcloneConfigPath())) throw new Error(`Configuracao do Google Drive nao aplicada: ${settings.config || defaultRcloneConfigPath()}`);
+  if (!ensureRcloneConfigReadable(config)) throw new Error(`Configuracao do Google Drive nao aplicada: ${config}`);
   ensureStateDir();
   const testPath = path.join(stateDir, `rclone-upload-test-${Date.now()}.txt`);
   fs.writeFileSync(testPath, `TronSoftOS rclone test ${new Date().toISOString()}\n`);
   try {
     const target = `${rcloneTarget(settings).replace(/\/+$/g, '')}/tronsoftos-upload-test.txt`;
-    const out = await run(settings.bin || '/usr/bin/rclone', rcloneArgs(['copyto', testPath, target, '--config', settings.config || defaultRcloneConfigPath()]), {
+    const out = await run(settings.bin || '/usr/bin/rclone', rcloneArgs(['copyto', testPath, target, '--config', config]), {
       timeout: 120_000,
       maxBuffer: 1024 * 1024 * 2
     });
@@ -1514,13 +1531,15 @@ async function rcloneUploadTest() {
 
 async function rcloneAbout() {
   const settings = rawRcloneSettings();
-  if (!settings.remote || !fs.existsSync(settings.config || defaultRcloneConfigPath())) return null;
-  const cacheKey = `${settings.bin || '/usr/bin/rclone'}|${settings.bind || process.env.RCLONE_BIND || '0.0.0.0'}|${settings.config || defaultRcloneConfigPath()}|${rcloneTarget(settings)}`;
+  const config = settings.config || defaultRcloneConfigPath();
+  if (!settings.remote || !fs.existsSync(config)) return null;
+  const cacheKey = `${settings.bin || '/usr/bin/rclone'}|${settings.bind || process.env.RCLONE_BIND || '0.0.0.0'}|${config}|${rcloneTarget(settings)}`;
   if (rcloneQuotaCache.key === cacheKey && Date.now() - rcloneQuotaCache.checkedAt < 5 * 60 * 1000) {
     return rcloneQuotaCache.value;
   }
   try {
-    const out = await run(settings.bin || '/usr/bin/rclone', rcloneArgs(['about', rcloneTarget(settings), '--json', '--config', settings.config || defaultRcloneConfigPath()]), {
+    ensureRcloneConfigReadable(config);
+    const out = await run(settings.bin || '/usr/bin/rclone', rcloneArgs(['about', rcloneTarget(settings), '--json', '--config', config]), {
       timeout: 60_000,
       maxBuffer: 1024 * 1024 * 2
     });

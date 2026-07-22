@@ -1562,8 +1562,7 @@ function BackupsView({ dashboard }) {
       : 'Conta Google: aguardando autenticacao';
   const remoteFiles = remoteBackupsQuery.data?.files || [];
   const [downloadJobId, setDownloadJobId] = useState(null);
-  const [form, setForm] = useState(null);
-  const values = form || {
+  const values = {
     enabled: rclone.enabled || false,
     bin: rclone.bin || '/usr/bin/rclone',
     config: rclone.config || '/opt/tronsoftos/config/rclone/rclone.conf',
@@ -1574,27 +1573,18 @@ function BackupsView({ dashboard }) {
     remoteRetentionDays: rclone.remoteRetentionDays || 30,
     configContent: ''
   };
-  const saveMutation = useMutation({
-    mutationFn: payload => fetch('/api/backups/rclone', {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
-    }).then(async response => {
-      if (!response.ok) throw new Error((await response.json()).error || `HTTP ${response.status}`);
-      return response.json();
-    }),
-    onSuccess: data => {
-      setForm({ ...data, configContent: '' });
+  const uploadTestMutation = useMutation({
+    mutationFn: async () => {
+      if (!driveConfigured) {
+        await postApi('/api/backups/google/central/apply', values);
+      }
+      return postApi('/api/backups/rclone/upload-test');
+    },
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
       queryClient.invalidateQueries({ queryKey: ['rclone-settings'] });
-      queryClient.invalidateQueries({ queryKey: ['events'] });
-    }
-  });
-  const testMutation = useMutation({ mutationFn: () => postApi('/api/backups/rclone/test') });
-  const uploadTestMutation = useMutation({
-    mutationFn: () => postApi('/api/backups/rclone/upload-test'),
-    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['rclone-remote-backups'] });
+      queryClient.invalidateQueries({ queryKey: ['central-google-oauth'] });
       queryClient.invalidateQueries({ queryKey: ['events'] });
     }
   });
@@ -1603,17 +1593,6 @@ function BackupsView({ dashboard }) {
     onSuccess: data => {
       queryClient.invalidateQueries({ queryKey: ['events'] });
       if (data.authUrl) window.open(data.authUrl, '_blank', 'noopener,noreferrer');
-    }
-  });
-  const centralGoogleApplyMutation = useMutation({
-    mutationFn: () => postApi('/api/backups/google/central/apply', values),
-    onSuccess: data => {
-      setForm({ ...data, configContent: '' });
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
-      queryClient.invalidateQueries({ queryKey: ['rclone-settings'] });
-      queryClient.invalidateQueries({ queryKey: ['rclone-remote-backups'] });
-      queryClient.invalidateQueries({ queryKey: ['central-google-oauth'] });
-      queryClient.invalidateQueries({ queryKey: ['events'] });
     }
   });
   const downloadMutation = useMutation({
@@ -1629,7 +1608,6 @@ function BackupsView({ dashboard }) {
     enabled: !!downloadJobId,
     refetchInterval: query => query.state.data?.status === 'running' ? 1200 : false
   });
-  const setValue = (key, value) => setForm(previous => ({ ...(previous || values), [key]: value }));
 
   return (
     <div className="grid gap-5 xl:grid-cols-[1fr_1fr]">
@@ -1637,7 +1615,7 @@ function BackupsView({ dashboard }) {
         <div className="mb-4 grid gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-700 lg:grid-cols-[minmax(0,1fr)_auto]">
           <div>
             <div className="font-medium text-slate-900">{remoteBackupsQuery.data?.target || (driveConfigured ? `${values.remote}:${values.path}` : 'Google Drive ainda nao aplicado')}</div>
-            <div className="text-xs text-slate-500">Use a Central para autorizar o Google Drive, aplique a configuracao e confirme com upload de teste.</div>
+            <div className="text-xs text-slate-500">Use a Central para autorizar o Google Drive e confirme com upload de teste.</div>
             <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
               <StatusPill value={centralGoogleQuery.isError ? 'Central indisponivel' : centralGoogle.connected ? 'Google conectado' : 'Google pendente'} />
               <span className={googleAccountEmail ? 'font-medium text-slate-700' : 'text-amber-700'}>{googleAccountLabel}</span>
@@ -1658,48 +1636,14 @@ function BackupsView({ dashboard }) {
               <Cloud className="h-4 w-4" />
               Autenticar Google
             </button>
-            <button
-              type="button"
-              disabled={centralGoogleApplyMutation.isPending}
-              onClick={() => centralGoogleApplyMutation.mutate()}
-              className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"
-            >
-              <Save className="h-4 w-4" />
-              Aplicar Drive
-            </button>
-            <button type="button" disabled={testMutation.isPending || !driveConfigured} onClick={() => testMutation.mutate()} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
-              <RefreshCw className="h-4 w-4" />
-              Testar conexao
-            </button>
-            <button type="button" disabled={uploadTestMutation.isPending || !driveConfigured} onClick={() => uploadTestMutation.mutate()} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
+            <button type="button" disabled={uploadTestMutation.isPending || (!driveConfigured && !centralGoogle.connected)} onClick={() => uploadTestMutation.mutate()} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
               <UploadCloud className="h-4 w-4" />
               Upload teste
             </button>
-            <button
-              type="button"
-              disabled={remoteBackupsQuery.isFetching || !driveConfigured}
-              onClick={() => queryClient.invalidateQueries({ queryKey: ['rclone-remote-backups'] })}
-              className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"
-            >
-              <RefreshCw className="h-4 w-4" />
-              Atualizar
-            </button>
           </div>
         </div>
-        {centralGoogleStartMutation.data?.authUrl ? (
-          <a className="mb-3 inline-flex rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm font-medium text-sky-700 hover:bg-sky-100" href={centralGoogleStartMutation.data.authUrl} target="_blank" rel="noreferrer">
-            Abrir autorizacao novamente
-          </a>
-        ) : null}
-        {centralGoogleApplyMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">{centralGoogleApplyMutation.data.message}</div> : null}
-        {testMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Conexao com {testMutation.data.remote || rclone.remote} OK. Destino configurado: {testMutation.data.target}</div> : null}
         {uploadTestMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Upload OK: {uploadTestMutation.data.target}</div> : null}
-        {centralGoogleQuery.isError || centralGoogleStartMutation.isError || centralGoogleApplyMutation.isError || testMutation.isError || uploadTestMutation.isError ? <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{centralGoogleQuery.error?.message || centralGoogleStartMutation.error?.message || centralGoogleApplyMutation.error?.message || testMutation.error?.message || uploadTestMutation.error?.message}</div> : null}
-        <div className="mb-4 grid gap-3 rounded-md border border-slate-200 bg-white px-3 py-3 md:grid-cols-3">
-          <Field label="Binario rclone" value={values.bin} onChange={value => setValue('bin', value)} />
-          <Field label="IPv4 bind" value={values.bind} onChange={value => setValue('bind', value)} placeholder="0.0.0.0" />
-          <Field label="Retencao Google Drive (dias)" type="number" value={values.remoteRetentionDays} onChange={value => setValue('remoteRetentionDays', value)} placeholder="30" />
-        </div>
+        {centralGoogleQuery.isError || centralGoogleStartMutation.isError || uploadTestMutation.isError ? <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{centralGoogleQuery.error?.message || centralGoogleStartMutation.error?.message || uploadTestMutation.error?.message}</div> : null}
         <div className="overflow-hidden rounded-md border border-slate-200">
           {remoteFiles.length ? remoteFiles.slice(0, 30).map(file => (
             <div key={file.path} className="grid grid-cols-[1fr_100px_170px_110px] items-center gap-3 border-b border-slate-100 px-3 py-2 text-sm last:border-0">
