@@ -1088,21 +1088,54 @@ function normalizeRcloneSettings(body) {
   return next;
 }
 
+function canRepairRcloneConfigPath(configPath) {
+  const resolvedConfig = path.resolve(configPath || defaultRcloneConfigPath());
+  const resolvedRcloneDir = path.resolve(appRoot, 'config/rclone');
+  return resolvedConfig === path.join(resolvedRcloneDir, 'rclone.conf')
+    || resolvedConfig.startsWith(`${resolvedRcloneDir}${path.sep}`);
+}
+
+function repairRcloneConfigPermissions(configPath) {
+  if (!canRepairRcloneConfigPath(configPath)) return false;
+  try {
+    execFileSync('sudo', ['-n', '/usr/local/sbin/tronsoftos-network', 'fix-rclone-permissions', appRoot], {
+      timeout: 15_000,
+      stdio: 'ignore'
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function writeRcloneConfigContent(settings, configContent) {
+  const configDir = path.dirname(settings.config);
+  const write = () => {
+    fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(settings.config, configContent.trimEnd() + '\n', { mode: 0o600 });
+    fs.chmodSync(configDir, 0o700);
+    fs.chmodSync(settings.config, 0o600);
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      const owner = serviceUserIds();
+      fs.chownSync(configDir, owner.uid, owner.gid);
+      fs.chownSync(settings.config, owner.uid, owner.gid);
+    }
+  };
+
+  try {
+    write();
+  } catch (err) {
+    if (!['EACCES', 'EPERM'].includes(err.code) || !repairRcloneConfigPermissions(settings.config)) throw err;
+    write();
+  }
+}
+
 function writeRcloneSettings(body) {
   ensureStateDir();
   const settings = normalizeRcloneSettings(body);
   if (typeof body.configContent === 'string' && body.configContent.trim()) {
-    const configDir = path.dirname(settings.config);
     try {
-      fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(settings.config, body.configContent.trimEnd() + '\n', { mode: 0o600 });
-      fs.chmodSync(configDir, 0o700);
-      fs.chmodSync(settings.config, 0o600);
-      if (typeof process.getuid === 'function' && process.getuid() === 0) {
-        const owner = serviceUserIds();
-        fs.chownSync(configDir, owner.uid, owner.gid);
-        fs.chownSync(settings.config, owner.uid, owner.gid);
-      }
+      writeRcloneConfigContent(settings, body.configContent);
     } catch (err) {
       const error = new Error(`Nao foi possivel salvar o rclone.conf em ${settings.config}: ${err.message}. Verifique se a pasta pertence ao usuario tronsoftos.`);
       error.statusCode = 500;

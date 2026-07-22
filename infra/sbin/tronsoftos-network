@@ -421,6 +421,20 @@ host_power() {
   printf '{"ok":true,"action":"%s","scheduled":true,"delaySeconds":2}\n' "$(json_escape "$action")"
 }
 
+fix_rclone_permissions() {
+  local app_dir="${1:-/opt/tronsoftos}"
+  valid_app_dir "$app_dir" || fail "Diretorio da aplicacao invalido"
+
+  install -d -o tronsoftos -g tronsoftos -m 0750 "$app_dir/config"
+  install -d -o tronsoftos -g tronsoftos -m 0700 "$app_dir/config/rclone"
+  if [ -f "$app_dir/config/rclone/rclone.conf" ]; then
+    chown tronsoftos:tronsoftos "$app_dir/config/rclone/rclone.conf"
+    chmod 0600 "$app_dir/config/rclone/rclone.conf"
+  fi
+
+  printf '{"ok":true,"path":"%s"}\n' "$(json_escape "$app_dir/config/rclone")"
+}
+
 firebird_script() {
   local script_path="${1:-}"
   [[ "$script_path" =~ ^/tmp/tronsoftos-firebird-[A-Za-z0-9._-]+\.sh$ ]] || fail "Script Firebird invalido"
@@ -459,6 +473,10 @@ case "$action" in
   host-power)
     shift
     host_power "$@"
+    ;;
+  fix-rclone-permissions)
+    shift
+    fix_rclone_permissions "$@"
     ;;
   firebird-script)
     shift
