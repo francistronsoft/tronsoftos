@@ -2110,12 +2110,29 @@ async function containerStatus(names = []) {
     return names.map(name => ({ name, status: 'unknown', detail: 'docker unavailable' }));
   }
   try {
-    const { stdout } = await run('docker', ['ps', '-a', '--format', '{{json .}}'], { timeout: 20_000, maxBuffer: 1024 * 1024 * 5 });
-    const rows = stdout.split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
+    const [psOut, inspectOut] = await Promise.all([
+      run('docker', ['ps', '-a', '--format', '{{json .}}'], { timeout: 20_000, maxBuffer: 1024 * 1024 * 5 }),
+      run('docker', ['inspect', ...names], { timeout: 20_000, maxBuffer: 1024 * 1024 * 10 }).catch(() => ({ stdout: '[]' }))
+    ]);
+    const rows = psOut.stdout.split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
+    const inspected = JSON.parse(inspectOut.stdout || '[]');
+    const inspectedByName = new Map(inspected.flatMap(item => (item.Name ? [[String(item.Name).replace(/^\/+/, ''), item]] : [])));
     return names.map(name => {
       const row = rows.find(item => item.Names === name);
+      const inspect = inspectedByName.get(name);
+      const labels = inspect?.Config?.Labels || {};
+      const image = inspect?.Config?.Image || row?.Image || '';
+      const imageTag = image.includes(':') ? image.split(':').at(-1) : '';
+      const imageId = String(inspect?.Image || row?.ID || '').replace(/^sha256:/, '').slice(0, 12);
+      const version = labels['org.opencontainers.image.version']
+        || labels['org.opencontainers.image.ref.name']
+        || labels.version
+        || labels.VERSION
+        || imageTag
+        || '';
+      const revision = labels['org.opencontainers.image.revision'] || labels.revision || '';
       return row
-        ? { name, status: row.State || 'unknown', detail: row.Status || '' }
+        ? { name, status: row.State || 'unknown', detail: row.Status || '', image, imageTag, imageId, version, revision: revision ? String(revision).slice(0, 12) : '' }
         : { name, status: 'missing', detail: 'container not found' };
     });
   } catch (err) {

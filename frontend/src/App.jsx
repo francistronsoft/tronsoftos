@@ -52,6 +52,7 @@ import 'reactflow/dist/style.css';
 const navItems = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { id: 'apps', label: 'Containers', icon: Boxes },
+  { id: 'tronfire', label: 'Banco de Dados', icon: Database },
   { id: 'cluster', label: 'Cluster HA', icon: GitBranch },
   { id: 'backups', label: 'Google Drive', icon: UploadCloud },
   { id: 'drive', label: 'Compartilhamento', icon: HardDrive },
@@ -546,6 +547,14 @@ function DashboardView({ dashboard }) {
 function AppsView({ dashboard, onAction, actionPending, actionJob }) {
   const [troncomandaBranch, setTroncomandaBranch] = useState('main');
   const visibleApps = (dashboard.apps || []).filter(app => app.name !== 'tronfire');
+  const containerVersionLabel = container => {
+    const parts = [
+      container.version ? `versao ${container.version}` : null,
+      container.revision ? `rev ${container.revision}` : null,
+      !container.revision && container.imageId ? `img ${container.imageId}` : null
+    ].filter(Boolean);
+    return parts.join(' - ');
+  };
   return (
     <div className="space-y-4">
       {actionJob ? <ActionTerminal job={actionJob} /> : null}
@@ -583,6 +592,8 @@ function AppsView({ dashboard, onAction, actionPending, actionJob }) {
                   <div>
                     <div className="text-sm font-medium text-slate-900">{container.name}</div>
                     <div className="text-xs text-slate-500">{container.detail}</div>
+                    {containerVersionLabel(container) ? <div className="text-xs font-medium text-slate-700">{containerVersionLabel(container)}</div> : null}
+                    {container.image ? <div className="max-w-xl truncate text-[11px] text-slate-400">{container.image}</div> : null}
                   </div>
                   <StatusPill value={container.status} />
                 </div>
@@ -2599,6 +2610,13 @@ function TroncomandaSettings() {
   const setValue = (key, value) => setForm(previous => ({ ...(previous || values), [key]: value }));
   const busy = settingsQuery.isFetching || mutation.isPending;
   const containerStatus = name => settings.containers?.find(item => item.name === name)?.status || '-';
+  const containerVersion = name => {
+    const container = settings.containers?.find(item => item.name === name);
+    if (!container) return '-';
+    return [container.version, container.revision ? `rev ${container.revision}` : null, !container.revision && container.imageId ? `img ${container.imageId}` : null]
+      .filter(Boolean)
+      .join(' - ') || '-';
+  };
 
   return (
     <Card title="Ajustes dos containers" icon={Utensils} action={<StatusPill value={settingsQuery.isError ? 'warning' : 'config'} />}>
@@ -2660,12 +2678,24 @@ function TroncomandaSettings() {
             ['Gerente API', containerStatus('tsgerente-api')],
             ['Gerente Web', containerStatus('tsgerente-web')],
             ['QR', containerStatus('troncomanda_qr')]
-          ].map(([label, value]) => (
+          ].map(([label, value]) => {
+            const containerName = {
+              'Cardapio Lite': 'troncomanda_cardapio_lite',
+              'Retaguarda API': 'tsretaguarda-api',
+              'Retaguarda Web': 'tsretaguarda-web',
+              'Gerente API': 'tsgerente-api',
+              'Gerente Web': 'tsgerente-web',
+              QR: 'troncomanda_qr'
+            }[label];
+            return (
             <div key={label} className="flex items-center justify-between gap-4 border-b border-slate-100 pb-2">
               <span className="text-slate-500">{label}</span>
-              <span className="font-medium text-slate-950">{value}</span>
+              <span className="text-right">
+                <span className="block font-medium text-slate-950">{value}</span>
+                <span className="block text-xs text-slate-500">{containerVersion(containerName)}</span>
+              </span>
             </div>
-          ))}
+          );})}
           {settingsQuery.isError ? (
             <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
               {settingsQuery.error.message}
@@ -2851,6 +2881,7 @@ function AuthenticatedApp({ user, onLogout }) {
   const View = {
     dashboard: <DashboardView dashboard={dashboard} />,
     apps: <AppsView dashboard={dashboard} actionPending={appActionPending} actionJob={actionJobQuery.data} onAction={(app, action, payload = {}) => actionMutation.mutate({ app, action, ...payload })} />,
+    tronfire: <TronFireView section="dashboard" />,
     cluster: <ClusterView dashboard={dashboard} />,
     backups: <BackupsView dashboard={dashboard} />,
     drive: <DriveView />,
