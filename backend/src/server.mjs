@@ -4735,6 +4735,32 @@ function centralStatusFromDashboard(payload) {
   return 'online';
 }
 
+function centralSystemMetricsPayload(payload = {}) {
+  const metrics = payload.systemMetrics && typeof payload.systemMetrics === 'object' ? payload.systemMetrics : {};
+  const latestRows = Array.isArray(metrics.latest) ? metrics.latest : (metrics.latest ? [metrics.latest] : []);
+  const latestHost = latestRows.find(row => row && row.scope === 'HOST' && row.target) || latestRows[0] || null;
+  const latest = latestHost && typeof latestHost === 'object'
+    ? {
+        ...latestHost,
+        collectedAt: latestHost.collectedAt || latestHost.createdAt || metrics.collectedAt || new Date().toISOString()
+      }
+    : null;
+  const series = Array.isArray(metrics.series)
+    ? metrics.series
+        .filter(row => row && (!row.scope || row.scope === 'HOST'))
+        .map(row => ({
+          ...row,
+          collectedAt: row.collectedAt || row.createdAt || metrics.collectedAt || new Date().toISOString()
+        }))
+        .slice(-288)
+    : [];
+  return {
+    ...metrics,
+    ...(latest ? { latest } : {}),
+    ...(series.length ? { series } : {})
+  };
+}
+
 async function centralHeartbeat(token, payload) {
   return centralRequest('/api/tronsoftos/heartbeat', {
     method: 'POST',
@@ -4756,7 +4782,7 @@ async function centralHeartbeat(token, payload) {
       },
       backups: payload.backups || {},
       metrics: {
-        systemMetrics: payload.systemMetrics || {},
+        systemMetrics: centralSystemMetricsPayload(payload),
         hostUptimeSeconds: payload.hostUptimeSeconds ?? null
       },
       alerts: (payload.alerts || []).map(alert => {
