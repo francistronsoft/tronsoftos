@@ -51,8 +51,7 @@ import 'reactflow/dist/style.css';
 
 const navItems = [
   { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { id: 'apps', label: 'Apps', icon: Boxes },
-  { id: 'tronfire', label: 'TronFire', icon: Database },
+  { id: 'apps', label: 'Containers', icon: Boxes },
   { id: 'cluster', label: 'Cluster HA', icon: GitBranch },
   { id: 'backups', label: 'Google Drive', icon: UploadCloud },
   { id: 'drive', label: 'Compartilhamento', icon: HardDrive },
@@ -545,15 +544,31 @@ function DashboardView({ dashboard }) {
 }
 
 function AppsView({ dashboard, onAction, actionPending, actionJob }) {
+  const [troncomandaBranch, setTroncomandaBranch] = useState('main');
+  const visibleApps = (dashboard.apps || []).filter(app => app.name !== 'tronfire');
   return (
     <div className="space-y-4">
       {actionJob ? <ActionTerminal job={actionJob} /> : null}
       <div className="grid gap-4 xl:grid-cols-2">
-        {dashboard.apps.map(app => (
-          <Card key={app.name} title={app.name} icon={Boxes} action={<StatusPill value={app.status} />}>
+        {visibleApps.map(app => (
+          <Card key={app.name} title={app.name === 'troncomanda' ? 'Containers' : app.name} icon={Boxes} action={<StatusPill value={app.status} />}>
+            {app.name === 'troncomanda' ? (
+              <label className="mb-4 block text-sm">
+                <span className="text-xs font-medium uppercase text-slate-500">Branch TronComanda</span>
+                <select
+                  value={troncomandaBranch}
+                  onChange={event => setTroncomandaBranch(event.target.value)}
+                  disabled={actionPending}
+                  className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100 disabled:bg-slate-50 disabled:text-slate-500"
+                >
+                  <option value="main">main - estavel</option>
+                  <option value="dev">dev - testes</option>
+                </select>
+              </label>
+            ) : null}
             <div className="mb-4 grid gap-3 sm:grid-cols-5">
-              <button disabled={actionPending} onClick={() => onAction(app.name, 'up')} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"><Play className="h-4 w-4" />Instalar</button>
-              <button disabled={actionPending} onClick={() => onAction(app.name, 'pull')} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"><RefreshCw className="h-4 w-4" />Atualizar</button>
+              <button disabled={actionPending} onClick={() => onAction(app.name, 'up', app.name === 'troncomanda' ? { branch: troncomandaBranch } : {})} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"><Play className="h-4 w-4" />Instalar</button>
+              <button disabled={actionPending} onClick={() => onAction(app.name, 'pull', app.name === 'troncomanda' ? { branch: troncomandaBranch } : {})} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"><RefreshCw className="h-4 w-4" />Atualizar</button>
               <button disabled={actionPending} onClick={() => onAction(app.name, 'restart')} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"><RefreshCw className="h-4 w-4" />Reiniciar</button>
               <button disabled={actionPending} onClick={() => onAction(app.name, 'stop')} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"><Square className="h-4 w-4" />Parar</button>
               {app.publicUrl ? (
@@ -576,6 +591,7 @@ function AppsView({ dashboard, onAction, actionPending, actionJob }) {
           </Card>
         ))}
       </div>
+      <TroncomandaSettings />
     </div>
   );
 }
@@ -2585,7 +2601,7 @@ function TroncomandaSettings() {
   const containerStatus = name => settings.containers?.find(item => item.name === name)?.status || '-';
 
   return (
-    <Card title="TronComanda" icon={Utensils} action={<StatusPill value={settingsQuery.isError ? 'warning' : 'config'} />}>
+    <Card title="Ajustes dos containers" icon={Utensils} action={<StatusPill value={settingsQuery.isError ? 'warning' : 'config'} />}>
       <div className="grid gap-5 xl:grid-cols-[1fr_0.9fr]">
         <form
           className="space-y-3"
@@ -2665,9 +2681,7 @@ function SettingsView({ dashboard }) {
   return (
     <div className="space-y-5">
       <CentralSettings />
-      <TroncomandaSettings />
       <NetworkSettings />
-      <SmtpSettings />
     </div>
   );
 }
@@ -2778,7 +2792,7 @@ function AuthenticatedApp({ user, onLogout }) {
     retry: 1
   });
   const actionMutation = useMutation({
-    mutationFn: ({ app, action }) => postApi(`/api/apps/${app}/${action}`),
+    mutationFn: ({ app, action, ...payload }) => postApi(`/api/apps/${app}/${action}`, payload),
     onSuccess: (data) => {
       setActionJobId(data.job?.id || null);
       queryClient.invalidateQueries({ queryKey: ['dashboard'] });
@@ -2836,8 +2850,7 @@ function AuthenticatedApp({ user, onLogout }) {
 
   const View = {
     dashboard: <DashboardView dashboard={dashboard} />,
-    apps: <AppsView dashboard={dashboard} actionPending={appActionPending} actionJob={actionJobQuery.data} onAction={(app, action) => actionMutation.mutate({ app, action })} />,
-    tronfire: <TronFireView section="dashboard" />,
+    apps: <AppsView dashboard={dashboard} actionPending={appActionPending} actionJob={actionJobQuery.data} onAction={(app, action, payload = {}) => actionMutation.mutate({ app, action, ...payload })} />,
     cluster: <ClusterView dashboard={dashboard} />,
     backups: <BackupsView dashboard={dashboard} />,
     drive: <DriveView />,

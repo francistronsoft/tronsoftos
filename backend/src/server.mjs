@@ -3337,21 +3337,37 @@ async function appAction(app, action) {
   return out;
 }
 
-function appActionSteps(app, action) {
+function troncomandaImageTagEnv(branch = 'main') {
+  const tag = branch === 'dev' ? ':dev' : ':main';
+  return {
+    API_IMAGE_TAG: tag,
+    QR_IMAGE_TAG: tag,
+    CARDAPIO_IMAGE_TAG: tag,
+    RETAGUARDA_API_IMAGE_TAG: tag,
+    RETAGUARDA_WEB_IMAGE_TAG: tag,
+    TSGERENTE_API_IMAGE_TAG: tag,
+    TSGERENTE_WEB_IMAGE_TAG: tag
+  };
+}
+
+function appActionSteps(app, action, options = {}) {
   if (!['up', 'stop', 'restart', 'pull'].includes(action)) throw new Error('invalid action');
   if (app.type !== 'compose') throw new Error('only compose apps are supported');
+  const branch = String(options.branch || 'main').trim();
+  if (app.name === 'troncomanda' && !['main', 'dev'].includes(branch)) throw new Error(`branch TronComanda invalida: ${branch}`);
+  const env = app.name === 'troncomanda' && ['up', 'pull'].includes(action) ? troncomandaImageTagEnv(branch) : null;
   const composeFiles = app.composeFiles || (app.composeFile ? [app.composeFile] : []);
   if (!composeFiles.length) throw new Error('compose file not configured');
   const baseArgs = ['compose', '-p', app.projectName || app.name];
   for (const composeFile of composeFiles) {
     baseArgs.push('-f', path.resolve(appRoot, composeFile));
   }
-  if (action === 'up') return [{ command: 'docker', args: [...baseArgs, 'up', '-d'] }];
+  if (action === 'up') return [{ command: 'docker', args: [...baseArgs, 'up', '-d'], env }];
   if (action === 'restart') return [{ command: 'docker', args: [...baseArgs, 'restart'] }];
   if (action === 'pull') {
     return [
-      { command: 'docker', args: [...baseArgs, 'pull'] },
-      { command: 'docker', args: [...baseArgs, 'up', '-d'] }
+      { command: 'docker', args: [...baseArgs, 'pull'], env },
+      { command: 'docker', args: [...baseArgs, 'up', '-d'], env }
     ];
   }
   return [{ command: 'docker', args: [...baseArgs, action] }];
@@ -3636,7 +3652,7 @@ function appendActionLog(job, stream, chunk) {
 function runActionStep(job, step) {
   return new Promise((resolve, reject) => {
     appendActionLog(job, 'stdout', `$ ${step.command} ${step.args.join(' ')}\n`);
-    const child = spawn(step.command, step.args, { cwd: appRoot, env: dockerEnv(), windowsHide: true });
+    const child = spawn(step.command, step.args, { cwd: appRoot, env: { ...dockerEnv(), ...(step.env || {}) }, windowsHide: true });
     child.stdout.on('data', chunk => appendActionLog(job, 'stdout', chunk));
     child.stderr.on('data', chunk => appendActionLog(job, 'stderr', chunk));
     child.on('error', reject);
@@ -3647,13 +3663,14 @@ function runActionStep(job, step) {
   });
 }
 
-function startAppAction(app, action) {
-  const steps = appActionSteps(app, action);
+function startAppAction(app, action, options = {}) {
+  const steps = appActionSteps(app, action, options);
   const id = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
+  const branch = app.name === 'troncomanda' && ['up', 'pull'].includes(action) ? String(options.branch || 'main').trim() : null;
   const job = {
     id,
     app: app.name,
-    action,
+    action: branch ? `${action}-${branch}` : action,
     command: steps.map(step => step.command).join(' && '),
     args: steps.flatMap(step => step.args),
     status: 'running',
@@ -5107,10 +5124,10 @@ async function handleApi(req, reply, url) {
   if (req.method === 'POST' && hostFirebirdMatch) return json(reply, 200, await hostFirebirdAction(hostFirebirdMatch[1]));
   const actionMatch = url.pathname.match(/^\/api\/apps\/([^/]+)\/(up|stop|restart|pull)$/);
   if (req.method === 'POST' && actionMatch) {
-    await readBody(req).catch(() => ({}));
+    const body = await readBody(req).catch(() => ({}));
     const app = findApp(actionMatch[1]);
     if (!app) return json(reply, 404, { error: 'app not found' });
-    return json(reply, 202, { ok: true, job: startAppAction(app, actionMatch[2]) });
+    return json(reply, 202, { ok: true, job: startAppAction(app, actionMatch[2], body) });
   }
   return json(reply, 404, { error: 'not found' });
 }
