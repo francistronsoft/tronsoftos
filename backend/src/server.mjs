@@ -4623,17 +4623,18 @@ async function centralGoogleApply(body = {}) {
     uploadOnlyRole: body.uploadOnlyRole || current.uploadOnlyRole || 'primary',
     bind: body.bind || current.bind || '0.0.0.0',
     remoteRetentionDays: body.remoteRetentionDays || current.remoteRetentionDays || 30,
-    accountEmail: payload.account?.accountEmail || current.accountEmail || '',
+    accountEmail: payload.account?.accountEmail || payload.accountEmail || current.accountEmail || '',
     configContent: rclone.configContent
   });
   appendEvent('CENTRAL_GOOGLE_OAUTH_APPLIED', {
-    accountEmail: payload.account?.accountEmail || '',
+    accountEmail: payload.account?.accountEmail || payload.accountEmail || '',
     remote: result.remote,
     path: result.path
   });
   return {
     ...result,
     account: payload.account || null,
+    accountEmail: payload.account?.accountEmail || payload.accountEmail || result.accountEmail || '',
     message: 'Google Drive autenticado pela Central e configuracao aplicada.'
   };
 }

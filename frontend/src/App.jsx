@@ -54,8 +54,8 @@ const navItems = [
   { id: 'apps', label: 'Apps', icon: Boxes },
   { id: 'tronfire', label: 'TronFire', icon: Database },
   { id: 'cluster', label: 'Cluster HA', icon: GitBranch },
-  { id: 'backups', label: 'Backups', icon: UploadCloud },
-  { id: 'drive', label: 'Drive', icon: HardDrive },
+  { id: 'backups', label: 'Google Drive', icon: UploadCloud },
+  { id: 'drive', label: 'Compartilhamento', icon: HardDrive },
   { id: 'cloudflare', label: 'Cloudflare', icon: Cloud },
   { id: 'updates', label: 'Atualizacoes', icon: RefreshCw },
   { id: 'maintenance', label: 'Manutencao', icon: Power }
@@ -1554,6 +1554,12 @@ function BackupsView({ dashboard }) {
     : quota
       ? `Quota Google Drive: ${formatBytes(quota.free)} livres de ${formatBytes(quota.total)} (${quota.percentUsed}% usado)`
       : 'Quota Google Drive: aguardando configuracao';
+  const googleAccountEmail = rclone.accountEmail || centralGoogle.account?.accountEmail || centralGoogle.accountEmail || '';
+  const googleAccountLabel = googleAccountEmail
+    ? `Conta Google: ${googleAccountEmail}`
+    : centralGoogle.connected || driveConfigured
+      ? 'Conta Google: e-mail nao informado. Autentique novamente apos atualizar a Central.'
+      : 'Conta Google: aguardando autenticacao';
   const remoteFiles = remoteBackupsQuery.data?.files || [];
   const [downloadJobId, setDownloadJobId] = useState(null);
   const [form, setForm] = useState(null);
@@ -1634,7 +1640,7 @@ function BackupsView({ dashboard }) {
             <div className="text-xs text-slate-500">Use a Central para autorizar o Google Drive, aplique a configuracao e confirme com upload de teste.</div>
             <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
               <StatusPill value={centralGoogleQuery.isError ? 'Central indisponivel' : centralGoogle.connected ? 'Google conectado' : 'Google pendente'} />
-              <span className="text-slate-500">{rclone.accountEmail || centralGoogle.account?.accountEmail || (centralGoogle.connected ? 'Conta Google autorizada' : 'Aguardando autenticacao')}</span>
+              <span className={googleAccountEmail ? 'font-medium text-slate-700' : 'text-amber-700'}>{googleAccountLabel}</span>
               <span className={quota?.ok === false ? 'text-amber-700' : 'text-slate-500'}>{quotaLabel}</span>
               {quota?.activationUrl ? <a className="font-medium text-sky-700 hover:text-sky-900" href={quota.activationUrl} target="_blank" rel="noreferrer">Habilitar Google Drive API</a> : null}
             </div>
@@ -1764,12 +1770,12 @@ function DriveView() {
   return (
     <div className="space-y-5">
       <div className="grid gap-4 md:grid-cols-3">
-        <Stat label="Drive" value={settings.enabled ? 'Ativo' : 'Desativado'} detail={settings.path || 'Nenhuma pasta configurada'} icon={HardDrive} tone={settings.enabled ? 'green' : 'slate'} />
+        <Stat label="Compartilhamento" value={settings.enabled ? 'Ativo' : 'Desativado'} detail={settings.path || 'Nenhuma pasta configurada'} icon={HardDrive} tone={settings.enabled ? 'green' : 'slate'} />
         <Stat label="Discos encontrados" value={mounts.length} detail="pontos de montagem disponiveis" icon={Server} tone="sky" />
         <Stat label="Livre selecionado" value={selectedMount ? formatBytes(selectedMount.free) : '-'} detail={selectedMount ? `${formatBytes(selectedMount.total)} total` : 'selecione um disco'} icon={Gauge} tone={selectedMount?.free > 20 * 1024 * 1024 * 1024 ? 'green' : 'amber'} />
       </div>
 
-      <Card title="Configurar Drive" icon={HardDrive} action={<StatusPill value={settings.enabled ? 'online' : 'config'} />}>
+      <Card title="Configurar compartilhamento" icon={HardDrive} action={<StatusPill value={settings.enabled ? 'online' : 'config'} />}>
         <div className="grid gap-5 xl:grid-cols-[1fr_0.9fr]">
           <div className="space-y-3">
             <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
@@ -1826,7 +1832,7 @@ function DriveView() {
             }}
           >
             <ToggleSwitch
-              label="Ativar Drive"
+              label="Ativar compartilhamento"
               description="Salva a pasta escolhida para uso como compartilhamento local."
               icon={HardDrive}
               checked={values.enabled}
@@ -1855,7 +1861,7 @@ function DriveView() {
             ) : null}
             <button disabled={saveMutation.isPending || !values.mountPath} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
               <Save className="h-4 w-4" />
-              Salvar Drive
+              Salvar compartilhamento
             </button>
             {saveMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Configuracao salva.</div> : null}
             {saveMutation.isError ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{saveMutation.error.message}</div> : null}
