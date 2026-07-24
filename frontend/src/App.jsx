@@ -387,7 +387,9 @@ function Topology({ dashboard }) {
 }
 
 function DashboardView({ dashboard }) {
-  const onlineApps = dashboard.apps.filter(app => app.status === 'online').length;
+  const troncomandaApp = (dashboard.apps || []).find(app => app.name === 'troncomanda') || {};
+  const troncomandaContainers = troncomandaApp.containers || [];
+  const onlineContainers = troncomandaContainers.filter(container => container.status === 'running').length;
   const alerts = dashboard.alerts || [];
   const isHaMode = dashboard.cluster.mode === 'ha';
   const isStandbyNode = isHaMode && ['standby', 'recovery'].includes(dashboard.cluster.nodeRole);
@@ -460,7 +462,7 @@ function DashboardView({ dashboard }) {
         <Stat label="No atual" value={dashboard.cluster.nodeName} detail={dashboard.cluster.mode} icon={Server} tone="sky" />
         <Stat label="Tempo ligado" value={formatDurationSeconds(dashboard.hostUptimeSeconds)} detail="uptime do servidor" icon={FileClock} tone="green" />
         <Stat label="Papel" value={dashboard.cluster.nodeRole} detail={dashboard.cluster.vip || 'VIP nao configurado'} icon={ShieldCheck} tone="green" />
-        <Stat label="Apps online" value={`${onlineApps}/${dashboard.apps.length}`} detail="containers gerenciados" icon={Boxes} tone="slate" />
+        <Stat label="Containers online" value={`${onlineContainers}/${troncomandaContainers.length}`} detail="TronComanda" icon={Boxes} tone="slate" />
         <Stat label="Alertas" value={alerts.length} detail={alerts[0]?.message || 'sem alertas ativos'} icon={AlertTriangle} tone={alerts.length ? 'amber' : 'green'} />
         <Stat label="Hora servidor" value={formatDateTime(dashboard.generatedAt)} detail="gerado pelo backend" icon={FileClock} tone="slate" />
       </div>

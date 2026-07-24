@@ -99,3 +99,35 @@ O backend pode rodar diretamente com:
 cd backend
 node src/server.mjs
 ```
+
+## Integração Com A Central TronSoftOS
+
+O backend possui um agente interno que valida o token gerado na Central, envia heartbeat periódico e publica alertas calculados pelo painel do TronSoftOS.
+
+Fluxo recomendado:
+
+1. Cadastre o cliente na Central.
+2. Copie o token gerado pela Central.
+3. Acesse o painel do TronSoftOS do cliente.
+4. Abra Manutencao > Ajustes > Central TronSoftOS.
+5. Informe `https://central.tronsoft.app.br` e cole o token.
+6. Clique em Validar token.
+
+Depois da validacao, o TronSoftOS grava a configuracao em:
+
+```text
+/opt/tronsoftos/state/central-settings.json
+/opt/tronsoftos/state/central-installation-token
+```
+
+Variaveis opcionais no Debian:
+
+```env
+TRONSOFTOS_CENTRAL_URL=https://central.tronsoft.app.br
+TRONSOFTOS_CENTRAL_HEARTBEAT_SECONDS=300
+TRONSOFTOS_CENTRAL_DATABASE_ENGINE=Firebird
+TRONSOFTOS_CENTRAL_DATABASE_VERSION=2.5
+TRONSOFTOS_CENTRAL_DATABASE_SCHEMA_VERSION=
+```
+
+Nas proximas execucoes, ele usa o token da instalacao para enviar `/api/tronsoftos/heartbeat` e `/api/tronsoftos/alerts`.

@@ -4585,10 +4585,19 @@ async function centralDatabasePayload() {
 }
 
 function centralHostPayload() {
+  const cpus = os.cpus() || [];
+  const cpuModel = cpus.find(cpu => cpu?.model)?.model || '';
   return {
     hostname: os.hostname(),
     os: `${os.type()} ${os.release()}`,
-    ip: primaryHostIp()
+    architecture: os.arch(),
+    ip: primaryHostIp(),
+    cpuModel,
+    cpuName: cpuModel,
+    cpuCores: cpus.length || null,
+    processorCount: cpus.length || null,
+    memoryTotalBytes: os.totalmem(),
+    ramTotalBytes: os.totalmem()
   };
 }
 
