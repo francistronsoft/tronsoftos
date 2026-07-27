@@ -1156,6 +1156,7 @@ function writeRcloneSettings(body) {
     }
   }
   fs.writeFileSync(rcloneSettingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
+  rcloneQuotaCache = { key: null, checkedAt: 0, value: null };
   appendEvent('RCLONE_SETTINGS_UPDATED', { enabled: settings.enabled, remote: settings.remote, path: settings.path, uploadOnlyRole: settings.uploadOnlyRole });
   return publicRcloneSettings(settings);
 }
@@ -1562,7 +1563,6 @@ async function rcloneAbout() {
   } catch (err) {
     const details = googleDriveErrorDetails(err);
     const value = { ok: false, target: rcloneTarget(settings), error: details.message, code: details.code, activationUrl: details.activationUrl };
-    rcloneQuotaCache = { key: cacheKey, checkedAt: Date.now(), value };
     return value;
   }
 }
