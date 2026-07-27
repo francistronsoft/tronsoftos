@@ -2153,8 +2153,7 @@ app.post('/api/backups/:databaseId/run', { preHandler: requireOperator }, async 
     const { stdout: sizeOut } = await dockerExec(['stat','-c','%s', backupPath]);
     const { stdout: shaOut } = await dockerExec(['sha256sum', backupPath]);
     const sha = shaOut.trim().split(/\s+/)[0];
-    const validation = await validateBackupRestore(db, backupPath, logPath, stamp);
-    writeBackupManifest(db, backupPath, sha, validation);
+    writeBackupManifest(db, backupPath, sha, { skipped: true, reason: 'manual_backup_without_restore_validation' });
     await prisma.managedDatabase.update({ where: { id: db.id }, data: { lastBackupAt: new Date() } });
     const done = await prisma.backupJob.update({ where: { id: job.id }, data: { status: 'SUCCESS', finishedAt: new Date(), backupSize: BigInt(sizeOut.trim()), sha256: sha } });
     await audit(req, 'BACKUP_FINISHED', { entityType: 'backup', entityId: job.id, details: { database: db.alias } });

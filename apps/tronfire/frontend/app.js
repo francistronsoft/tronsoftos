@@ -852,8 +852,8 @@ function databaseDetailsPanel(db, diagnostic, haStatus) {
           <button class="btn btn-sm btn-outline-primary" data-detail-primary="${db.id}">Marcar producao</button>
           <button class="btn btn-sm btn-outline-secondary" data-detail-validate="${db.id}" title="Executa gstat -h, atualiza a ultima checagem e reavalia o alerta de indices inativos.">Validar</button>
           <button class="btn btn-sm btn-outline-info" data-detail-online="${db.id}">gfix -online</button>
-          <button class="btn btn-sm btn-outline-success" data-detail-backup="${db.id}">Backup agora</button>
-          <button class="btn btn-sm btn-outline-danger" data-detail-maintenance="${db.id}">Manutencao automatica</button>
+          <button class="btn btn-sm btn-outline-success" data-detail-backup="${db.id}" title="Gera backup e disponibiliza para download, sem restaurar o banco.">Fazer backup</button>
+          <button class="btn btn-sm btn-outline-danger" data-detail-maintenance="${db.id}" title="Gera backup, restaura em area temporaria, valida e substitui o banco original pelo restaurado.">Manutencao automatica</button>
           <button class="btn btn-sm btn-outline-danger" data-detail-disable-indexes="${db.id}">Desativar indices</button>
         </div>
         <div id="detailConnectionSlot" class="mt-3"></div>
@@ -1067,12 +1067,20 @@ async function databases() {
         const out = await api(`/api/backups/${btn.dataset.detailBackup}/run`, { method:'POST', body: JSON.stringify({ logToken: token }) });
         stopPolling();
         await finishVerbose(logPath, verbose, `Backup concluido.\n${JSON.stringify(out, null, 2)}`);
+        const downloadUrl = out?.id ? apiUrl(`/api/backups/${out.id}/download`) : '';
+        if (downloadUrl) {
+          detailConnectionSlot.insertAdjacentHTML('afterbegin', `
+            <div class="alert alert-success mt-3 d-flex align-items-center justify-content-between gap-3 flex-wrap">
+              <div><strong>Backup gerado.</strong><br><span class="small">Arquivo: ${escapeHtml(out.backupPath || '')} - ${formatBytes(out.backupSize || 0)}</span></div>
+              <a class="btn btn-sm btn-success" href="${downloadUrl}">Download do backup</a>
+            </div>`);
+        }
         setTimeout(() => { databases(); }, 1200);
       } catch (err) {
         stopPolling();
         await finishVerbose(logPath, verbose, `Erro no backup: ${err.message}`, 'danger');
         btn.disabled = false;
-        btn.textContent = 'Backup agora';
+        btn.textContent = 'Fazer backup';
       }
     });
     databaseDetailsSlot.querySelectorAll('[data-detail-maintenance]').forEach(btn => btn.onclick = async () => {
@@ -1363,13 +1371,15 @@ async function backups() {
         </div>
       </div>
     </div></div>
-    <div class="card"><div class="table-responsive"><table class="table"><thead><tr><th>Banco</th><th>Status</th><th>Validacao</th><th>Externo</th><th>Arquivo</th><th>Tamanho</th><th>Data</th><th>Acoes</th></tr></thead><tbody>${jobs.map(j => {
+    <div class="card"><div class="table-responsive"><table class="table"><thead><tr><th>Banco</th><th>Status</th><th>Tipo</th><th>Externo</th><th>Arquivo</th><th>Tamanho</th><th>Data</th><th>Acoes</th></tr></thead><tbody>${jobs.map(j => {
     const externalText = j.driveStatus === 'UPLOADED'
       ? `Google Drive OK${j.driveWebLink ? ` - ${escapeHtml(j.driveWebLink)}` : ''}`
       : j.driveStatus === 'TRONSOFTOS'
         ? 'TronSoftOS'
         : `${escapeHtml(j.driveStatus || 'TRONSOFTOS')}${j.driveErrorMessage ? ` - ${escapeHtml(j.driveErrorMessage)}` : ''}`;
-    const validationText = j.validation?.ok
+    const validationText = j.validation?.skipped
+      ? 'Backup simples'
+      : j.validation?.ok
       ? `Restaurado OK${j.validation.validatedAt ? ` - ${new Date(j.validation.validatedAt).toLocaleString()}` : ''}`
       : j.status === 'SUCCESS' ? 'Nao validado' : '-';
     return `<tr><td>${escapeHtml(j.database?.name || '')}</td><td>${escapeHtml(j.status)}</td><td>${escapeHtml(validationText)}</td><td>${externalText}</td><td>${escapeHtml(j.backupPath || '')}</td><td>${formatBytes(j.backupSize || 0)}</td><td>${new Date(j.createdAt).toLocaleString()}</td><td>${j.status === 'SUCCESS' ? `<a class="btn btn-sm btn-outline-primary" href="${apiUrl(`/api/backups/${j.id}/download`)}">Download</a>` : escapeHtml(j.errorMessage || '')}</td></tr>`;
