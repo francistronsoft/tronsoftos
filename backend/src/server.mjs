@@ -4449,8 +4449,8 @@ function centralBaseUrl() {
 }
 
 function centralHeartbeatMs() {
-  const seconds = Number(process.env.TRONSOFTOS_CENTRAL_HEARTBEAT_SECONDS || 300);
-  return Math.max(60, seconds || 300) * 1000;
+  const seconds = Number(process.env.TRONSOFTOS_CENTRAL_HEARTBEAT_SECONDS || 120);
+  return Math.max(60, seconds || 120) * 1000;
 }
 
 function centralInstallationId() {
