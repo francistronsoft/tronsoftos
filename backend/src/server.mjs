@@ -1492,6 +1492,17 @@ function rcloneArgs(args = []) {
   return bind ? ['--bind', bind, ...args] : args;
 }
 
+function rcloneBackupFilters() {
+  return [
+    '--filter', '+ *.gbk',
+    '--filter', '+ *.fbk',
+    '--filter', '+ *.gbk.gz',
+    '--filter', '+ *.fbk.gz',
+    '--filter', '+ *.manifest.json',
+    '--filter', '- *'
+  ];
+}
+
 function normalizeRemoteBackupPath(value) {
   const remotePath = String(value || '').trim().replace(/\\/g, '/').replace(/^\/+/, '');
   if (!remotePath || remotePath.includes('..') || remotePath.startsWith('-')) throw new Error('backup remoto invalido');
@@ -1543,11 +1554,7 @@ async function rcloneRemoteBackups() {
     rcloneTarget(settings),
     '--files-only',
     '--recursive',
-    '--include', '*.gbk',
-    '--include', '*.fbk',
-    '--include', '*.gbk.gz',
-    '--include', '*.fbk.gz',
-    '--include', '*.manifest.json',
+    ...rcloneBackupFilters(),
     '--config', config
   ]), {
     timeout: 120_000,
@@ -1565,6 +1572,58 @@ async function rcloneRemoteBackups() {
     }))
     .sort((a, b) => new Date(b.modifiedAt || 0) - new Date(a.modifiedAt || 0)) : [];
   return { target: rcloneTarget(settings), files };
+}
+
+async function rcloneCleanupRemoteBackups() {
+  const settings = rawRcloneSettings();
+  const config = settings.config || defaultRcloneConfigPath();
+  if (!settings.remote) throw new Error('Google Drive nao configurado para backups');
+  if (!fs.existsSync(settings.bin || '/usr/bin/rclone')) throw new Error(`binario rclone nao encontrado: ${settings.bin || '/usr/bin/rclone'}`);
+  if (!ensureRcloneConfigReadable(config)) throw new Error('Configuracao do Google Drive nao aplicada');
+  const retentionDays = Math.max(1, Math.min(365, Math.round(Number(settings.remoteRetentionDays || 30))));
+  const before = await rcloneRemoteBackups();
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  const candidates = before.files.filter(file => {
+    const modifiedAt = file.modifiedAt ? new Date(file.modifiedAt).getTime() : 0;
+    return modifiedAt > 0 && modifiedAt < cutoff;
+  });
+  if (!candidates.length) {
+    appendEvent('RCLONE_RETENTION_CLEANUP_EMPTY', { target: before.target, retentionDays });
+    return { ok: true, target: before.target, retentionDays, candidates: 0, removed: 0, freedBytes: 0 };
+  }
+  const out = await run(settings.bin || '/usr/bin/rclone', rcloneArgs([
+    'delete',
+    rcloneTarget(settings),
+    '--min-age', `${retentionDays}d`,
+    ...rcloneBackupFilters(),
+    '--drive-use-trash=false',
+    '--config', config
+  ]), {
+    timeout: 120_000,
+    maxBuffer: 1024 * 1024 * 5
+  });
+  rcloneQuotaCache = { key: null, checkedAt: 0, value: null };
+  const after = await rcloneRemoteBackups().catch(() => ({ files: [] }));
+  const remaining = new Set((after.files || []).map(file => file.path));
+  const removedFiles = candidates.filter(file => !remaining.has(file.path));
+  const freedBytes = removedFiles.reduce((sum, file) => sum + Number(file.size || 0), 0);
+  appendEvent('RCLONE_RETENTION_CLEANUP_OK', {
+    target: before.target,
+    retentionDays,
+    candidates: candidates.length,
+    removed: removedFiles.length,
+    freedBytes
+  });
+  return {
+    ok: true,
+    target: before.target,
+    retentionDays,
+    candidates: candidates.length,
+    removed: removedFiles.length,
+    freedBytes,
+    stdout: out.stdout,
+    stderr: out.stderr
+  };
 }
 
 function startRcloneRemoteBackupDownload(body = {}) {
@@ -5241,6 +5300,7 @@ async function handleApi(req, reply, url) {
   if (req.method === 'PATCH' && url.pathname === '/api/backups/rclone') return json(reply, 200, writeRcloneSettings(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/test') return json(reply, 200, await rcloneTest());
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/upload-test') return json(reply, 200, await rcloneUploadTest());
+  if (req.method === 'POST' && url.pathname === '/api/backups/rclone/cleanup') return json(reply, 200, await rcloneCleanupRemoteBackups());
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/token') return json(reply, 200, saveGoogleDriveToken(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/reset-auth') return json(reply, 200, await resetGoogleDriveAuth());
   if (req.method === 'GET' && url.pathname === '/api/backups/rclone/remote-files') return json(reply, 200, await rcloneRemoteBackups());

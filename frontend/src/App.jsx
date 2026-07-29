@@ -31,6 +31,7 @@ import {
   Table2,
   Terminal,
   Thermometer,
+  Trash2,
   Utensils,
   UploadCloud,
   XCircle
@@ -1636,6 +1637,14 @@ function BackupsView({ dashboard }) {
       queryClient.invalidateQueries({ queryKey: ['events'] });
     }
   });
+  const cleanupMutation = useMutation({
+    mutationFn: () => postApi('/api/backups/rclone/cleanup'),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['rclone-remote-backups'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    }
+  });
   const downloadMutation = useMutation({
     mutationFn: remotePath => postApi('/api/backups/rclone/download', { path: remotePath }),
     onSuccess: data => {
@@ -1692,9 +1701,21 @@ function BackupsView({ dashboard }) {
               <UploadCloud className="h-4 w-4" />
               Upload teste
             </button>
+            <button
+              type="button"
+              disabled={cleanupMutation.isPending || !driveConfigured}
+              onClick={() => {
+                if (window.confirm(`Remover do Google Drive os backups com mais de ${values.remoteRetentionDays || 30} dia(s)?`)) cleanupMutation.mutate();
+              }}
+              className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"
+            >
+              <Trash2 className="h-4 w-4" />
+              Liberar espaco
+            </button>
           </div>
         </div>
         {uploadTestMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Upload OK: {uploadTestMutation.data.target}</div> : null}
+        {cleanupMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Limpeza concluida: {cleanupMutation.data.removed} arquivo(s) removido(s), {formatBytes(cleanupMutation.data.freedBytes)} liberados.</div> : null}
         {needsGoogleReconnect ? (
           <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
             <div className="font-medium">Autorizacao Google expirada ou revogada.</div>
@@ -1702,7 +1723,7 @@ function BackupsView({ dashboard }) {
           </div>
         ) : null}
         {resetAuthMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">{resetAuthMutation.data.message}</div> : null}
-        {centralGoogleQuery.isError || centralGoogleStartMutation.isError || uploadTestMutation.isError || resetAuthMutation.isError ? <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{centralGoogleQuery.error?.message || centralGoogleStartMutation.error?.message || uploadTestMutation.error?.message || resetAuthMutation.error?.message}</div> : null}
+        {centralGoogleQuery.isError || centralGoogleStartMutation.isError || uploadTestMutation.isError || resetAuthMutation.isError || cleanupMutation.isError ? <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{centralGoogleQuery.error?.message || centralGoogleStartMutation.error?.message || uploadTestMutation.error?.message || resetAuthMutation.error?.message || cleanupMutation.error?.message}</div> : null}
         <div className="overflow-hidden rounded-md border border-slate-200">
           {remoteFiles.length ? remoteFiles.slice(0, 30).map(file => (
             <div key={file.path} className="grid grid-cols-[1fr_100px_170px_110px] items-center gap-3 border-b border-slate-100 px-3 py-2 text-sm last:border-0">
