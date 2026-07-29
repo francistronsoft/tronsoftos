@@ -1483,6 +1483,10 @@ function rcloneTarget(settings) {
   return remotePath ? `${remote}:${remotePath}` : `${remote}:`;
 }
 
+function rcloneConfiguredPath(settings) {
+  return String(settings.path || '').replace(/^\/+|\/+$/g, '');
+}
+
 function rcloneRemoteRoot(settings) {
   return `${String(settings.remote || '').replace(/:+$/g, '')}:`;
 }
@@ -1574,28 +1578,46 @@ async function rcloneRemoteBackups() {
   return { target: rcloneTarget(settings), files };
 }
 
+async function rcloneRemoteFiles(settings, config) {
+  const out = await run(settings.bin || '/usr/bin/rclone', rcloneArgs([
+    'lsjson',
+    rcloneTarget(settings),
+    '--files-only',
+    '--recursive',
+    '--config', config
+  ]), {
+    timeout: 120_000,
+    maxBuffer: 1024 * 1024 * 20
+  });
+  const rows = JSON.parse(out.stdout || '[]');
+  return Array.isArray(rows) ? rows
+    .filter(item => !item.IsDir && (item.Path || item.Name))
+    .map(item => ({
+      name: item.Name || path.basename(item.Path || ''),
+      path: item.Path || item.Name || '',
+      size: Number(item.Size || 0),
+      modifiedAt: item.ModTime || null,
+      mimeType: item.MimeType || null
+    })) : [];
+}
+
 async function rcloneCleanupRemoteBackups() {
   const settings = rawRcloneSettings();
   const config = settings.config || defaultRcloneConfigPath();
   if (!settings.remote) throw new Error('Google Drive nao configurado para backups');
   if (!fs.existsSync(settings.bin || '/usr/bin/rclone')) throw new Error(`binario rclone nao encontrado: ${settings.bin || '/usr/bin/rclone'}`);
   if (!ensureRcloneConfigReadable(config)) throw new Error('Configuracao do Google Drive nao aplicada');
-  const retentionDays = Math.max(1, Math.min(365, Math.round(Number(settings.remoteRetentionDays || 30))));
-  const before = await rcloneRemoteBackups();
-  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
-  const candidates = before.files.filter(file => {
-    const modifiedAt = file.modifiedAt ? new Date(file.modifiedAt).getTime() : 0;
-    return modifiedAt > 0 && modifiedAt < cutoff;
-  });
+  const remotePath = rcloneConfiguredPath(settings);
+  if (!remotePath) throw new Error('Caminho do Google Drive vazio. Configure uma pasta de backups antes de limpar.');
+  const target = rcloneTarget(settings);
+  const candidates = await rcloneRemoteFiles(settings, config);
   if (!candidates.length) {
-    appendEvent('RCLONE_RETENTION_CLEANUP_EMPTY', { target: before.target, retentionDays });
-    return { ok: true, target: before.target, retentionDays, candidates: 0, removed: 0, freedBytes: 0 };
+    appendEvent('RCLONE_REMOTE_CLEANUP_EMPTY', { target });
+    return { ok: true, target, candidates: 0, removed: 0, freedBytes: 0 };
   }
   const out = await run(settings.bin || '/usr/bin/rclone', rcloneArgs([
     'delete',
-    rcloneTarget(settings),
-    '--min-age', `${retentionDays}d`,
-    ...rcloneBackupFilters(),
+    target,
     '--drive-use-trash=false',
     '--config', config
   ]), {
@@ -1603,21 +1625,19 @@ async function rcloneCleanupRemoteBackups() {
     maxBuffer: 1024 * 1024 * 5
   });
   rcloneQuotaCache = { key: null, checkedAt: 0, value: null };
-  const after = await rcloneRemoteBackups().catch(() => ({ files: [] }));
-  const remaining = new Set((after.files || []).map(file => file.path));
+  const after = await rcloneRemoteFiles(settings, config).catch(() => []);
+  const remaining = new Set(after.map(file => file.path));
   const removedFiles = candidates.filter(file => !remaining.has(file.path));
   const freedBytes = removedFiles.reduce((sum, file) => sum + Number(file.size || 0), 0);
-  appendEvent('RCLONE_RETENTION_CLEANUP_OK', {
-    target: before.target,
-    retentionDays,
+  appendEvent('RCLONE_REMOTE_CLEANUP_OK', {
+    target,
     candidates: candidates.length,
     removed: removedFiles.length,
     freedBytes
   });
   return {
     ok: true,
-    target: before.target,
-    retentionDays,
+    target,
     candidates: candidates.length,
     removed: removedFiles.length,
     freedBytes,

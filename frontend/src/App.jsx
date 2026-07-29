@@ -1709,17 +1709,17 @@ function BackupsView({ dashboard }) {
               type="button"
               disabled={cleanupMutation.isPending || !driveConfigured}
               onClick={() => {
-                if (window.confirm(`Remover do Google Drive os backups com mais de ${values.remoteRetentionDays || 30} dia(s)?`)) cleanupMutation.mutate();
+                if (window.confirm(`Apagar todos os arquivos em ${values.remote}:${values.path}? Esta acao libera espaco no Google Drive.`)) cleanupMutation.mutate();
               }}
               className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"
             >
               <Trash2 className="h-4 w-4" />
-              Liberar espaco
+              Limpar Gdrive
             </button>
           </div>
         </div>
         {uploadTestMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Upload OK: {uploadTestMutation.data.target}</div> : null}
-        {cleanupMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Limpeza concluida: {cleanupMutation.data.removed} arquivo(s) removido(s), {formatBytesValue(cleanupMutation.data.freedBytes)} liberados.</div> : null}
+        {cleanupMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Gdrive limpo: {cleanupMutation.data.removed} arquivo(s) removido(s), {formatBytesValue(cleanupMutation.data.freedBytes)} liberados.</div> : null}
         {needsGoogleReconnect ? (
           <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
             <div className="font-medium">Autorizacao Google expirada ou revogada.</div>
