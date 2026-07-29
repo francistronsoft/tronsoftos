@@ -57,12 +57,12 @@ esac
 "$RCLONE_BIN" copy "$FIREBIRD_BACKUP_DIR" "${RCLONE_REMOTE}:${RCLONE_BACKUP_PATH}" \
   --bind "$RCLONE_BIND" \
   --config "$RCLONE_CONFIG" \
-  --include "*.gbk" \
-  --include "*.fbk" \
-  --include "*.gbk.gz" \
-  --include "*.fbk.gz" \
-  --include "*.manifest.json" \
-  --exclude "*" \
+  --filter "+ *.gbk" \
+  --filter "+ *.fbk" \
+  --filter "+ *.gbk.gz" \
+  --filter "+ *.fbk.gz" \
+  --filter "+ *.manifest.json" \
+  --filter "- *" \
   --log-file "$LOG_DIR/upload.log" \
   --log-level INFO
 
@@ -71,12 +71,12 @@ if [ "${RCLONE_REMOTE_RETENTION_DAYS:-0}" -gt 0 ]; then
     --bind "$RCLONE_BIND" \
     --config "$RCLONE_CONFIG" \
     --min-age "${RCLONE_REMOTE_RETENTION_DAYS}d" \
-    --include "*.gbk" \
-    --include "*.fbk" \
-    --include "*.gbk.gz" \
-    --include "*.fbk.gz" \
-    --include "*.manifest.json" \
-    --exclude "*" \
+    --filter "+ *.gbk" \
+    --filter "+ *.fbk" \
+    --filter "+ *.gbk.gz" \
+    --filter "+ *.fbk.gz" \
+    --filter "+ *.manifest.json" \
+    --filter "- *" \
     --drive-use-trash=false \
     --log-file "$LOG_DIR/retention.log" \
     --log-level INFO

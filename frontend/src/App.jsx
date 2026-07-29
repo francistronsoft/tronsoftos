@@ -276,6 +276,21 @@ function Field({ label, value, onChange, placeholder, type = 'text', readOnly = 
   );
 }
 
+function TextAreaField({ label, value, onChange, placeholder, rows = 5 }) {
+  return (
+    <label className="block">
+      <span className="text-xs font-medium uppercase text-slate-500">{label}</span>
+      <textarea
+        value={value}
+        placeholder={placeholder}
+        rows={rows}
+        onChange={event => onChange?.(event.target.value)}
+        className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 font-mono text-xs outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100"
+      />
+    </label>
+  );
+}
+
 function Checkbox({ label, checked, onChange }) {
   return (
     <label className="flex items-center gap-2 text-sm text-slate-700">
@@ -1575,6 +1590,8 @@ function BackupsView({ dashboard }) {
   const rclone = rcloneQuery.data || dashboard.backups.rclone || {};
   const centralGoogleQuery = useQuery({ queryKey: ['central-google-oauth'], queryFn: () => api('/api/backups/google/central'), retry: false });
   const centralGoogle = centralGoogleQuery.data || {};
+  const googleCredentialsQuery = useQuery({ queryKey: ['google-drive-credentials'], queryFn: () => api('/api/backups/google/credentials'), retry: false });
+  const googleCredentials = googleCredentialsQuery.data || {};
   const driveConfigured = Boolean(rclone.remote && rclone.configConfigured);
   const remoteBackupsQuery = useQuery({ queryKey: ['rclone-remote-backups'], queryFn: () => api('/api/backups/rclone/remote-files'), enabled: driveConfigured, staleTime: 30000 });
   const quota = dashboard.backups.quota;
@@ -1589,8 +1606,13 @@ function BackupsView({ dashboard }) {
     : centralGoogle.connected || driveConfigured
       ? 'Conta Google: e-mail nao informado. Autentique novamente apos atualizar a Central.'
       : 'Conta Google: aguardando autenticacao';
+  const tokenStatus = rclone.tokenStatus || {};
+  const needsGoogleReconnect = quota?.code === 'google_drive_auth_expired' || (tokenStatus.configured && !tokenStatus.hasRefreshToken);
+  const authorizeClientId = googleCredentials.clientId || 'CLIENT_ID';
+  const authorizeCommand = `rclone authorize "drive" "${authorizeClientId}" "CLIENT_SECRET"`;
   const remoteFiles = remoteBackupsQuery.data?.files || [];
   const [downloadJobId, setDownloadJobId] = useState(null);
+  const [tokenForm, setTokenForm] = useState({ token: '', accountEmail: '' });
   const values = {
     enabled: rclone.enabled || false,
     bin: rclone.bin || '/usr/bin/rclone',
@@ -1622,6 +1644,20 @@ function BackupsView({ dashboard }) {
     onSuccess: data => {
       queryClient.invalidateQueries({ queryKey: ['events'] });
       if (data.authUrl) window.open(data.authUrl, '_blank', 'noopener,noreferrer');
+    }
+  });
+  const tokenImportMutation = useMutation({
+    mutationFn: () => postApi('/api/backups/rclone/token', {
+      ...values,
+      token: tokenForm.token,
+      accountEmail: tokenForm.accountEmail || googleAccountEmail
+    }),
+    onSuccess: () => {
+      setTokenForm({ token: '', accountEmail: '' });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['rclone-settings'] });
+      queryClient.invalidateQueries({ queryKey: ['rclone-remote-backups'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
     }
   });
   const downloadMutation = useMutation({
@@ -1672,7 +1708,33 @@ function BackupsView({ dashboard }) {
           </div>
         </div>
         {uploadTestMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Upload OK: {uploadTestMutation.data.target}</div> : null}
-        {centralGoogleQuery.isError || centralGoogleStartMutation.isError || uploadTestMutation.isError ? <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{centralGoogleQuery.error?.message || centralGoogleStartMutation.error?.message || uploadTestMutation.error?.message}</div> : null}
+        {needsGoogleReconnect ? (
+          <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
+            <div className="font-medium">Autorizacao Google expirada ou revogada.</div>
+            <div className="mt-1">Gere um novo token em uma maquina com navegador e cole o JSON abaixo. Isso evita depender do callback 127.0.0.1 em SSH remoto.</div>
+            <div className="mt-2 rounded-md border border-amber-200 bg-white px-3 py-2 font-mono text-xs text-slate-800">{authorizeCommand}</div>
+          </div>
+        ) : null}
+        {centralGoogleQuery.isError || centralGoogleStartMutation.isError || uploadTestMutation.isError || tokenImportMutation.isError ? <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{centralGoogleQuery.error?.message || centralGoogleStartMutation.error?.message || uploadTestMutation.error?.message || tokenImportMutation.error?.message}</div> : null}
+        <details className="mb-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-700">
+          <summary className="cursor-pointer font-medium text-slate-900">Reautorizar Google Drive em servidor remoto</summary>
+          <div className="mt-3 grid gap-3 lg:grid-cols-[1fr_0.8fr]">
+            <div className="space-y-3">
+              <TextAreaField label="JSON do rclone authorize" value={tokenForm.token} onChange={value => setTokenForm(previous => ({ ...previous, token: value }))} placeholder='{"access_token":"...","token_type":"Bearer","refresh_token":"...","expiry":"..."}' rows={7} />
+              <Field label="E-mail da conta Google" value={tokenForm.accountEmail} onChange={value => setTokenForm(previous => ({ ...previous, accountEmail: value }))} placeholder={googleAccountEmail || 'conta@gmail.com'} />
+              <button type="button" disabled={tokenImportMutation.isPending || !tokenForm.token.trim()} onClick={() => tokenImportMutation.mutate()} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
+                <Save className="h-4 w-4" />
+                Aplicar token
+              </button>
+              {tokenImportMutation.isSuccess ? <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Token aplicado. Execute o upload teste.</div> : null}
+            </div>
+            <div className="rounded-md border border-slate-200 bg-white px-3 py-3 text-xs text-slate-600">
+              <div className="font-medium text-slate-900">Comando para gerar token</div>
+              <div className="mt-2 break-all rounded-md bg-slate-950 px-3 py-2 font-mono text-white">{authorizeCommand}</div>
+              <div className="mt-3">Execute no Windows ou em outra maquina com navegador. Cole aqui apenas o JSON final retornado pelo rclone. O token nao deve ser enviado para chats ou chamados.</div>
+            </div>
+          </div>
+        </details>
         <div className="overflow-hidden rounded-md border border-slate-200">
           {remoteFiles.length ? remoteFiles.slice(0, 30).map(file => (
             <div key={file.path} className="grid grid-cols-[1fr_100px_170px_110px] items-center gap-3 border-b border-slate-100 px-3 py-2 text-sm last:border-0">

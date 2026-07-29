@@ -1053,6 +1053,7 @@ function rawRcloneSettings() {
 }
 
 function publicRcloneSettings(settings = rawRcloneSettings()) {
+  const tokenStatus = rcloneTokenStatus(settings.config || defaultRcloneConfigPath(), settings.remote || '');
   return {
     enabled: settings.enabled === true,
     bin: settings.bin || '/usr/bin/rclone',
@@ -1063,7 +1064,8 @@ function publicRcloneSettings(settings = rawRcloneSettings()) {
     uploadOnlyRole: settings.uploadOnlyRole || 'primary',
     bind: settings.bind || process.env.RCLONE_BIND || '0.0.0.0',
     remoteRetentionDays: Number(settings.remoteRetentionDays || 30),
-    accountEmail: settings.accountEmail || ''
+    accountEmail: settings.accountEmail || '',
+    tokenStatus
   };
 }
 
@@ -1263,6 +1265,68 @@ function googleDriveRcloneConfig({ remote, clientId, clientSecret, token }) {
   return lines.join('\n');
 }
 
+function parseRcloneRemoteConfig(configPath, remote) {
+  if (!configPath || !remote || !fs.existsSync(configPath)) return {};
+  try {
+    const section = String(remote).replace(/:+$/g, '');
+    const result = {};
+    let active = false;
+    for (const line of fs.readFileSync(configPath, 'utf8').split(/\r?\n/)) {
+      const header = line.match(/^\s*\[([^\]]+)\]\s*$/);
+      if (header) {
+        active = header[1] === section;
+        continue;
+      }
+      if (!active) continue;
+      const match = line.match(/^\s*([^=]+?)\s*=\s*(.*)\s*$/);
+      if (match) result[match[1].trim()] = match[2].trim();
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function rcloneTokenStatus(configPath, remote) {
+  const section = parseRcloneRemoteConfig(configPath, remote);
+  if (!section.token) {
+    return {
+      configured: false,
+      validJson: false,
+      hasRefreshToken: false,
+      expiry: null,
+      expired: false,
+      clientIdConfigured: !!section.client_id,
+      clientSecretConfigured: !!section.client_secret
+    };
+  }
+  let token = null;
+  try {
+    token = JSON.parse(section.token);
+  } catch {
+    return {
+      configured: true,
+      validJson: false,
+      hasRefreshToken: false,
+      expiry: null,
+      expired: true,
+      clientIdConfigured: !!section.client_id,
+      clientSecretConfigured: !!section.client_secret
+    };
+  }
+  const expiry = token?.expiry || null;
+  const expiresAt = expiry ? new Date(expiry).getTime() : NaN;
+  return {
+    configured: true,
+    validJson: true,
+    hasRefreshToken: !!token?.refresh_token,
+    expiry,
+    expired: Number.isFinite(expiresAt) ? expiresAt <= Date.now() : false,
+    clientIdConfigured: !!section.client_id,
+    clientSecretConfigured: !!section.client_secret
+  };
+}
+
 function html(reply, status, body) {
   reply.writeHead(status, {
     'content-type': 'text/html; charset=utf-8',
@@ -1292,6 +1356,7 @@ function startGoogleDriveOauth(req, body) {
 
 function saveGoogleDriveToken(body) {
   const settings = rawRcloneSettings();
+  const credentials = rawGoogleCredentials();
   const remote = normalizeRemoteName(body.remote || settings.remote || 'gdrive');
   const rawToken = String(body.token || '').trim();
   if (!rawToken) throw new Error('token OAuth nao informado');
@@ -1301,11 +1366,11 @@ function saveGoogleDriveToken(body) {
   } catch {
     throw new Error('token OAuth deve estar em JSON');
   }
-  if (!token.access_token && !token.refresh_token) throw new Error('token OAuth invalido');
+  if (!token.refresh_token) throw new Error('token OAuth invalido: refresh_token ausente. Gere o token com rclone authorize e permita acesso offline.');
   const configContent = googleDriveRcloneConfig({
     remote,
-    clientId: String(body.clientId || '').trim(),
-    clientSecret: String(body.clientSecret || '').trim(),
+    clientId: String(body.clientId || credentials.clientId || '').trim(),
+    clientSecret: String(body.clientSecret || credentials.clientSecret || '').trim(),
     token
   });
   const result = writeRcloneSettings({
@@ -1315,6 +1380,9 @@ function saveGoogleDriveToken(body) {
     remote,
     path: body.path || settings.path || 'tronsoftos/backups',
     uploadOnlyRole: body.uploadOnlyRole || settings.uploadOnlyRole || 'primary',
+    bind: body.bind || settings.bind || '0.0.0.0',
+    remoteRetentionDays: body.remoteRetentionDays || settings.remoteRetentionDays || 30,
+    accountEmail: body.accountEmail || settings.accountEmail || '',
     configContent
   });
   appendEvent('GOOGLE_DRIVE_TOKEN_IMPORTED', { remote, path: result.path });
@@ -1416,7 +1484,7 @@ function googleDriveErrorDetails(error) {
     return {
       code: 'google_drive_auth_expired',
       activationUrl: '',
-      message: 'Autorizacao do Google Drive expirou ou foi revogada. Autentique o Google novamente pela Central e aplique o Drive.'
+      message: 'Autorizacao do Google Drive expirou ou foi revogada. Reautorize o Google Drive. Se o client OAuth estiver em Producao, confira revogacao manual, limite de refresh tokens do Google ou troca de grant pela mesma conta.'
     };
   }
   if (/network is unreachable|dial tcp \[[0-9a-f:]+\]:443/i.test(raw)) {
