@@ -1629,11 +1629,13 @@ async function rcloneCleanupRemoteBackups() {
   const remaining = new Set(after.map(file => file.path));
   const removedFiles = candidates.filter(file => !remaining.has(file.path));
   const freedBytes = removedFiles.reduce((sum, file) => sum + Number(file.size || 0), 0);
+  const quota = await rcloneAbout({ force: true }).catch(() => null);
   appendEvent('RCLONE_REMOTE_CLEANUP_OK', {
     target,
     candidates: candidates.length,
     removed: removedFiles.length,
-    freedBytes
+    freedBytes,
+    quota
   });
   return {
     ok: true,
@@ -1641,6 +1643,7 @@ async function rcloneCleanupRemoteBackups() {
     candidates: candidates.length,
     removed: removedFiles.length,
     freedBytes,
+    quota,
     stdout: out.stdout,
     stderr: out.stderr
   };
@@ -1713,12 +1716,12 @@ async function rcloneUploadTest() {
   }
 }
 
-async function rcloneAbout() {
+async function rcloneAbout({ force = false } = {}) {
   const settings = rawRcloneSettings();
   const config = settings.config || defaultRcloneConfigPath();
   if (!settings.remote || !fs.existsSync(config)) return null;
   const cacheKey = `${settings.bin || '/usr/bin/rclone'}|${settings.bind || process.env.RCLONE_BIND || '0.0.0.0'}|${config}|${rcloneTarget(settings)}`;
-  if (rcloneQuotaCache.key === cacheKey && Date.now() - rcloneQuotaCache.checkedAt < 5 * 60 * 1000) {
+  if (!force && rcloneQuotaCache.key === cacheKey && Date.now() - rcloneQuotaCache.checkedAt < 5 * 60 * 1000) {
     return rcloneQuotaCache.value;
   }
   try {
@@ -1735,6 +1738,7 @@ async function rcloneAbout() {
     const value = {
       ok: true,
       target: rcloneTarget(settings),
+      checkedAt: new Date().toISOString(),
       total,
       used,
       free,
@@ -1745,7 +1749,7 @@ async function rcloneAbout() {
     return value;
   } catch (err) {
     const details = googleDriveErrorDetails(err);
-    const value = { ok: false, target: rcloneTarget(settings), error: details.message, code: details.code, activationUrl: details.activationUrl };
+    const value = { ok: false, target: rcloneTarget(settings), checkedAt: new Date().toISOString(), error: details.message, code: details.code, activationUrl: details.activationUrl };
     return value;
   }
 }
