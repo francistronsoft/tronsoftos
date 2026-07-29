@@ -177,6 +177,10 @@ function formatBytes(value) {
   return `${current >= 10 || unit === 0 ? Math.round(current) : current.toFixed(1)} ${units[unit]}`;
 }
 
+function formatBytesValue(value) {
+  return Number(value || 0) === 0 ? '0 B' : formatBytes(value);
+}
+
 function formatPercent(value) {
   const current = Number(value);
   return Number.isFinite(current) ? `${current.toFixed(1)}%` : '-';
@@ -1715,7 +1719,7 @@ function BackupsView({ dashboard }) {
           </div>
         </div>
         {uploadTestMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Upload OK: {uploadTestMutation.data.target}</div> : null}
-        {cleanupMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Limpeza concluida: {cleanupMutation.data.removed} arquivo(s) removido(s), {formatBytes(cleanupMutation.data.freedBytes)} liberados.</div> : null}
+        {cleanupMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Limpeza concluida: {cleanupMutation.data.removed} arquivo(s) removido(s), {formatBytesValue(cleanupMutation.data.freedBytes)} liberados.</div> : null}
         {needsGoogleReconnect ? (
           <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
             <div className="font-medium">Autorizacao Google expirada ou revogada.</div>
@@ -1723,7 +1727,7 @@ function BackupsView({ dashboard }) {
           </div>
         ) : null}
         {resetAuthMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">{resetAuthMutation.data.message}</div> : null}
-        {centralGoogleQuery.isError || centralGoogleStartMutation.isError || uploadTestMutation.isError || resetAuthMutation.isError || cleanupMutation.isError ? <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{centralGoogleQuery.error?.message || centralGoogleStartMutation.error?.message || uploadTestMutation.error?.message || resetAuthMutation.error?.message || cleanupMutation.error?.message}</div> : null}
+        {centralGoogleStartMutation.isError || uploadTestMutation.isError || resetAuthMutation.isError || cleanupMutation.isError ? <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{centralGoogleStartMutation.error?.message || uploadTestMutation.error?.message || resetAuthMutation.error?.message || cleanupMutation.error?.message}</div> : null}
         <div className="overflow-hidden rounded-md border border-slate-200">
           {remoteFiles.length ? remoteFiles.slice(0, 30).map(file => (
             <div key={file.path} className="grid grid-cols-[1fr_100px_170px_110px] items-center gap-3 border-b border-slate-100 px-3 py-2 text-sm last:border-0">
