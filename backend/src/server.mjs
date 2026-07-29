@@ -2697,12 +2697,11 @@ async function backupStatus() {
   });
   const latestManifest = manifests[0] || null;
   const latestBackupFile = backupFiles[0] || null;
-  const latestBackupAt = latestManifest?.manifest?.backupFinishedAt
-    || latestBackupFile?.modifiedAt
-    || null;
   const latestValidatedBackupAt = latestManifest?.manifest?.validation?.ok
     ? latestManifest.manifest.backupFinishedAt || latestManifest.modifiedAt
     : null;
+  const latestBackupAt = latestValidatedBackupAt;
+  const latestBackupFileAt = latestBackupFile?.modifiedAt || null;
   const [quota, disk] = await Promise.all([
     rcloneAbout(),
     diskUsageForPath(backupDir)
@@ -2714,6 +2713,12 @@ async function backupStatus() {
     disk,
     latestBackupAt,
     latestValidatedBackupAt,
+    latestBackupFileAt,
+    latestBackupFileValidated: Boolean(
+      latestBackupFile
+      && latestManifest?.manifest?.validation?.ok
+      && String(latestManifest.manifest?.backupPath || '').endsWith(latestBackupFile.name)
+    ),
     latestFile: latestBackupFile,
     latestManifest: latestManifest ? {
       name: latestManifest.name,

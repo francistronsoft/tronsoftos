@@ -24,12 +24,18 @@ const HA_SYNC_ACTIVE_FILE = process.env.TRONSOFTOS_HA_SYNC_ACTIVE_FILE || `${TRO
 const CLUSTER_LOCK_FILE = process.env.TRONSOFTOS_CLUSTER_LOCK || `${TRONSOFTOS_STATE_DIR}/cluster-lock.json`;
 const DEFAULT_BACKUP_FREQUENCY_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_FREQUENCY_MINUTES, 20);
 const DEFAULT_BACKUP_RETENTION_DAYS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_RETENTION_DAYS, 30);
+const BACKUP_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_TIMEOUT_MINUTES, 240, 30, 1440);
+const BACKUP_VALIDATION_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_TIMEOUT_MINUTES, BACKUP_TIMEOUT_MINUTES, 30, 1440);
+const ORPHANED_BACKUP_MIN_AGE_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_ORPHANED_MIN_AGE_MINUTES, 5, 1, 60);
 const FIREBIRD_SESSION_RETENTION_DAYS = 30;
 const CONFIGURED_RUNNING_BACKUP_TTL_MINUTES = Number(process.env.TRONFIRE_BACKUP_RUNNING_TTL_MINUTES || 360);
 const RUNNING_BACKUP_TTL_MINUTES = Number.isFinite(CONFIGURED_RUNNING_BACKUP_TTL_MINUTES)
   ? Math.max(CONFIGURED_RUNNING_BACKUP_TTL_MINUTES, 30)
   : 360;
 const RUNNING_BACKUP_TTL_MS = RUNNING_BACKUP_TTL_MINUTES * 60 * 1000;
+const BACKUP_TIMEOUT_MS = BACKUP_TIMEOUT_MINUTES * 60 * 1000;
+const BACKUP_VALIDATION_TIMEOUT_MS = BACKUP_VALIDATION_TIMEOUT_MINUTES * 60 * 1000;
+const ORPHANED_BACKUP_MIN_AGE_MS = ORPHANED_BACKUP_MIN_AGE_MINUTES * 60 * 1000;
 const FIREBIRD_PROCESS_NAMES = new Set(['fbguard', 'fbserver', 'fb_inet_server', 'fb_smp_server', 'firebird']);
 const METRIC_CONTAINERS = [
   'tronfire_firebird25',
@@ -476,6 +482,24 @@ function staleRunningBackupWhere(databaseId = null) {
   };
 }
 
+function orphanedRunningBackupWhere(databaseId = null) {
+  const cutoff = new Date(Date.now() - ORPHANED_BACKUP_MIN_AGE_MS);
+  return {
+    status: 'RUNNING',
+    ...(databaseId ? { databaseId } : {}),
+    OR: [
+      { startedAt: null },
+      { startedAt: { lt: cutoff } }
+    ]
+  };
+}
+
+function commandTimeoutMessage(err, phase, timeoutMinutes) {
+  const timedOut = err?.killed || err?.signal === 'SIGTERM' || err?.code === 'ETIMEDOUT';
+  if (!timedOut) return err?.message || String(err);
+  return `Tempo limite excedido na ${phase} apos ${timeoutMinutes} min`;
+}
+
 async function markStaleRunningBackupsFailed(databaseId = null, reason = 'stale-running-backup-cleanup') {
   const staleJobs = await prisma.backupJob.findMany({
     where: staleRunningBackupWhere(databaseId),
@@ -497,12 +521,14 @@ async function markStaleRunningBackupsFailed(databaseId = null, reason = 'stale-
   const finishedAt = new Date();
   const updated = [];
   for (const job of staleJobs) {
+    const quarantined = quarantineInvalidBackup(job.backupPath, job.manifestPath);
     const ageMinutes = job.startedAt ? Math.round((Date.now() - new Date(job.startedAt).getTime()) / 60000) : null;
     const message = [
       `Marcado automaticamente como FAILED: backup RUNNING sem processo ativo por mais de ${RUNNING_BACKUP_TTL_MINUTES} min`,
       `origem=${reason}`,
-      ageMinutes !== null ? `idade=${ageMinutes} min` : 'idade=desconhecida'
-    ].join(' | ');
+      ageMinutes !== null ? `idade=${ageMinutes} min` : 'idade=desconhecida',
+      quarantined.length ? `quarentena=${quarantined.join(', ')}` : null
+    ].filter(Boolean).join(' | ');
     const currentError = String(job.errorMessage || '').trim();
     const errorMessage = currentError ? `${currentError}\n${message}` : message;
     updated.push(await prisma.backupJob.update({
@@ -515,6 +541,44 @@ async function markStaleRunningBackupsFailed(databaseId = null, reason = 'stale-
       `Backup antigo em andamento foi encerrado automaticamente: ${job.database?.name || job.databaseId}`
     );
     console.warn(`[worker] backup RUNNING antigo marcado como FAILED: ${job.id} ${job.database?.alias || job.databaseId}`);
+  }
+  return updated;
+}
+
+async function markOrphanedRunningBackupsFailed(databaseId = null, reason = 'orphaned-running-backup-cleanup') {
+  const orphanedJobs = await prisma.backupJob.findMany({
+    where: orphanedRunningBackupWhere(databaseId),
+    include: { database: true },
+    orderBy: { startedAt: 'asc' }
+  });
+  if (!orphanedJobs.length) return [];
+
+  const processes = await backupToolProcesses();
+  if (processes.length) return [];
+
+  const finishedAt = new Date();
+  const updated = [];
+  for (const job of orphanedJobs) {
+    const quarantined = quarantineInvalidBackup(job.backupPath, job.manifestPath);
+    const ageMinutes = job.startedAt ? Math.round((Date.now() - new Date(job.startedAt).getTime()) / 60000) : null;
+    const message = [
+      `Marcado automaticamente como FAILED: backup RUNNING sem processo ativo`,
+      `origem=${reason}`,
+      ageMinutes !== null ? `idade=${ageMinutes} min` : 'idade=desconhecida',
+      quarantined.length ? `quarentena=${quarantined.join(', ')}` : null
+    ].filter(Boolean).join(' | ');
+    const currentError = String(job.errorMessage || '').trim();
+    const errorMessage = currentError ? `${currentError}\n${message}` : message;
+    updated.push(await prisma.backupJob.update({
+      where: { id: job.id },
+      data: { status: 'FAILED', finishedAt, errorMessage }
+    }));
+    await createAlertOnce(
+      `BACKUP_RUNNING_ORPHANED_${job.database?.alias || job.databaseId}`,
+      'WARNING',
+      `Backup antigo em andamento foi encerrado automaticamente: ${job.database?.name || job.databaseId}`
+    );
+    console.warn(`[worker] backup RUNNING sem processo ativo marcado como FAILED: ${job.id} ${job.database?.alias || job.databaseId}`);
   }
   return updated;
 }
@@ -784,7 +848,17 @@ async function validateBackupRestore(db, backupPath, logPath, stamp) {
     'rm -f "$restore"',
     'echo "[validacao] backup aprovado" >> "$log"'
   ].join('; ');
-  await dockerExec(['sh', '-lc', cmd], 1000 * 60 * 60 * 4);
+  try {
+    await dockerExec(['sh', '-lc', cmd], BACKUP_VALIDATION_TIMEOUT_MS);
+  } catch (err) {
+    const message = commandTimeoutMessage(err, 'validacao do backup Firebird', BACKUP_VALIDATION_TIMEOUT_MINUTES);
+    try {
+      await dockerExec(['sh', '-lc', `printf '%s\\n' ${shQuote(message)} >> ${shQuote(logPath)}; rm -f ${shQuote(tempRestorePath)}`], 60_000);
+    } catch {
+      // The original validation error is the one that matters.
+    }
+    throw new Error(message);
+  }
   return {
     ok: true,
     method: 'gbak-restore-gstat',
@@ -844,7 +918,11 @@ async function runBackup(db, reason = 'AUTO') {
       `> ${shQuote(logPath)} 2>&1`,
       `&& gzip -f ${shQuote(rawBackupPath)}`
     ].join(' ');
-    await dockerExec(['sh', '-lc', cmd], 1000 * 60 * 60 * 4);
+    try {
+      await dockerExec(['sh', '-lc', cmd], BACKUP_TIMEOUT_MS);
+    } catch (err) {
+      throw new Error(commandTimeoutMessage(err, 'geracao do backup Firebird', BACKUP_TIMEOUT_MINUTES));
+    }
     const { stdout: sizeOut } = await dockerExec(['stat','-c','%s', backupPath]);
     const { stdout: shaOut } = await dockerExec(['sha256sum', backupPath]);
     const sha = shaOut.trim().split(/\s+/)[0];
@@ -925,6 +1003,7 @@ async function runAutomaticBackups() {
         break;
       }
       await cleanupRetention(db);
+      await markOrphanedRunningBackupsFailed(db.id, 'before-automatic-backup');
       await markStaleRunningBackupsFailed(db.id, 'before-automatic-backup');
       const running = await prisma.backupJob.count({ where: { databaseId: db.id, status: 'RUNNING' } });
       if (running > 0) continue;
@@ -960,6 +1039,7 @@ async function checkDatabases() {
     try {
       const currentDb = await clearExpiredDatabaseOperation(db);
       if (databaseOperationActive(currentDb)) continue;
+      await markOrphanedRunningBackupsFailed(db.id, 'before-database-check');
       await markStaleRunningBackupsFailed(db.id, 'before-database-check');
       const runningBackup = await prisma.backupJob.count({ where: { databaseId: db.id, status: 'RUNNING' } });
       if (runningBackup > 0) continue;
@@ -1010,6 +1090,7 @@ cron.schedule('* * * * *', async () => {
 
 console.log('[worker] TronFire worker iniciado');
 setTimeout(() => {
+  markOrphanedRunningBackupsFailed(null, 'worker-startup').catch(err => console.error('[worker] orphaned backup cleanup error', err.message));
   markStaleRunningBackupsFailed(null, 'worker-startup').catch(err => console.error('[worker] stale backup cleanup error', err.message));
   collectMetrics().catch(err => console.error('[worker] initial metrics error', err.message));
   collectFirebirdSessionHistory().catch(err => console.error('[worker] initial session history error', err.message));
