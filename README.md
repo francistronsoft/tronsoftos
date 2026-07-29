@@ -100,6 +100,33 @@ cd backend
 node src/server.mjs
 ```
 
+## SSH De Manutencao Via Cloudflare
+
+O Cloudflare Tunnel pode manter o painel HTTP e um acesso SSH de manutencao em hostnames separados. No painel da Cloudflare, crie um Public Hostname exclusivo para SSH apontando para:
+
+```text
+ssh://host.docker.internal:22
+```
+
+No TronSoftOS, em **Cloudflare**, habilite **SSH de manutencao pelo tunnel** e informe o hostname, por exemplo:
+
+```text
+ssh-cliente.tronsoft.app.br
+```
+
+O hostname principal do painel continua separado. Em HA, prefira um hostname SSH por no:
+
+```text
+ssh-cliente-primary.tronsoft.app.br
+ssh-cliente-standby.tronsoft.app.br
+```
+
+No computador de suporte, use:
+
+```bash
+cloudflared access ssh --hostname ssh-cliente.tronsoft.app.br
+```
+
 ## Integração Com A Central TronSoftOS
 
 O backend possui um agente interno que valida o token gerado na Central, envia heartbeat periódico e publica alertas calculados pelo painel do TronSoftOS.

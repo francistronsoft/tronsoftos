@@ -2621,11 +2621,16 @@ function rawCloudflareSettings() {
   const saved = readJson(cloudflareSettingsPath, {});
   const savedToken = Object.prototype.hasOwnProperty.call(saved, 'tunnelToken') ? saved.tunnelToken : saved.apiToken;
   const envToken = process.env.CLOUDFLARE_TUNNEL_TOKEN || process.env.CLOUDFLARE_API_TOKEN || '';
+  const savedMaintenanceHost = String(saved.maintenanceSshHostname || '').trim();
+  const envMaintenanceHost = String(process.env.CLOUDFLARE_TUNNEL_SSH_HOSTNAME || '').trim();
   return {
     mode: 'tunnel',
     enabled: saved.enabled === true || process.env.CLOUDFLARE_TUNNEL_ENABLED === 'true',
     tokenCleared: saved.tokenCleared === true,
-    tunnelToken: saved.tokenCleared === true ? String(savedToken || '') : savedToken || envToken || ''
+    tunnelToken: saved.tokenCleared === true ? String(savedToken || '') : savedToken || envToken || '',
+    maintenanceSshEnabled: saved.maintenanceSshEnabled === true || process.env.CLOUDFLARE_TUNNEL_SSH_ENABLED === 'true',
+    maintenanceSshHostname: savedMaintenanceHost || envMaintenanceHost,
+    maintenanceSshService: 'ssh://host.docker.internal:22'
   };
 }
 
@@ -2633,21 +2638,34 @@ function publicCloudflareSettings(settings = rawCloudflareSettings()) {
   return {
     mode: 'tunnel',
     enabled: settings.enabled === true,
-    tokenConfigured: !!settings.tunnelToken && settings.tunnelToken !== 'change-me'
+    tokenConfigured: !!settings.tunnelToken && settings.tunnelToken !== 'change-me',
+    maintenanceSshEnabled: settings.maintenanceSshEnabled === true,
+    maintenanceSshHostname: settings.maintenanceSshHostname || '',
+    maintenanceSshService: settings.maintenanceSshService || 'ssh://host.docker.internal:22'
   };
 }
 
 function normalizeCloudflareSettings(body) {
   const current = rawCloudflareSettings();
   const providedToken = body.tunnelToken ? String(body.tunnelToken).trim() : '';
+  const maintenanceSshHostname = String(body.maintenanceSshHostname ?? current.maintenanceSshHostname ?? '').trim().toLowerCase();
   const next = {
     mode: 'tunnel',
     enabled: body.enabled === true,
     tokenCleared: providedToken ? false : current.tokenCleared === true,
-    tunnelToken: providedToken || current.tunnelToken || ''
+    tunnelToken: providedToken || current.tunnelToken || '',
+    maintenanceSshEnabled: body.maintenanceSshEnabled === true,
+    maintenanceSshHostname,
+    maintenanceSshService: 'ssh://host.docker.internal:22'
   };
   if (next.enabled) {
     if (!next.tunnelToken) throw new Error('token do Cloudflare Tunnel nao informado');
+    if (next.maintenanceSshEnabled && !next.maintenanceSshHostname) {
+      throw new Error('hostname SSH de manutencao nao informado');
+    }
+    if (next.maintenanceSshHostname && !/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/.test(next.maintenanceSshHostname)) {
+      throw new Error('hostname SSH de manutencao invalido');
+    }
   }
   return next;
 }
@@ -2658,7 +2676,9 @@ function writeCloudflareSettings(body) {
   fs.writeFileSync(cloudflareSettingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
   appendEvent('CLOUDFLARE_SETTINGS_UPDATED', {
     enabled: settings.enabled,
-    mode: settings.mode
+    mode: settings.mode,
+    maintenanceSshEnabled: settings.maintenanceSshEnabled,
+    maintenanceSshHostname: settings.maintenanceSshHostname || ''
   });
   return publicCloudflareSettings(settings);
 }
@@ -2721,7 +2741,9 @@ async function cloudflareSync() {
   appendEvent('CLOUDFLARE_TUNNEL_READY', { enabled: normalized.enabled });
   return {
     ok: true,
-    message: 'Tunnel configurado. As rotas sao gerenciadas no painel da Cloudflare.'
+    message: normalized.maintenanceSshEnabled
+      ? `Tunnel configurado. Crie no painel da Cloudflare uma rota Public Hostname ${normalized.maintenanceSshHostname} apontando para ${normalized.maintenanceSshService}.`
+      : 'Tunnel configurado. As rotas sao gerenciadas no painel da Cloudflare.'
   };
 }
 
@@ -2747,7 +2769,10 @@ async function resetCloudflareSettings() {
     mode: 'tunnel',
     enabled: false,
     tokenCleared: true,
-    tunnelToken: ''
+    tunnelToken: '',
+    maintenanceSshEnabled: false,
+    maintenanceSshHostname: '',
+    maintenanceSshService: 'ssh://host.docker.internal:22'
   };
   fs.writeFileSync(cloudflareSettingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
   let connector = null;

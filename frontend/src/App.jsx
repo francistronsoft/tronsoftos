@@ -1852,7 +1852,9 @@ function CloudflareView({ dashboard }) {
   const [form, setForm] = useState(null);
   const values = form || {
     enabled: cloudflare.enabled || false,
-    tunnelToken: ''
+    tunnelToken: '',
+    maintenanceSshEnabled: cloudflare.maintenanceSshEnabled || false,
+    maintenanceSshHostname: cloudflare.maintenanceSshHostname || ''
   };
   const saveMutation = useMutation({
     mutationFn: payload => fetch('/api/cloudflare', {
@@ -1898,6 +1900,16 @@ function CloudflareView({ dashboard }) {
           <div className="md:col-span-2">
             <Field label="Token do Tunnel" type="password" value={values.tunnelToken} onChange={value => setValue('tunnelToken', value)} placeholder={cloudflare.tokenConfigured ? 'token ja configurado' : 'cole o token do tunnel'} autoComplete="off" />
           </div>
+          <div className="md:col-span-2">
+            <Checkbox label="Habilitar SSH de manutencao pelo tunnel" checked={values.maintenanceSshEnabled} onChange={value => setValue('maintenanceSshEnabled', value)} />
+          </div>
+          <Field label="Hostname SSH de manutencao" value={values.maintenanceSshHostname || ''} onChange={value => setValue('maintenanceSshHostname', value)} placeholder="ssh-cliente.tronsoft.app.br" />
+          <Field label="Servico Cloudflare" value={cloudflare.maintenanceSshService || 'ssh://host.docker.internal:22'} readOnly />
+          {values.maintenanceSshEnabled ? (
+            <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800 md:col-span-2">
+              Crie esse Public Hostname no painel da Cloudflare apontando para o servico SSH acima. O hostname principal do painel continua separado.
+            </div>
+          ) : null}
           <div className="flex flex-wrap items-center gap-3 md:col-span-2">
             <button disabled={busy} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
               <Save className="h-4 w-4" />
