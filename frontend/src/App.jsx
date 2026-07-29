@@ -1598,6 +1598,7 @@ function BackupsView({ dashboard }) {
   const needsGoogleReconnect = quota?.code === 'google_drive_auth_expired' || (tokenStatus.configured && !tokenStatus.hasRefreshToken);
   const remoteFiles = remoteBackupsQuery.data?.files || [];
   const [downloadJobId, setDownloadJobId] = useState(null);
+  const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false);
   const values = {
     enabled: rclone.enabled || false,
     bin: rclone.bin || '/usr/bin/rclone',
@@ -1708,9 +1709,7 @@ function BackupsView({ dashboard }) {
             <button
               type="button"
               disabled={cleanupMutation.isPending || !driveConfigured}
-              onClick={() => {
-                if (window.confirm(`Apagar todos os arquivos em ${values.remote}:${values.path}? Esta acao libera espaco no Google Drive.`)) cleanupMutation.mutate();
-              }}
+              onClick={() => setCleanupConfirmOpen(true)}
               className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50"
             >
               <Trash2 className="h-4 w-4" />
@@ -1748,6 +1747,20 @@ function BackupsView({ dashboard }) {
         </div>
         {downloadMutation.isError ? <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{downloadMutation.error.message}</div> : null}
         {downloadJobQuery.data ? <div className="mt-4"><InlineTerminal job={downloadJobQuery.data} /></div> : null}
+        <ConfirmDialog
+          open={cleanupConfirmOpen}
+          title="Limpar Gdrive"
+          message={`Apagar todos os arquivos em ${values.remote}:${values.path}? Esta acao libera espaco no Google Drive.`}
+          detail="A limpeza remove os arquivos do destino configurado sem enviar para a lixeira do Google Drive."
+          confirmLabel="Limpar Gdrive"
+          icon={Trash2}
+          tone="red"
+          busy={cleanupMutation.isPending}
+          onCancel={() => setCleanupConfirmOpen(false)}
+          onConfirm={() => {
+            cleanupMutation.mutate(undefined, { onSettled: () => setCleanupConfirmOpen(false) });
+          }}
+        />
       </Card>
     </div>
   );
@@ -2165,6 +2178,40 @@ function ConfirmAction({ label, icon: Icon, confirmation, tone = 'slate', disabl
         {Icon ? <Icon className="h-4 w-4" /> : null}
         {label}
       </button>
+    </div>
+  );
+}
+
+function ConfirmDialog({ open, title, message, detail, confirmLabel, icon: Icon, tone = 'slate', busy = false, onCancel, onConfirm }) {
+  if (!open) return null;
+  const confirmClass = tone === 'red'
+    ? 'bg-red-600 text-white hover:bg-red-700'
+    : tone === 'amber'
+      ? 'bg-amber-600 text-white hover:bg-amber-700'
+      : 'bg-slate-950 text-white hover:bg-slate-800';
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/45 px-4 py-6">
+      <div className="w-full max-w-md rounded-md border border-slate-200 bg-white shadow-xl">
+        <div className="flex items-start gap-3 border-b border-slate-100 px-4 py-4">
+          <div className="rounded-md bg-red-50 p-2 text-red-700">
+            {Icon ? <Icon className="h-5 w-5" /> : <AlertTriangle className="h-5 w-5" />}
+          </div>
+          <div className="min-w-0">
+            <div className="text-base font-semibold text-slate-950">{title}</div>
+            <div className="mt-1 text-sm text-slate-700">{message}</div>
+            {detail ? <div className="mt-2 text-xs text-slate-500">{detail}</div> : null}
+          </div>
+        </div>
+        <div className="flex flex-wrap justify-end gap-2 px-4 py-3">
+          <button type="button" disabled={busy} onClick={onCancel} className="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
+            Cancelar
+          </button>
+          <button type="button" disabled={busy} onClick={onConfirm} className={`inline-flex items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium disabled:opacity-50 ${confirmClass}`}>
+            {Icon ? <Icon className="h-4 w-4" /> : null}
+            {busy ? 'Aguarde...' : confirmLabel}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
