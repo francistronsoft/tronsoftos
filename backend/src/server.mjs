@@ -1816,6 +1816,12 @@ function publicApp(app) {
   };
 }
 
+function troncomandaPublicUrl(baseUrl) {
+  const normalized = String(baseUrl || '').trim().replace(/\/+$/, '');
+  if (!normalized) return '';
+  return /\/qr$/i.test(normalized) ? `${normalized}/` : `${normalized}/qr/`;
+}
+
 function appAccessUrl(app) {
   if (app.name === 'tronfire') {
     return process.env.TRONFIRE_PROXY_PATH || '/tronfire/';
@@ -1826,7 +1832,7 @@ function appAccessUrl(app) {
       || (env.TRONCOMANDA_LAN_HOST && env.TRONCOMANDA_WEB_PORT ? `http://${env.TRONCOMANDA_LAN_HOST}:${env.TRONCOMANDA_WEB_PORT}` : '')
       || app.publicUrl
       || app.accessUrl;
-    if (baseUrl) return `${baseUrl.replace(/\/+$/, '')}/qr/`;
+    if (baseUrl) return troncomandaPublicUrl(baseUrl);
   }
   if (app.publicUrl || app.accessUrl) return app.publicUrl || app.accessUrl;
   return app.healthUrl ? app.healthUrl.replace(/\/health\/?$/, '/') : null;
