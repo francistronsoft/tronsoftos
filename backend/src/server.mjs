@@ -1389,6 +1389,42 @@ function saveGoogleDriveToken(body) {
   return result;
 }
 
+async function resetGoogleDriveAuth() {
+  const current = rawRcloneSettings();
+  try {
+    const token = centralToken();
+    if (token) {
+      await centralRequest('/api/tronsoftos/oauth/google/reset', {
+        method: 'POST',
+        token
+      });
+    }
+  } catch (err) {
+    appendEvent('CENTRAL_GOOGLE_OAUTH_RESET_FAILED', { error: err.message });
+  }
+  const config = current.config || defaultRcloneConfigPath();
+  if (canRepairRcloneConfigPath(config)) {
+    try {
+      fs.rmSync(config, { force: true });
+    } catch (err) {
+      if (!['EACCES', 'EPERM'].includes(err.code) || !repairRcloneConfigPermissions(config)) throw err;
+      fs.rmSync(config, { force: true });
+    }
+  }
+  const settings = {
+    ...current,
+    enabled: false,
+    accountEmail: ''
+  };
+  fs.writeFileSync(rcloneSettingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
+  rcloneQuotaCache = { key: null, checkedAt: 0, value: null };
+  appendEvent('GOOGLE_DRIVE_AUTH_RESET', { remote: settings.remote || 'gdrive', path: settings.path || 'tronsoftos/backups' });
+  return {
+    ...publicRcloneSettings(settings),
+    message: 'Autenticacao local do Google Drive resetada. Clique em Autenticar Google para gerar uma nova autorizacao.'
+  };
+}
+
 async function completeGoogleDriveOauth(reply, url) {
   const state = String(url.searchParams.get('state') || '');
   const code = String(url.searchParams.get('code') || '');
@@ -5201,6 +5237,7 @@ async function handleApi(req, reply, url) {
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/test') return json(reply, 200, await rcloneTest());
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/upload-test') return json(reply, 200, await rcloneUploadTest());
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/token') return json(reply, 200, saveGoogleDriveToken(await readBody(req)));
+  if (req.method === 'POST' && url.pathname === '/api/backups/rclone/reset-auth') return json(reply, 200, await resetGoogleDriveAuth());
   if (req.method === 'GET' && url.pathname === '/api/backups/rclone/remote-files') return json(reply, 200, await rcloneRemoteBackups());
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/download') return json(reply, 202, { ok: true, job: startRcloneRemoteBackupDownload(await readBody(req)) });
   if (req.method === 'GET' && url.pathname === '/api/backups/google/central') return json(reply, 200, await centralGoogleStatus());
