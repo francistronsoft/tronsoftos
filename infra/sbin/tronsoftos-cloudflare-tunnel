@@ -44,13 +44,86 @@ $ids
 EOF
 }
 
+remove_connector_by_name() {
+  local name="$1"
+  local ids id
+  ids="$(docker container ls -aq --filter "name=^/${name}$" || true)"
+  [ -n "$ids" ] || return 0
+
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    docker container update --restart=no "$id" >/dev/null 2>&1 || true
+    docker container rm -f "$id" >/dev/null 2>&1 || true
+  done <<EOF
+$ids
+EOF
+}
+
 custom_networks() {
   docker network ls --format '{{.Name}}' | grep -Ev '^(bridge|host|none)$' || true
 }
 
+start_candidate_connector() {
+  local candidate_name="$1"
+  local primary_network="$2"
+  local ssh_enabled="$3"
+  local token="$4"
+  local add_host_status=0
+  local run_args=()
+
+  if [ "$ssh_enabled" = "true" ]; then
+    run_args=(--add-host host.docker.internal:host-gateway)
+  fi
+
+  if [ -n "$primary_network" ]; then
+    docker run -d \
+      --name "$candidate_name" \
+      --restart unless-stopped \
+      --network "$primary_network" \
+      "${run_args[@]}" \
+      -e TUNNEL_TOKEN="$token" \
+      "$IMAGE" tunnel --no-autoupdate run >/dev/null || add_host_status=$?
+  else
+    docker run -d \
+      --name "$candidate_name" \
+      --restart unless-stopped \
+      "${run_args[@]}" \
+      -e TUNNEL_TOKEN="$token" \
+      "$IMAGE" tunnel --no-autoupdate run >/dev/null || add_host_status=$?
+  fi
+
+  if [ "$add_host_status" -ne 0 ] && [ "$ssh_enabled" = "true" ]; then
+    echo "Aviso: falha ao iniciar Cloudflare Tunnel com host-gateway; tentando sem host.docker.internal." >&2
+    remove_connector_by_name "$candidate_name"
+    if [ -n "$primary_network" ]; then
+      docker run -d \
+        --name "$candidate_name" \
+        --restart unless-stopped \
+        --network "$primary_network" \
+        -e TUNNEL_TOKEN="$token" \
+        "$IMAGE" tunnel --no-autoupdate run >/dev/null
+    else
+      docker run -d \
+        --name "$candidate_name" \
+        --restart unless-stopped \
+        -e TUNNEL_TOKEN="$token" \
+        "$IMAGE" tunnel --no-autoupdate run >/dev/null
+    fi
+  elif [ "$add_host_status" -ne 0 ]; then
+    return "$add_host_status"
+  fi
+
+  sleep 3
+  if [ "$(docker container inspect -f '{{.State.Running}}' "$candidate_name" 2>/dev/null || true)" != "true" ]; then
+    echo "Cloudflare Tunnel candidate nao permaneceu em execucao." >&2
+    docker logs --tail=80 "$candidate_name" >&2 || true
+    remove_connector_by_name "$candidate_name"
+    exit 68
+  fi
+}
+
 apply_connector() {
-  local enabled token ssh_enabled networks primary_network network
-  local host_gateway_args=()
+  local enabled token ssh_enabled networks primary_network network candidate_name
   enabled="$(read_setting enabled)"
   token="$(read_setting tunnelToken)"
   ssh_enabled="$(read_setting maintenanceSshEnabled)"
@@ -64,40 +137,25 @@ apply_connector() {
   [ -n "$token" ] || { echo "Token do Cloudflare Tunnel nao configurado." >&2; exit 64; }
   command -v docker >/dev/null 2>&1 || { echo "Docker nao encontrado." >&2; exit 65; }
   docker info >/dev/null 2>&1 || { echo "Docker nao esta acessivel." >&2; exit 66; }
-  if [ "$ssh_enabled" = "true" ]; then
-    host_gateway_args=(--add-host host.docker.internal:host-gateway)
-  fi
 
   networks="$(custom_networks)"
   primary_network="$(printf '%s\n' "$networks" | awk 'NF { print; exit }')"
+  candidate_name="${CONTAINER_NAME}_candidate_$$"
 
-  stop_connector
+  remove_connector_by_name "$candidate_name"
   docker image inspect "$IMAGE" >/dev/null 2>&1 || docker pull "$IMAGE"
+  start_candidate_connector "$candidate_name" "$primary_network" "$ssh_enabled" "$token"
 
-  if [ -n "$primary_network" ]; then
-    docker run -d \
-      --name "$CONTAINER_NAME" \
-      --restart unless-stopped \
-      --network "$primary_network" \
-      "${host_gateway_args[@]}" \
-      -e TUNNEL_TOKEN="$token" \
-      "$IMAGE" tunnel --no-autoupdate run >/dev/null
-
-    while IFS= read -r network; do
-      [ -n "$network" ] || continue
-      [ "$network" = "$primary_network" ] && continue
-      docker network connect "$network" "$CONTAINER_NAME" >/dev/null 2>&1 || true
-    done <<EOF
+  while IFS= read -r network; do
+    [ -n "$network" ] || continue
+    [ "$network" = "$primary_network" ] && continue
+    docker network connect "$network" "$candidate_name" >/dev/null 2>&1 || true
+  done <<EOF
 $networks
 EOF
-  else
-    docker run -d \
-      --name "$CONTAINER_NAME" \
-      --restart unless-stopped \
-      "${host_gateway_args[@]}" \
-      -e TUNNEL_TOKEN="$token" \
-      "$IMAGE" tunnel --no-autoupdate run >/dev/null
-  fi
+
+  stop_connector
+  docker rename "$candidate_name" "$CONTAINER_NAME"
 
   if [ "$ssh_enabled" = "true" ]; then
     echo "Cloudflare Tunnel connector iniciado em Docker com acesso ao SSH do host via host.docker.internal:22."
