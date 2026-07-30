@@ -5052,6 +5052,35 @@ function centralSystemMetricsPayload(payload = {}) {
   };
 }
 
+function centralServicesPayload(payload = {}) {
+  const apps = Array.isArray(payload.apps) ? payload.apps : [];
+  return {
+    platform: 'linux-docker',
+    collectedAt: new Date().toISOString(),
+    apps: apps.map(app => ({
+      name: app.name || '',
+      title: app.title || app.name || '',
+      status: app.status || 'unknown',
+      enabled: app.enabled !== false,
+      version: app.version || app.branch || '',
+      branch: app.branch || '',
+      health: app.health || null,
+      containers: Array.isArray(app.containers)
+        ? app.containers.map(container => ({
+            name: container.name || '',
+            status: container.status || 'unknown',
+            detail: container.detail || '',
+            image: container.image || '',
+            imageTag: container.imageTag || '',
+            imageId: container.imageId || '',
+            version: container.version || '',
+            revision: container.revision || ''
+          }))
+        : []
+    }))
+  };
+}
+
 async function centralHeartbeat(token, payload) {
   return centralRequest('/api/tronsoftos/heartbeat', {
     method: 'POST',
@@ -5072,6 +5101,7 @@ async function centralHeartbeat(token, payload) {
         vip: payload.cluster?.vip || null
       },
       backups: payload.backups || {},
+      services: centralServicesPayload(payload),
       metrics: {
         systemMetrics: centralSystemMetricsPayload(payload),
         hostUptimeSeconds: payload.hostUptimeSeconds ?? null
