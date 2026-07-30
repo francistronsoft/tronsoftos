@@ -69,8 +69,33 @@ let centralAgentTimer = null;
 let centralAgentInFlight = false;
 let centralDatabaseInfoCache = { checkedAt: 0, value: null };
 
+function maskSecretValue(value) {
+  const text = String(value ?? '');
+  if (!text) return '';
+  if (text.length <= 8) return '***';
+  return `${text.slice(0, 4)}...${text.slice(-4)}`;
+}
+
+function redactSecrets(value) {
+  if (Array.isArray(value)) return value.map(redactSecrets);
+  if (!value || typeof value !== 'object') {
+    if (typeof value === 'string') {
+      return value
+        .replace(/(password|passwd|senha|token|secret|client_secret|refresh_token|access_token)(["'=:\s]+)([^"'\s,}]+)/gi, '$1$2***')
+        .replace(/(cts_)[a-z0-9]+/gi, '$1***')
+        .replace(/(x-tronsoftos-token:\s*)[^\s'"]+/gi, '$1***')
+        .replace(/(download\?token=)[^"'&\s]+/gi, '$1***');
+    }
+    return value;
+  }
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+    const sensitive = /^(password|passwd|senha|secret|clientSecret|client_secret|refreshToken|refresh_token|accessToken|access_token|authorization|configContent|token|tunnelToken|installationToken)$/i.test(key);
+    return [key, sensitive ? maskSecretValue(item) : redactSecrets(item)];
+  }));
+}
+
 function json(reply, status, body) {
-  const payload = JSON.stringify(body, null, 2);
+  const payload = JSON.stringify(redactSecrets(body), null, 2);
   reply.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store'
@@ -220,7 +245,7 @@ function appendEvent(type, details = {}) {
   const event = {
     id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     type,
-    details,
+    details: redactSecrets(details),
     node: process.env.TRONSOFTOS_NODE_NAME || null,
     createdAt: new Date().toISOString()
   };
@@ -3883,7 +3908,7 @@ function writeUpdateStatus(state) {
 }
 
 function appendActionLog(job, stream, chunk) {
-  job[stream] += chunk.toString();
+  job[stream] += redactSecrets(chunk.toString());
   if (job[stream].length > maxActionLogLength) {
     job[stream] = job[stream].slice(job[stream].length - maxActionLogLength);
   }
@@ -5405,7 +5430,11 @@ const server = http.createServer(async (req, reply) => {
     }
     return serveStatic(req, reply);
   } catch (err) {
-    return json(reply, err.statusCode || 500, { error: err.message || 'internal error' });
+    const status = err.statusCode || 500;
+    const message = status >= 500 && process.env.NODE_ENV !== 'development'
+      ? 'internal error'
+      : err.message || 'internal error';
+    return json(reply, status, { error: message });
   }
 });
 
