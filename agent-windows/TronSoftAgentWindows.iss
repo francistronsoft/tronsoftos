@@ -1,5 +1,5 @@
 #define MyAppName "TronSoft Agent Windows"
-#define MyAppVersion "0.1.5.0"
+#define MyAppVersion "0.1.6.0"
 #define MyAppPublisher "TronSoft"
 #define MyServiceName "TronSoftAgentWindows"
 #define MyAppExeName "TronSoft.Agent.Windows.exe"

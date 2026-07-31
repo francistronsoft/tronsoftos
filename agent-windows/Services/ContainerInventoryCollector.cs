@@ -9,7 +9,11 @@ public sealed class ContainerInventoryCollector
         var wslInventory = await WslInventoryAsync(cancellationToken);
         if (wslInventory.Available)
         {
-            return new ContainerInventoryPayload("windows-wsl", DateTimeOffset.UtcNow, wslInventory.Containers, null);
+            return new ContainerInventoryPayload(
+                "windows-wsl",
+                DateTimeOffset.UtcNow,
+                wslInventory.Containers,
+                wslInventory.Detail);
         }
 
         var direct = await DockerPsAsync("docker.exe", "ps -a --format \"{{json .}}\"", cancellationToken);
@@ -27,12 +31,15 @@ public sealed class ContainerInventoryCollector
         return new ContainerInventoryPayload("windows", DateTimeOffset.UtcNow, Array.Empty<ContainerStatusPayload>(), "Docker/WSL nao disponivel");
     }
 
-    private static async Task<(bool Available, IReadOnlyList<ContainerStatusPayload> Containers)> WslInventoryAsync(CancellationToken cancellationToken)
+    private static async Task<(bool Available, IReadOnlyList<ContainerStatusPayload> Containers, string? Detail)> WslInventoryAsync(CancellationToken cancellationToken)
     {
         try
         {
             var result = await Shell.RunAsync("wsl.exe", "-l -v", timeoutMs: 15_000, cancellationToken: cancellationToken);
-            if (result.ExitCode != 0) return (false, Array.Empty<ContainerStatusPayload>());
+            if (result.ExitCode != 0)
+            {
+                return (false, Array.Empty<ContainerStatusPayload>(), ShortDetail(result.Stderr, result.Stdout));
+            }
 
             var distros = result.Stdout
                 .Replace("\0", "")
@@ -42,7 +49,7 @@ public sealed class ContainerInventoryCollector
                 .Select(item => item!)
                 .ToArray();
 
-            if (!distros.Any()) return (false, Array.Empty<ContainerStatusPayload>());
+            if (!distros.Any()) return (false, Array.Empty<ContainerStatusPayload>(), "Nenhuma distro WSL encontrada para o usuario do servico.");
 
             var containers = new List<ContainerStatusPayload>();
             containers.AddRange(distros.Select(distro => new ContainerStatusPayload(
@@ -56,13 +63,17 @@ public sealed class ContainerInventoryCollector
             foreach (var distro in distros.Where(item => string.Equals(item.State, "Running", StringComparison.OrdinalIgnoreCase)))
             {
                 containers.AddRange(await WslServiceRowsAsync(distro.Name, cancellationToken));
+                containers.AddRange(await WslDockerRowsAsync(distro.Name, cancellationToken));
             }
 
-            return (true, containers);
+            var detail = containers.Count == distros.Length
+                ? "WSL disponivel, mas nenhum servico TronSoft/Docker foi encontrado nas distros em execucao."
+                : null;
+            return (true, containers, detail);
         }
-        catch
+        catch (Exception ex)
         {
-            return (false, Array.Empty<ContainerStatusPayload>());
+            return (false, Array.Empty<ContainerStatusPayload>(), ex.Message);
         }
     }
 
@@ -86,6 +97,26 @@ public sealed class ContainerInventoryCollector
             return result.Stdout
                 .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
                 .Select(line => ParseWslService(distro, line))
+                .Where(item => item is not null)
+                .Select(item => item!)
+                .ToArray();
+        }
+        catch
+        {
+            return Array.Empty<ContainerStatusPayload>();
+        }
+    }
+
+    private static async Task<IReadOnlyList<ContainerStatusPayload>> WslDockerRowsAsync(string distro, CancellationToken cancellationToken)
+    {
+        var command = "sh -lc \"if command -v docker >/dev/null 2>&1; then docker ps -a --format '{{json .}}'; fi\"";
+        try
+        {
+            var result = await Shell.RunAsync("wsl.exe", $"-d {Quote(distro)} -- {command}", timeoutMs: 20_000, cancellationToken: cancellationToken);
+            if (result.ExitCode != 0) return Array.Empty<ContainerStatusPayload>();
+            return result.Stdout
+                .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(line => ParseDockerRow(line, distro))
                 .Where(item => item is not null)
                 .Select(item => item!)
                 .ToArray();
@@ -128,7 +159,7 @@ public sealed class ContainerInventoryCollector
 
             var containers = result.Stdout
                 .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
-                .Select(ParseDockerRow)
+                .Select(line => ParseDockerRow(line))
                 .Where(item => item is not null)
                 .Select(item => item!)
                 .ToArray();
@@ -140,7 +171,7 @@ public sealed class ContainerInventoryCollector
         }
     }
 
-    private static ContainerStatusPayload? ParseDockerRow(string line)
+    private static ContainerStatusPayload? ParseDockerRow(string line, string? source = null)
     {
         try
         {
@@ -150,7 +181,7 @@ public sealed class ContainerInventoryCollector
             if (string.IsNullOrWhiteSpace(name)) return null;
             var image = Text(root, "Image");
             return new ContainerStatusPayload(
-                name,
+                source is null ? name : $"{source}:{name}",
                 Text(root, "State", "unknown").ToLowerInvariant(),
                 Text(root, "Status"),
                 image,
@@ -177,6 +208,12 @@ public sealed class ContainerInventoryCollector
     private static string Quote(string value)
     {
         return $"\"{value.Replace("\"", "\\\"")}\"";
+    }
+
+    private static string ShortDetail(params string[] values)
+    {
+        var detail = string.Join(" ", values.Where(value => !string.IsNullOrWhiteSpace(value))).Trim();
+        return detail.Length > 240 ? detail[..240] : detail;
     }
 
     private sealed record WslDistro(string Name, string State, string Version);
