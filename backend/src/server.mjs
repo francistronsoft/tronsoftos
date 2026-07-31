@@ -5052,8 +5052,41 @@ function centralSystemMetricsPayload(payload = {}) {
   };
 }
 
-function centralServicesPayload(payload = {}) {
+async function centralDockerContainersPayload() {
+  if (!(await commandExists('docker'))) return [];
+  try {
+    const out = await run('docker', ['ps', '-a', '--format', '{{json .}}'], { timeout: 20_000, maxBuffer: 1024 * 1024 * 5 });
+    return out.stdout
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map(line => {
+        try {
+          const row = JSON.parse(line);
+          const image = row.Image || '';
+          const imageTag = image.includes(':') ? image.split(':').at(-1) : '';
+          return {
+            name: row.Names || '',
+            status: row.State || 'unknown',
+            detail: row.Status || '',
+            image,
+            imageTag,
+            imageId: String(row.ID || '').replace(/^sha256:/, '').slice(0, 12),
+            version: imageTag || ''
+          };
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+async function centralServicesPayload(payload = {}) {
   const apps = Array.isArray(payload.apps) ? payload.apps : [];
+  const appContainerNames = new Set(apps.flatMap(app => Array.isArray(app.containers) ? app.containers.map(container => container.name || '') : []));
+  const containers = (await centralDockerContainersPayload()).filter(container => container.name && !appContainerNames.has(container.name));
   return {
     platform: 'linux-docker',
     collectedAt: new Date().toISOString(),
@@ -5077,7 +5110,8 @@ function centralServicesPayload(payload = {}) {
             revision: container.revision || ''
           }))
         : []
-    }))
+    })),
+    containers
   };
 }
 
@@ -5101,7 +5135,7 @@ async function centralHeartbeat(token, payload) {
         vip: payload.cluster?.vip || null
       },
       backups: payload.backups || {},
-      services: centralServicesPayload(payload),
+      services: await centralServicesPayload(payload),
       metrics: {
         systemMetrics: centralSystemMetricsPayload(payload),
         hostUptimeSeconds: payload.hostUptimeSeconds ?? null
