@@ -5084,12 +5084,23 @@ async function centralDockerContainersPayload() {
 }
 
 async function centralServicesPayload(payload = {}) {
-  const apps = Array.isArray(payload.apps) ? payload.apps : [];
+  let apps = Array.isArray(payload.apps) ? payload.apps : [];
+  let detail = '';
+  if (!apps.length) {
+    try {
+      apps = await appsStatus();
+      detail = 'Inventario coletado por fallback direto dos apps gerenciados.';
+    } catch (err) {
+      detail = `Falha ao coletar apps gerenciados: ${err.message || err}`;
+      apps = [];
+    }
+  }
   const appContainerNames = new Set(apps.flatMap(app => Array.isArray(app.containers) ? app.containers.map(container => container.name || '') : []));
   const containers = (await centralDockerContainersPayload()).filter(container => container.name && !appContainerNames.has(container.name));
   return {
     platform: 'linux-docker',
     collectedAt: new Date().toISOString(),
+    detail,
     apps: apps.map(app => ({
       name: app.name || '',
       title: app.title || app.name || '',
