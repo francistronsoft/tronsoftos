@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import dns from 'node:dns/promises';
 import { fileURLToPath } from 'node:url';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -2075,6 +2076,10 @@ async function commandExists(command) {
   } catch {
     return false;
   }
+}
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function parseJsonLines(text) {
@@ -5052,6 +5057,137 @@ function centralSystemMetricsPayload(payload = {}) {
   };
 }
 
+function readInterfaceCounters(interfaceName = '') {
+  const safeName = String(interfaceName || '').replace(/[^a-zA-Z0-9_.:-]/g, '');
+  if (!safeName) return null;
+  const basePath = path.join('/sys/class/net', safeName);
+  const readNumber = (fileName) => {
+    try {
+      const value = Number(fs.readFileSync(path.join(basePath, 'statistics', fileName), 'utf8').trim());
+      return Number.isFinite(value) ? value : 0;
+    } catch {
+      return 0;
+    }
+  };
+  const readSpeed = () => {
+    try {
+      const value = Number(fs.readFileSync(path.join(basePath, 'speed'), 'utf8').trim());
+      return Number.isFinite(value) && value > 0 ? value : null;
+    } catch {
+      return null;
+    }
+  };
+  return {
+    interface: safeName,
+    rxBytes: readNumber('rx_bytes'),
+    txBytes: readNumber('tx_bytes'),
+    rxErrors: readNumber('rx_errors'),
+    txErrors: readNumber('tx_errors'),
+    rxDropped: readNumber('rx_dropped'),
+    txDropped: readNumber('tx_dropped'),
+    linkSpeedMbps: readSpeed()
+  };
+}
+
+function counterRate(after = {}, before = {}, key = '', seconds = 1) {
+  const delta = Number(after[key]) - Number(before[key]);
+  return Number.isFinite(delta) && delta >= 0 ? delta / Math.max(seconds, 0.001) : 0;
+}
+
+function parsePingSummary(stdout = '') {
+  const loss = stdout.match(/(\d+(?:[.,]\d+)?)%\s*packet loss/i);
+  const rtt = stdout.match(/(?:rtt|round-trip).*?=\s*([\d.]+)\/([\d.]+)\/([\d.]+)\/([\d.]+)/i);
+  return {
+    packetLossPercent: loss ? Number(loss[1].replace(',', '.')) : null,
+    latencyMs: rtt ? Number(rtt[2]) : null,
+    jitterMs: rtt ? Number(rtt[4]) : null
+  };
+}
+
+async function pingProbe(target = '') {
+  const host = String(target || '').trim();
+  if (!host || !(await commandExists('ping'))) return null;
+  try {
+    const out = await run('ping', ['-c', '3', '-W', '2', host], { timeout: 8000, maxBuffer: 1024 * 64 });
+    return { target: host, reachable: true, ...parsePingSummary(out.stdout) };
+  } catch (err) {
+    return { target: host, reachable: false, ...parsePingSummary(`${err.stdout || ''}\n${err.stderr || ''}`) };
+  }
+}
+
+async function dnsProbe(hostname = '') {
+  const target = String(hostname || '').trim();
+  if (!target) return null;
+  const startedAt = Date.now();
+  try {
+    await Promise.race([
+      dns.lookup(target),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000))
+    ]);
+    return { ok: true, dnsLatencyMs: Date.now() - startedAt };
+  } catch {
+    return { ok: false, dnsLatencyMs: Date.now() - startedAt };
+  }
+}
+
+async function centralNetworkMetricsPayload() {
+  const collectedAt = new Date().toISOString();
+  const network = await hostNetworkStatus().catch(() => ({}));
+  const interfaceName = network.defaultInterface || network.interfaces?.find(item => item.name && item.name !== 'lo')?.name || null;
+  const before = readInterfaceCounters(interfaceName);
+  await delay(1000);
+  const after = readInterfaceCounters(interfaceName);
+  const sampleSeconds = 1;
+  const centralHost = (() => {
+    try {
+      return new URL(centralBaseUrl()).hostname;
+    } catch {
+      return '';
+    }
+  })();
+  const internetProbeTarget = process.env.TRONSOFTOS_NETWORK_PROBE_HOST || '1.1.1.1';
+  const [gatewayProbe, internetProbe, centralProbe, dnsResult] = await Promise.all([
+    network.gateway ? pingProbe(network.gateway) : Promise.resolve(null),
+    pingProbe(internetProbeTarget),
+    centralHost ? pingProbe(centralHost) : Promise.resolve(null),
+    dnsProbe(centralHost || 'central.tronsoft.app.br')
+  ]);
+  const rxBytesPerSecond = before && after ? counterRate(after, before, 'rxBytes', sampleSeconds) : null;
+  const txBytesPerSecond = before && after ? counterRate(after, before, 'txBytes', sampleSeconds) : null;
+  const rxErrorsPerSecond = before && after ? counterRate(after, before, 'rxErrors', sampleSeconds) : null;
+  const txErrorsPerSecond = before && after ? counterRate(after, before, 'txErrors', sampleSeconds) : null;
+  const rxDroppedPerSecond = before && after ? counterRate(after, before, 'rxDropped', sampleSeconds) : null;
+  const txDroppedPerSecond = before && after ? counterRate(after, before, 'txDropped', sampleSeconds) : null;
+  const linkSpeedMbps = after?.linkSpeedMbps || before?.linkSpeedMbps || null;
+  const linkUtilizationPercent = linkSpeedMbps && rxBytesPerSecond !== null && txBytesPerSecond !== null
+    ? Math.min(100, ((rxBytesPerSecond + txBytesPerSecond) * 8 / (linkSpeedMbps * 1_000_000)) * 100)
+    : null;
+  return {
+    collectedAt,
+    interface: interfaceName,
+    gateway: network.gateway || null,
+    dnsServers: Array.isArray(network.dns) ? network.dns : [],
+    rxBytesPerSecond,
+    txBytesPerSecond,
+    latencyMs: internetProbe?.latencyMs ?? centralProbe?.latencyMs ?? null,
+    packetLossPercent: internetProbe?.packetLossPercent ?? centralProbe?.packetLossPercent ?? null,
+    jitterMs: internetProbe?.jitterMs ?? centralProbe?.jitterMs ?? null,
+    gatewayLatencyMs: gatewayProbe?.latencyMs ?? null,
+    gatewayPacketLossPercent: gatewayProbe?.packetLossPercent ?? null,
+    dnsLatencyMs: dnsResult?.dnsLatencyMs ?? null,
+    centralLatencyMs: centralProbe?.latencyMs ?? null,
+    linkSpeedMbps,
+    linkUtilizationPercent,
+    rxErrorsPerSecond,
+    txErrorsPerSecond,
+    rxDroppedPerSecond,
+    txDroppedPerSecond,
+    gatewayReachable: gatewayProbe?.reachable ?? null,
+    internetReachable: internetProbe?.reachable ?? null,
+    centralReachable: centralProbe?.reachable ?? null
+  };
+}
+
 async function centralDockerContainersPayload() {
   if (!(await commandExists('docker'))) return [];
   try {
@@ -5127,6 +5263,7 @@ async function centralServicesPayload(payload = {}) {
 }
 
 async function centralHeartbeat(token, payload) {
+  const networkMetrics = await centralNetworkMetricsPayload();
   return centralRequest('/api/tronsoftos/heartbeat', {
     method: 'POST',
     token,
@@ -5149,6 +5286,7 @@ async function centralHeartbeat(token, payload) {
       services: await centralServicesPayload(payload),
       metrics: {
         systemMetrics: centralSystemMetricsPayload(payload),
+        network: networkMetrics,
         hostUptimeSeconds: payload.hostUptimeSeconds ?? null
       },
       alerts: (payload.alerts || []).map(alert => {
