@@ -83,6 +83,7 @@ O painel fica disponível em:
 
 ```text
 http://IP-DO-SERVIDOR:8080
+http://IP-DO-SERVIDOR/tronsoft
 ```
 
 Durante o desenvolvimento local do painel:

@@ -120,6 +120,7 @@ Para instalacao HA:
 
 ```text
 http://IP_REAL:8080
+http://IP_REAL/tronsoft
 ```
 
 Durante a instalacao e pareamento HA, acesse sempre pelo IP real do host que esta sendo configurado, seja primary ou standby. Use o VIP somente depois que os dois nos estiverem instalados, pareados e com Keepalived validado.
@@ -128,6 +129,7 @@ Em HA, depois de configurar e validar o VIP:
 
 ```text
 http://VIP:8080
+http://VIP/tronsoft
 ```
 
 ## Configuracao Inicial HA

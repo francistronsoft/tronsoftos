@@ -15,6 +15,8 @@ const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = process.env.TRONSOFTOS_APP_DIR || path.resolve(__dirname, '../..');
 const port = Number(process.env.TRONSOFTOS_PORT || 8080);
+const friendlyPort = Number(process.env.TRONSOFTOS_FRIENDLY_PORT || 80);
+const friendlyPath = normalizeBasePath(process.env.TRONSOFTOS_FRIENDLY_PATH || '/tronsoft');
 const configPath = process.env.MANAGED_APPS_CONFIG || path.join(appRoot, 'config/managed-apps.json');
 const fallbackConfigPath = path.join(appRoot, 'config/managed-apps.example.json');
 const stateDir = process.env.TRONSOFTOS_STATE_DIR || path.join(appRoot, 'state');
@@ -69,6 +71,12 @@ const centralAlertStates = new Map(Object.entries(readJson(centralAlertStatePath
 let centralAgentTimer = null;
 let centralAgentInFlight = false;
 let centralDatabaseInfoCache = { checkedAt: 0, value: null };
+
+function normalizeBasePath(value) {
+  const text = String(value || '').trim();
+  if (!text || text === '/') return '';
+  return `/${text.replace(/^\/+|\/+$/g, '')}`;
+}
 
 function maskSecretValue(value) {
   const text = String(value ?? '');
@@ -5395,9 +5403,12 @@ function contentTypeFor(filePath) {
   }[ext] || 'application/octet-stream';
 }
 
-function serveStatic(req, reply) {
+function serveStatic(req, reply, basePath = '') {
   const url = new URL(req.url, 'http://localhost');
-  const requested = url.pathname === '/' ? '/index.html' : url.pathname;
+  const pathname = basePath && (url.pathname === basePath || url.pathname.startsWith(`${basePath}/`))
+    ? url.pathname.slice(basePath.length) || '/'
+    : url.pathname;
+  const requested = pathname === '/' ? '/index.html' : pathname;
   const filePath = path.resolve(frontendDist, `.${requested}`);
   const safeRoot = path.resolve(frontendDist);
   const finalPath = filePath.startsWith(safeRoot) && fs.existsSync(filePath) && fs.statSync(filePath).isFile()
@@ -5406,6 +5417,10 @@ function serveStatic(req, reply) {
   if (!fs.existsSync(finalPath)) return json(reply, 404, { error: 'frontend not built' });
   reply.writeHead(200, { 'content-type': contentTypeFor(finalPath) });
   fs.createReadStream(finalPath).pipe(reply);
+}
+
+function isFrontendAssetPath(pathname) {
+  return pathname === '/favicon.svg' || pathname === '/manifest.webmanifest' || pathname.startsWith('/assets/');
 }
 
 function tronfireProxyTarget() {
@@ -5621,9 +5636,23 @@ async function handleApi(req, reply, url) {
   return json(reply, 404, { error: 'not found' });
 }
 
-const server = http.createServer(async (req, reply) => {
+async function handleHttpRequest(req, reply, options = {}) {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    if (friendlyPath && url.pathname === friendlyPath) {
+      reply.writeHead(302, { location: `${friendlyPath}/` });
+      return reply.end();
+    }
+    if (friendlyPath && url.pathname.startsWith(`${friendlyPath}/`)) {
+      return serveStatic(req, reply, friendlyPath);
+    }
+    if (options.friendly && url.pathname === '/') {
+      reply.writeHead(302, { location: friendlyPath ? `${friendlyPath}/` : `http://${url.hostname}:${port}/` });
+      return reply.end();
+    }
+    if (options.friendly && isFrontendAssetPath(url.pathname)) {
+      return serveStatic(req, reply);
+    }
     if (url.pathname === '/tronfire') {
       reply.writeHead(302, { location: '/tronfire/' });
       return reply.end();
@@ -5631,7 +5660,7 @@ const server = http.createServer(async (req, reply) => {
     if (url.pathname.startsWith('/tronfire/')) {
       if (!sessionFromRequest(req)) {
         if (req.method === 'GET' && String(req.headers.accept || '').includes('text/html')) {
-          reply.writeHead(302, { location: '/' });
+          reply.writeHead(302, { location: friendlyPath && options.friendly ? `${friendlyPath}/` : '/' });
           return reply.end();
         }
         return json(reply, 401, { error: 'UNAUTHORIZED' });
@@ -5649,13 +5678,35 @@ const server = http.createServer(async (req, reply) => {
       : err.message || 'internal error';
     return json(reply, status, { error: message });
   }
-});
+}
+
+const server = http.createServer((req, reply) => handleHttpRequest(req, reply));
+
+let friendlyServer = null;
+if (friendlyPort && friendlyPort !== port && friendlyPath) {
+  friendlyServer = http.createServer((req, reply) => handleHttpRequest(req, reply, { friendly: true }));
+  friendlyServer.on('error', err => {
+    const reason = err.code === 'EACCES'
+      ? `permissao insuficiente para abrir a porta ${friendlyPort}`
+      : err.code === 'EADDRINUSE'
+        ? `porta ${friendlyPort} ja esta em uso`
+        : err.message;
+    appendEvent('TRONSOFTOS_FRIENDLY_PORT_SKIPPED', { port: friendlyPort, path: friendlyPath, reason });
+    console.warn(`Acesso amigavel desativado: ${reason}`);
+  });
+}
 
 server.listen(port, '0.0.0.0', () => {
   ensureStateDir();
   startHaSyncScheduler();
   startHaFailoverWatchdog();
   startCentralAgent();
-  appendEvent('TRONSOFTOS_STARTED', { port });
+  appendEvent('TRONSOFTOS_STARTED', { port, friendlyPort, friendlyPath });
   console.log(`TronSoftOS listening on 0.0.0.0:${port}`);
+  if (friendlyServer) {
+    friendlyServer.listen(friendlyPort, '0.0.0.0', () => {
+      appendEvent('TRONSOFTOS_FRIENDLY_PORT_STARTED', { port: friendlyPort, path: friendlyPath });
+      console.log(`TronSoftOS friendly access listening on 0.0.0.0:${friendlyPort}${friendlyPath}`);
+    });
+  }
 });

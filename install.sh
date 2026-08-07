@@ -402,6 +402,7 @@ ACCESS_PORT="${ACCESS_PORT:-8080}"
 ACCESS_HOST="${ACCESS_HOST:-IP-DO-SERVIDOR}"
 echo "Configuracoes finais podem ser feitas pelo painel TronSoftOS."
 echo "Acesse este host pelo IP real: http://$ACCESS_HOST:$ACCESS_PORT"
+echo "Atalho no navegador, quando a porta 80 estiver livre: http://$ACCESS_HOST/tronsoft"
 if [ "$(env_value "$ENV_FILE" "TRONSOFTOS_DEPLOYMENT_MODE")" = "ha" ]; then
   echo "Em HA, use o VIP somente depois de instalar/parear primary e standby e validar o Keepalived."
 fi
