@@ -12,6 +12,19 @@ NODE_ROLE="${TRONFIRE_NODE_ROLE:-${TRONSOFTOS_NODE_ROLE:-primary}}"
 UPLOAD_ONLY_ROLE="${RCLONE_UPLOAD_ONLY_ROLE:-primary}"
 LOG_DIR="${TRONSOFTOS_LOG_DIR:-/opt/tronsoftos/logs}/rclone"
 RCLONE_SETTINGS="${TRONSOFTOS_RCLONE_SETTINGS:-${TRONSOFTOS_STATE_DIR:-/opt/tronsoftos/state}/rclone-settings.json}"
+RCLONE_CONFIG_OWNER="${RCLONE_CONFIG_OWNER:-tronsoftos:tronsoftos}"
+
+fix_rclone_config_permissions() {
+  [ "$(id -u)" = "0" ] || return 0
+  [ -n "${RCLONE_CONFIG:-}" ] || return 0
+  [ -f "$RCLONE_CONFIG" ] || return 0
+  case "$RCLONE_CONFIG" in
+    /opt/tronsoftos/config/rclone/*)
+      chown "$RCLONE_CONFIG_OWNER" "$RCLONE_CONFIG" 2>/dev/null || true
+      chmod 600 "$RCLONE_CONFIG" 2>/dev/null || true
+      ;;
+  esac
+}
 
 if [ -f "$RCLONE_SETTINGS" ] && command -v node >/dev/null 2>&1; then
   eval "$(node - "$RCLONE_SETTINGS" <<'NODE'
@@ -50,6 +63,7 @@ if [ -z "${RCLONE_REMOTE:-}" ]; then
 fi
 
 mkdir -p "$LOG_DIR"
+fix_rclone_config_permissions
 case "${RCLONE_REMOTE_RETENTION_DAYS:-30}" in
   ''|*[!0-9]*) RCLONE_REMOTE_RETENTION_DAYS=30 ;;
 esac
@@ -87,3 +101,5 @@ fi
   --filter "- *" \
   --log-file "$LOG_DIR/upload.log" \
   --log-level INFO
+
+fix_rclone_config_permissions
