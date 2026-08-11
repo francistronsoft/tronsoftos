@@ -54,18 +54,6 @@ case "${RCLONE_REMOTE_RETENTION_DAYS:-30}" in
   ''|*[!0-9]*) RCLONE_REMOTE_RETENTION_DAYS=30 ;;
 esac
 
-"$RCLONE_BIN" copy "$FIREBIRD_BACKUP_DIR" "${RCLONE_REMOTE}:${RCLONE_BACKUP_PATH}" \
-  --bind "$RCLONE_BIND" \
-  --config "$RCLONE_CONFIG" \
-  --filter "+ *.gbk" \
-  --filter "+ *.fbk" \
-  --filter "+ *.gbk.gz" \
-  --filter "+ *.fbk.gz" \
-  --filter "+ *.manifest.json" \
-  --filter "- *" \
-  --log-file "$LOG_DIR/upload.log" \
-  --log-level INFO
-
 if [ "${RCLONE_REMOTE_RETENTION_DAYS:-0}" -gt 0 ]; then
   "$RCLONE_BIN" delete "${RCLONE_REMOTE}:${RCLONE_BACKUP_PATH}" \
     --bind "$RCLONE_BIND" \
@@ -81,3 +69,21 @@ if [ "${RCLONE_REMOTE_RETENTION_DAYS:-0}" -gt 0 ]; then
     --log-file "$LOG_DIR/retention.log" \
     --log-level INFO
 fi
+
+copy_age_args=()
+if [ "${RCLONE_REMOTE_RETENTION_DAYS:-0}" -gt 0 ]; then
+  copy_age_args=(--max-age "${RCLONE_REMOTE_RETENTION_DAYS}d")
+fi
+
+"$RCLONE_BIN" copy "$FIREBIRD_BACKUP_DIR" "${RCLONE_REMOTE}:${RCLONE_BACKUP_PATH}" \
+  --bind "$RCLONE_BIND" \
+  --config "$RCLONE_CONFIG" \
+  "${copy_age_args[@]}" \
+  --filter "+ *.gbk" \
+  --filter "+ *.fbk" \
+  --filter "+ *.gbk.gz" \
+  --filter "+ *.fbk.gz" \
+  --filter "+ *.manifest.json" \
+  --filter "- *" \
+  --log-file "$LOG_DIR/upload.log" \
+  --log-level INFO
