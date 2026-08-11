@@ -2422,6 +2422,7 @@ async function tronfireAlerts() {
       source: 'TronFire',
       severity: String(alert.severity || 'warning').toLowerCase(),
       message: alert.message || alert.type || 'Alerta TronFire',
+      code: alert.type || null,
       type: alert.type || null,
       createdAt: alert.createdAt || null,
       details: alert.details || null

@@ -28,6 +28,7 @@ const BACKUP_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BAC
 const BACKUP_VALIDATION_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_TIMEOUT_MINUTES, BACKUP_TIMEOUT_MINUTES, 30, 1440);
 const ORPHANED_BACKUP_MIN_AGE_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_ORPHANED_MIN_AGE_MINUTES, 5, 1, 60);
 const FIREBIRD_SESSION_RETENTION_DAYS = 30;
+const FIREBIRD_UNRESPONSIVE_FAILURE_THRESHOLD = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_UNRESPONSIVE_FAILURES, 2, 1, 10);
 const CONFIGURED_RUNNING_BACKUP_TTL_MINUTES = Number(process.env.TRONFIRE_BACKUP_RUNNING_TTL_MINUTES || 360);
 const RUNNING_BACKUP_TTL_MINUTES = Number.isFinite(CONFIGURED_RUNNING_BACKUP_TTL_MINUTES)
   ? Math.max(CONFIGURED_RUNNING_BACKUP_TTL_MINUTES, 30)
@@ -46,6 +47,7 @@ const METRIC_CONTAINERS = [
 ].filter(name => FIREBIRD_EXEC_MODE === 'container' || name !== FIREBIRD_CONTAINER);
 let backupRunning = false;
 let sessionCollectionRunning = false;
+const firebirdSessionFailureCounts = new Map();
 
 function normalizePositiveMinutes(value, fallback, min = 1, max = 10080) {
   const number = Number(value);
@@ -202,8 +204,9 @@ async function queryFirebirdSessions(db) {
 async function collectFirebirdSessionHistory() {
   if (!isServingProductionNode() || sessionCollectionRunning) return;
   sessionCollectionRunning = true;
+  let db = null;
   try {
-    const db = await prisma.managedDatabase.findFirst({
+    db = await prisma.managedDatabase.findFirst({
       where: {
         type: { not: 'ARQUIVADO' },
         OR: [{ isPrimary: true }, { type: 'PRODUCAO' }]
@@ -269,8 +272,21 @@ async function collectFirebirdSessionHistory() {
       prisma.firebirdConnectionSnapshot.deleteMany({ where: { collectedAt: { lt: cutoff } } }),
       prisma.firebirdSession.deleteMany({ where: { lastSeenAt: { lt: cutoff } } })
     ]);
+    firebirdSessionFailureCounts.delete(db.id);
+    await resolveActiveAlertsByType(`FIREBIRD_UNRESPONSIVE_${db.alias}`);
   } catch (err) {
     console.error('[worker] firebird session history error', err.message);
+    if (db?.id && db?.alias) {
+      const failures = (firebirdSessionFailureCounts.get(db.id) || 0) + 1;
+      firebirdSessionFailureCounts.set(db.id, failures);
+      if (failures >= FIREBIRD_UNRESPONSIVE_FAILURE_THRESHOLD) {
+        await createAlertOnce(
+          `FIREBIRD_UNRESPONSIVE_${db.alias}`,
+          'CRITICAL',
+          `Firebird sem resposta: ${db.name} (${firebirdConnectionFailureMessage(err)})`
+        );
+      }
+    }
   } finally {
     sessionCollectionRunning = false;
   }
@@ -456,6 +472,21 @@ async function createAlertOnce(type, severity, message) {
   if (!existing) {
     await prisma.alert.create({ data: { type, severity, message } });
   }
+}
+
+async function resolveActiveAlertsByType(type) {
+  await prisma.alert.updateMany({
+    where: { type, resolved: false },
+    data: { resolved: true, resolvedAt: new Date() }
+  });
+}
+
+function firebirdConnectionFailureMessage(err) {
+  const message = String(err?.message || err || '').toLowerCase();
+  if (message.includes('timeout') || message.includes('errno = 110') || message.includes('timed out')) return 'timeout de conexao';
+  if (message.includes('connection refused') || message.includes('errno = 111')) return 'conexao recusada';
+  if (message.includes('unavailable') || message.includes('unable to complete network request')) return 'falha de conexao';
+  return 'consulta de monitoramento falhou';
 }
 
 async function backupToolProcesses() {
