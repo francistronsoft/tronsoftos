@@ -10,7 +10,6 @@ Group=tronsoftos
 WorkingDirectory=/opt/tronsoftos
 EnvironmentFile=-/etc/tronsoftos/tronsoftos.env
 AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=false
 PermissionsStartOnly=true
 ExecStartPre=/bin/mkdir -p /opt/tronsoftos/state /opt/tronsoftos/logs /opt/tronsoftos/config /opt/tronsoftos/config/rclone
