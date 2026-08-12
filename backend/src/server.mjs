@@ -4804,6 +4804,26 @@ async function centralDatabaseInfoFromTronFire() {
     clearTimeout(timeout);
     if (!response.ok) return centralDatabaseInfoCache.value || null;
     const payload = await response.json();
+    const databases = Array.isArray(payload.databases)
+      ? payload.databases.map(db => ({
+          id: db.id || null,
+          name: db.name || db.databaseName || null,
+          alias: db.alias || db.databaseAlias || null,
+          databaseName: db.databaseName || db.name || null,
+          databaseAlias: db.databaseAlias || db.alias || null,
+          pathRole: db.pathRole || null,
+          ok: db.ok !== false,
+          version: String(db.version || db.schemaVersion || db.versaoBanco || '').trim(),
+          schemaVersion: String(db.schemaVersion || db.versaoBanco || db.version || '').trim(),
+          versaoBanco: String(db.versaoBanco || db.schemaVersion || db.version || '').trim(),
+          licensedUnit: db.licensedUnit || null,
+          fileSizeBytes: db.fileSizeBytes ?? null,
+          sizeMb: db.sizeMb ?? null,
+          error: db.error || '',
+          indexHealth: db.indexHealth || null,
+          indexAudit: db.indexAudit || null
+        }))
+      : [];
     const value = {
       version: String(payload.version || '').trim(),
       databaseName: payload.databaseName || null,
@@ -4811,9 +4831,10 @@ async function centralDatabaseInfoFromTronFire() {
       fileSizeBytes: payload.fileSizeBytes ?? null,
       sizeMb: payload.sizeMb ?? null,
       indexHealth: payload.indexHealth || null,
-      indexAudit: payload.indexAudit || null
+      indexAudit: payload.indexAudit || null,
+      databases
     };
-    if (value.version || value.fileSizeBytes || value.indexHealth || value.indexAudit) {
+    if (value.version || value.fileSizeBytes || value.indexHealth || value.indexAudit || value.databases.length) {
       centralDatabaseInfoCache = { checkedAt: Date.now(), value };
     }
     return value;
@@ -4844,7 +4865,8 @@ async function centralDatabasePayload() {
     databaseName: tronfireDatabase?.databaseName || null,
     databaseAlias: tronfireDatabase?.databaseAlias || null,
     indexHealth: tronfireDatabase?.indexHealth || null,
-    indexAudit: tronfireDatabase?.indexAudit || null
+    indexAudit: tronfireDatabase?.indexAudit || null,
+    databases: Array.isArray(tronfireDatabase?.databases) ? tronfireDatabase.databases : []
   };
 }
 

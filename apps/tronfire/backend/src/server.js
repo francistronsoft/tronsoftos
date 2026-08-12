@@ -1578,21 +1578,63 @@ app.get('/api/internal/company-identity', async (req) => {
 app.get('/api/internal/database-version', async (req) => {
   assertInternalTronsoftos(req);
   const databases = await databaseDiagnostics();
-  const database = databases.find(db => db.pathRole === 'production' && db.version && db.version !== 'Erro')
-    || databases.find(db => db.version && db.version !== 'Erro')
+  const activeDatabases = await prisma.managedDatabase.findMany({
+    where: { type: { not: 'ARQUIVADO' } },
+    orderBy: [{ isPrimary: 'desc' }, { name: 'asc' }]
+  });
+  const managedById = new Map(activeDatabases.map(db => [db.id, db]));
+  const databasesWithHealth = [];
+  for (const database of databases) {
+    const managedDatabase = managedById.get(database.id) || null;
+    let indexHealth = null;
+    if (managedDatabase) {
+      try {
+        indexHealth = await indexHealthForDatabase(managedDatabase);
+      } catch (err) {
+        indexHealth = {
+          databaseId: managedDatabase.id,
+          databaseName: managedDatabase.name,
+          databaseAlias: managedDatabase.alias,
+          total: null,
+          checkedAt: new Date().toISOString(),
+          error: shellErrorText(err)
+        };
+      }
+    }
+    const indexAudit = indexHealth ? indexAuditFromHealth(indexHealth) : null;
+    databasesWithHealth.push({
+      id: database.id || managedDatabase?.id || null,
+      name: database.name || managedDatabase?.name || null,
+      alias: database.alias || managedDatabase?.alias || null,
+      databaseName: database.name || managedDatabase?.name || null,
+      databaseAlias: database.alias || managedDatabase?.alias || null,
+      pathRole: database.pathRole || null,
+      ok: database.ok !== false,
+      version: database.version || null,
+      schemaVersion: database.version || null,
+      versaoBanco: database.version || null,
+      licensedUnit: database.licensedUnit || null,
+      fileSizeBytes: database.fileSizeBytes ?? null,
+      sizeMb: database.fileSizeBytes ? Math.round((Number(database.fileSizeBytes) / 1024 / 1024) * 10) / 10 : null,
+      error: database.error || '',
+      indexHealth,
+      indexAudit
+    });
+  }
+  const database = databasesWithHealth.find(db => db.pathRole === 'production' && db.version && db.version !== 'Erro')
+    || databasesWithHealth.find(db => db.version && db.version !== 'Erro')
+    || databasesWithHealth[0]
     || null;
-  const managedDatabase = database?.id
-    ? await prisma.managedDatabase.findUnique({ where: { id: database.id } }).catch(() => null)
-    : null;
-  let indexHealth = null;
-  if (managedDatabase) {
+  let indexHealth = database?.indexHealth || null;
+  if (!indexHealth && database?.id) {
     try {
-      indexHealth = await indexHealthForDatabase(managedDatabase);
+      const managedDatabase = managedById.get(database.id);
+      if (managedDatabase) indexHealth = await indexHealthForDatabase(managedDatabase);
     } catch (err) {
       indexHealth = {
-        databaseId: managedDatabase.id,
-        databaseName: managedDatabase.name,
-        databaseAlias: managedDatabase.alias,
+        databaseId: database.id,
+        databaseName: database.name,
+        databaseAlias: database.alias,
         total: null,
         checkedAt: new Date().toISOString(),
         error: shellErrorText(err)
@@ -1607,7 +1649,8 @@ app.get('/api/internal/database-version', async (req) => {
     fileSizeBytes: database?.fileSizeBytes ?? null,
     sizeMb: database?.fileSizeBytes ? Math.round((Number(database.fileSizeBytes) / 1024 / 1024) * 10) / 10 : null,
     indexHealth,
-    indexAudit
+    indexAudit,
+    databases: databasesWithHealth
   };
 });
 
