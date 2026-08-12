@@ -4810,9 +4810,10 @@ async function centralDatabaseInfoFromTronFire() {
       databaseAlias: payload.databaseAlias || null,
       fileSizeBytes: payload.fileSizeBytes ?? null,
       sizeMb: payload.sizeMb ?? null,
-      indexHealth: payload.indexHealth || null
+      indexHealth: payload.indexHealth || null,
+      indexAudit: payload.indexAudit || null
     };
-    if (value.version || value.fileSizeBytes || value.indexHealth) {
+    if (value.version || value.fileSizeBytes || value.indexHealth || value.indexAudit) {
       centralDatabaseInfoCache = { checkedAt: Date.now(), value };
     }
     return value;
@@ -4842,7 +4843,8 @@ async function centralDatabasePayload() {
     fileSizeBytes: tronfireDatabase?.fileSizeBytes ?? null,
     databaseName: tronfireDatabase?.databaseName || null,
     databaseAlias: tronfireDatabase?.databaseAlias || null,
-    indexHealth: tronfireDatabase?.indexHealth || null
+    indexHealth: tronfireDatabase?.indexHealth || null,
+    indexAudit: tronfireDatabase?.indexAudit || null
   };
 }
 

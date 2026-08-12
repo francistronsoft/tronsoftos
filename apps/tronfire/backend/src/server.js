@@ -113,6 +113,13 @@ function firebirdDbConnect(filePath) {
   return value;
 }
 
+function firebirdToolBin() {
+  if (firebirdExecMode === 'host' || firebirdExecMode === 'direct') {
+    return process.env.FIREBIRD_HOST_BIN || '/usr/local/firebird/bin';
+  }
+  return process.env.FIREBIRD_BIN || '/usr/local/firebird/bin';
+}
+
 function firebirdCreateTarget(filePath) {
   const value = String(filePath || '').trim();
   if (firebirdExecMode === 'host' || firebirdExecMode === 'direct') return value;
@@ -508,7 +515,7 @@ function parseFirebirdAttachments(stdout) {
 async function firebirdAttachmentsForDatabase(db) {
   const databasePath = effectiveDatabasePath(db);
   const connect = firebirdDbConnect(databasePath);
-  const firebirdBin = process.env.FIREBIRD_BIN || '/usr/local/firebird/bin';
+  const firebirdBin = firebirdToolBin();
   const password = process.env.FIREBIRD_PASSWORD || 'masterkey';
   const sql = [
     'SET HEADING OFF;',
@@ -652,20 +659,20 @@ async function databaseSizeTrend(db, currentSizeBytes) {
 async function indexHealthForDatabase(db) {
   const databasePath = effectiveDatabasePath(db);
   const connect = firebirdDbConnect(databasePath);
-  const firebirdBin = process.env.FIREBIRD_BIN || '/usr/local/firebird/bin';
+  const firebirdBin = firebirdToolBin();
   const password = process.env.FIREBIRD_PASSWORD || 'masterkey';
   const sql = [
     'SET HEADING OFF;',
     'SET LIST OFF;',
     'SELECT',
     "  'TRONIDX_TOTAL|' || COUNT(*) || '|' ||",
-    "  SUM(CASE WHEN COALESCE(RDB$INDEX_INACTIVE, 0) = 0 THEN 1 ELSE 0 END) || '|' ||",
-    "  SUM(CASE WHEN COALESCE(RDB$INDEX_INACTIVE, 0) = 1 THEN 1 ELSE 0 END)",
+    "  COALESCE(SUM(CASE WHEN COALESCE(RDB$INDEX_INACTIVE, 0) = 0 THEN 1 ELSE 0 END), 0) || '|' ||",
+    "  COALESCE(SUM(CASE WHEN COALESCE(RDB$INDEX_INACTIVE, 0) = 1 THEN 1 ELSE 0 END), 0)",
     'FROM RDB$INDICES;',
     'SELECT',
     "  'TRONIDX_USER_NON_CONSTRAINT|' || COUNT(*) || '|' ||",
-    "  SUM(CASE WHEN COALESCE(I.RDB$INDEX_INACTIVE, 0) = 0 THEN 1 ELSE 0 END) || '|' ||",
-    "  SUM(CASE WHEN COALESCE(I.RDB$INDEX_INACTIVE, 0) = 1 THEN 1 ELSE 0 END)",
+    "  COALESCE(SUM(CASE WHEN COALESCE(I.RDB$INDEX_INACTIVE, 0) = 0 THEN 1 ELSE 0 END), 0) || '|' ||",
+    "  COALESCE(SUM(CASE WHEN COALESCE(I.RDB$INDEX_INACTIVE, 0) = 1 THEN 1 ELSE 0 END), 0)",
     'FROM RDB$INDICES I',
     'WHERE COALESCE(I.RDB$SYSTEM_FLAG, 0) = 0',
     '  AND NOT EXISTS (',
@@ -675,8 +682,8 @@ async function indexHealthForDatabase(db) {
     '  );',
     'SELECT',
     "  'TRONIDX_TABLE|' || COALESCE(REPLACE(TRIM(RDB$RELATION_NAME), '|', '/'), '') || '|' || COUNT(*) || '|' ||",
-    "  SUM(CASE WHEN COALESCE(RDB$INDEX_INACTIVE, 0) = 0 THEN 1 ELSE 0 END) || '|' ||",
-    "  SUM(CASE WHEN COALESCE(RDB$INDEX_INACTIVE, 0) = 1 THEN 1 ELSE 0 END)",
+    "  COALESCE(SUM(CASE WHEN COALESCE(RDB$INDEX_INACTIVE, 0) = 0 THEN 1 ELSE 0 END), 0) || '|' ||",
+    "  COALESCE(SUM(CASE WHEN COALESCE(RDB$INDEX_INACTIVE, 0) = 1 THEN 1 ELSE 0 END), 0)",
     'FROM RDB$INDICES',
     'GROUP BY RDB$RELATION_NAME',
     'ORDER BY RDB$RELATION_NAME;',
@@ -719,6 +726,37 @@ async function indexHealthForDatabase(db) {
     sizeDropPercent: sizeTrend.sizeDropPercent,
     checkedAt,
     tables: summary.tables
+  };
+}
+
+function indexAuditFromHealth(health) {
+  const checkedAt = health?.checkedAt || new Date().toISOString();
+  if (!health || !Number.isFinite(Number(health.totalIndexes))) {
+    return {
+      status: 'unknown',
+      checkedAt,
+      error: health?.error || 'indices indisponiveis'
+    };
+  }
+  const inactiveNames = (health.tables || [])
+    .filter(table => Number(table.inactive || 0) > 0)
+    .map(table => `${table.tableName} (${table.inactive} inativo${Number(table.inactive) === 1 ? '' : 's'})`)
+    .slice(0, 200);
+  return {
+    status: Number(health.inactiveIndexes || 0) > 0 ? 'attention' : 'ok',
+    checkedAt,
+    totalIndexes: health.totalIndexes,
+    activeIndexes: health.activeIndexes,
+    inactiveIndexes: health.inactiveIndexes,
+    previousInactiveIndexes: null,
+    inactiveDelta: 0,
+    firstSnapshot: false,
+    previousCheckedAt: null,
+    newInactiveIndexes: [],
+    reactivatedIndexes: [],
+    inactiveIndexesSample: inactiveNames,
+    inactiveIndexesTruncated: (health.tables || []).filter(table => Number(table.inactive || 0) > 0).length > inactiveNames.length,
+    error: ''
   };
 }
 
@@ -1546,14 +1584,30 @@ app.get('/api/internal/database-version', async (req) => {
   const managedDatabase = database?.id
     ? await prisma.managedDatabase.findUnique({ where: { id: database.id } }).catch(() => null)
     : null;
-  const indexHealth = managedDatabase ? await indexHealthForDatabase(managedDatabase).catch(() => null) : null;
+  let indexHealth = null;
+  if (managedDatabase) {
+    try {
+      indexHealth = await indexHealthForDatabase(managedDatabase);
+    } catch (err) {
+      indexHealth = {
+        databaseId: managedDatabase.id,
+        databaseName: managedDatabase.name,
+        databaseAlias: managedDatabase.alias,
+        total: null,
+        checkedAt: new Date().toISOString(),
+        error: shellErrorText(err)
+      };
+    }
+  }
+  const indexAudit = indexHealth ? indexAuditFromHealth(indexHealth) : null;
   return {
     version: database?.version || null,
     databaseName: database?.name || null,
     databaseAlias: database?.alias || null,
     fileSizeBytes: database?.fileSizeBytes ?? null,
     sizeMb: database?.fileSizeBytes ? Math.round((Number(database.fileSizeBytes) / 1024 / 1024) * 10) / 10 : null,
-    indexHealth
+    indexHealth,
+    indexAudit
   };
 });
 
