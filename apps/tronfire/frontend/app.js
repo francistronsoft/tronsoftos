@@ -985,8 +985,9 @@ async function databases() {
     try {
       dbError.textContent = '';
       const isProduction = dbType.value === 'PRODUCAO';
+      const isPrimary = isProduction && !hasProductionDatabase;
       const alias = !hasProductionDatabase && isProduction ? 'ERP_TRONSOFT' : dbAlias.value;
-      await api('/api/databases', { method:'POST', body: JSON.stringify({ name: dbName.value, alias, type: dbType.value, isPrimary: isProduction, accessMode: dbType.value === 'LEGADO_CONSULTA' ? 'READ_ONLY':'READ_WRITE', backupEnabled: isProduction }) });
+      await api('/api/databases', { method:'POST', body: JSON.stringify({ name: dbName.value, alias, type: dbType.value, isPrimary, accessMode: dbType.value === 'LEGADO_CONSULTA' ? 'READ_ONLY':'READ_WRITE', backupEnabled: isProduction }) });
       databases();
     } catch (err) {
       dbError.textContent = err.message;
