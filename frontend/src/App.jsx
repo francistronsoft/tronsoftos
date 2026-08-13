@@ -1775,7 +1775,7 @@ function DriveView() {
   const [form, setForm] = useState(null);
   const values = form || {
     enabled: settings.enabled || false,
-    shareName: settings.shareName || 'tronsoftos-drive',
+    shareName: settings.shareName || 'tronsystem-drive',
     mountPath: settings.mountPath || '',
     directoryName: settings.directoryName || 'drive',
     quotaGb: settings.quotaGb || 0,
@@ -1880,12 +1880,12 @@ function DriveView() {
               onChange={value => setValue('enabled', value)}
               disabled={saveMutation.isPending}
             />
-            <Field label="Nome do compartilhamento" value={values.shareName} onChange={value => setValue('shareName', value)} placeholder="tronsoftos-drive" />
+            <Field label="Nome do compartilhamento" value={values.shareName} onChange={value => setValue('shareName', value)} placeholder="tronsystem-drive" />
             <Field label="Pasta no disco" value={values.directoryName} onChange={value => setValue('directoryName', value)} placeholder="drive" />
             <Field label="Cota em GB" type="number" value={values.quotaGb} onChange={value => setValue('quotaGb', value)} placeholder="0 sem cota" />
             <ToggleSwitch
               label="Publicar via Samba"
-              description="Apenas registra a preferencia nesta versao. A aplicacao automatica do Samba entra na proxima etapa."
+              description="Publica a pasta na rede local para acesso por IP do servidor."
               icon={Network}
               checked={values.sambaEnabled}
               onChange={value => setValue('sambaEnabled', value)}

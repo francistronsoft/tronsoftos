@@ -209,6 +209,7 @@ fi
 echo "Instalando pacotes base..."
 apt_get update
 apt_get install -y ca-certificates curl gnupg openssl rsync openssh-client openssh-server keepalived rclone nodejs npm sudo
+apt_get install -y samba samba-common-bin || echo "Aviso: samba nao foi instalado; compartilhamento via rede ficara indisponivel ate instalar o pacote samba." >&2
 install_docker
 
 echo "Criando usuario e diretorios..."

@@ -29,6 +29,14 @@ valid_app_dir() {
   [[ "$1" =~ ^/opt/[A-Za-z0-9._/-]+$ ]]
 }
 
+valid_share_name() {
+  [[ "$1" =~ ^[A-Za-z0-9_-]{3,40}$ ]]
+}
+
+valid_drive_path() {
+  [[ "$1" =~ ^/[^[:cntrl:]]+$ ]] && [[ "$1" != *".."* ]]
+}
+
 env_escape() {
   printf '%s' "$1" | sed 's/[\/&]/\\&/g'
 }
@@ -435,6 +443,68 @@ fix_rclone_permissions() {
   printf '{"ok":true,"path":"%s"}\n' "$(json_escape "$app_dir/config/rclone")"
 }
 
+drive_samba_remove_block() {
+  local conf="$1"
+  [ -f "$conf" ] || return 0
+  sed -i '/^# BEGIN TRONSYSTEM DRIVE SHARE$/,/^# END TRONSYSTEM DRIVE SHARE$/d' "$conf"
+}
+
+drive_samba() {
+  local share_path="${1:-}"
+  local share_name="${2:-tronsystem-drive}"
+  local smb_conf="/etc/samba/smb.conf"
+
+  valid_drive_path "$share_path" || fail "Caminho do compartilhamento invalido"
+  valid_share_name "$share_name" || fail "Nome do compartilhamento invalido"
+  [ -d "$share_path" ] || fail "Pasta do compartilhamento nao existe"
+  command -v smbd >/dev/null 2>&1 || fail "Samba nao instalado; atualize o TronSystem para instalar o pacote samba"
+
+  install -d -m 0755 /etc/samba
+  [ -f "$smb_conf" ] || printf '[global]\n   workgroup = WORKGROUP\n   server role = standalone server\n' > "$smb_conf"
+  chmod 0777 "$share_path" 2>/dev/null || true
+
+  drive_samba_remove_block "$smb_conf"
+  cat >> "$smb_conf" <<EOF
+# BEGIN TRONSYSTEM DRIVE SHARE
+[global]
+   map to guest = Bad User
+   usershare allow guests = yes
+
+[${share_name}]
+   path = ${share_path}
+   browseable = yes
+   read only = no
+   guest ok = yes
+   public = yes
+   force create mode = 0666
+   force directory mode = 0777
+# END TRONSYSTEM DRIVE SHARE
+EOF
+
+  if command -v testparm >/dev/null 2>&1; then
+    testparm -s "$smb_conf" >/dev/null
+  fi
+  systemctl enable smbd.service >/dev/null 2>&1 || true
+  systemctl restart smbd.service
+  if systemctl list-unit-files nmbd.service >/dev/null 2>&1; then
+    systemctl enable nmbd.service >/dev/null 2>&1 || true
+    systemctl restart nmbd.service >/dev/null 2>&1 || true
+  fi
+  printf '{"ok":true,"shareName":"%s","path":"%s"}\n' "$(json_escape "$share_name")" "$(json_escape "$share_path")"
+}
+
+drive_samba_disable() {
+  local smb_conf="/etc/samba/smb.conf"
+  drive_samba_remove_block "$smb_conf"
+  if command -v testparm >/dev/null 2>&1 && [ -f "$smb_conf" ]; then
+    testparm -s "$smb_conf" >/dev/null
+  fi
+  if systemctl list-unit-files smbd.service >/dev/null 2>&1; then
+    systemctl restart smbd.service >/dev/null 2>&1 || true
+  fi
+  printf '{"ok":true,"disabled":true}\n'
+}
+
 firebird_script() {
   local script_path="${1:-}"
   [[ "$script_path" =~ ^/tmp/tronsoftos-firebird-[A-Za-z0-9._-]+\.sh$ ]] || fail "Script Firebird invalido"
@@ -477,6 +547,14 @@ case "$action" in
   fix-rclone-permissions)
     shift
     fix_rclone_permissions "$@"
+    ;;
+  drive-samba)
+    shift
+    drive_samba "$@"
+    ;;
+  drive-samba-disable)
+    shift
+    drive_samba_disable "$@"
     ;;
   firebird-script)
     shift

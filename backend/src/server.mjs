@@ -1867,7 +1867,7 @@ const hiddenDriveFsTypes = new Set([
 function defaultDriveSettings() {
   return {
     enabled: false,
-    shareName: 'tronsoftos-drive',
+    shareName: 'tronsystem-drive',
     mountPath: '',
     directoryName: 'drive',
     path: '',
@@ -1886,9 +1886,12 @@ function publicDriveSettings(settings = readJson(driveSettingsPath, {})) {
   const merged = { ...defaultDriveSettings(), ...settings };
   const mountPath = merged.mountPath ? normalizeMountPath(merged.mountPath) : '';
   const directoryName = String(merged.directoryName || 'drive').trim() || 'drive';
+  const shareName = String(merged.shareName || 'tronsystem-drive') === 'tronsoftos-drive'
+    ? 'tronsystem-drive'
+    : String(merged.shareName || 'tronsystem-drive');
   return {
     enabled: !!merged.enabled,
-    shareName: String(merged.shareName || 'tronsoftos-drive'),
+    shareName,
     mountPath,
     directoryName,
     path: mountPath ? path.join(mountPath, directoryName) : String(merged.path || ''),
@@ -1989,7 +1992,7 @@ async function writeDriveSettings(body) {
   if (!selectedMount) throw Object.assign(new Error('Disco selecionado nao esta disponivel no servidor.'), { statusCode: 400 });
 
   const directoryName = safeDriveName(body.directoryName, 'drive');
-  const shareName = safeDriveName(body.shareName, 'tronsoftos-drive');
+  const shareName = safeDriveName(body.shareName, 'tronsystem-drive');
   const drivePath = path.resolve(path.join(mountPath, directoryName));
   const relative = path.relative(mountPath, drivePath);
   if (relative.startsWith('..') || path.isAbsolute(relative)) {
@@ -2015,7 +2018,21 @@ async function writeDriveSettings(body) {
   };
   ensureStateDir();
   fs.writeFileSync(driveSettingsPath, JSON.stringify(settings, null, 2));
-  appendEvent('DRIVE_SETTINGS_UPDATED', { mountPath, path: drivePath, shareName, enabled: settings.enabled });
+  let samba = null;
+  if (settings.sambaEnabled) {
+    const out = await privilegedRun('/usr/local/sbin/tronsoftos-network', ['drive-samba', drivePath, shareName], {
+      timeout: 120_000,
+      maxBuffer: 1024 * 1024 * 2
+    });
+    samba = parseJsonLinesBestEffort(out.stdout).at(-1) || { ok: true };
+  } else {
+    const out = await privilegedRun('/usr/local/sbin/tronsoftos-network', ['drive-samba-disable'], {
+      timeout: 60_000,
+      maxBuffer: 1024 * 1024
+    }).catch(err => ({ stdout: JSON.stringify({ ok: false, error: err.message }) }));
+    samba = parseJsonLinesBestEffort(out.stdout).at(-1) || { ok: true };
+  }
+  appendEvent('DRIVE_SETTINGS_UPDATED', { mountPath, path: drivePath, shareName, enabled: settings.enabled, sambaEnabled: settings.sambaEnabled, samba });
   return driveStatus();
 }
 
