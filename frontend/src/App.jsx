@@ -1779,7 +1779,10 @@ function DriveView() {
     mountPath: settings.mountPath || '',
     directoryName: settings.directoryName || 'drive',
     quotaGb: settings.quotaGb || 0,
-    sambaEnabled: settings.sambaEnabled || false
+    sambaEnabled: settings.sambaEnabled !== false,
+    sambaAuthMode: settings.sambaAuthMode || 'protected',
+    sambaUsername: settings.sambaUsername || 'tronsystem',
+    sambaPassword: ''
   };
   const selectedMount = mounts.find(item => item.target === values.mountPath) || drive.selectedMount || null;
   const setValue = (key, value) => setForm(previous => ({ ...(previous || values), [key]: value }));
@@ -1799,7 +1802,10 @@ function DriveView() {
         mountPath: data.settings.mountPath,
         directoryName: data.settings.directoryName,
         quotaGb: data.settings.quotaGb,
-        sambaEnabled: data.settings.sambaEnabled
+        sambaEnabled: data.settings.sambaEnabled,
+        sambaAuthMode: data.settings.sambaAuthMode || 'protected',
+        sambaUsername: data.settings.sambaUsername || 'tronsystem',
+        sambaPassword: ''
       });
       queryClient.invalidateQueries({ queryKey: ['drive-settings'] });
       queryClient.invalidateQueries({ queryKey: ['events'] });
@@ -1869,7 +1875,7 @@ function DriveView() {
             className="space-y-4 rounded-md border border-slate-200 bg-slate-50 p-4"
             onSubmit={event => {
               event.preventDefault();
-              saveMutation.mutate(values);
+              saveMutation.mutate({ ...values, keepSambaPassword: !values.sambaPassword });
             }}
           >
             <ToggleSwitch
@@ -1880,6 +1886,22 @@ function DriveView() {
               onChange={value => setValue('enabled', value)}
               disabled={saveMutation.isPending}
             />
+            <label className="block">
+              <span className="text-xs font-medium uppercase text-slate-500">Unidade/disco</span>
+              <select
+                value={values.mountPath}
+                onChange={event => setValue('mountPath', event.target.value)}
+                disabled={saveMutation.isPending || mounts.length === 0}
+                className="mt-1 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100 disabled:opacity-50"
+              >
+                <option value="">Selecione a unidade</option>
+                {mounts.map(mount => (
+                  <option key={`${mount.source}-${mount.target}`} value={mount.target}>
+                    {mount.target} - {formatBytes(mount.free)} livre de {formatBytes(mount.total)}
+                  </option>
+                ))}
+              </select>
+            </label>
             <Field label="Nome do compartilhamento" value={values.shareName} onChange={value => setValue('shareName', value)} placeholder="tronsystem-drive" />
             <Field label="Pasta no disco" value={values.directoryName} onChange={value => setValue('directoryName', value)} placeholder="drive" />
             <Field label="Cota em GB" type="number" value={values.quotaGb} onChange={value => setValue('quotaGb', value)} placeholder="0 sem cota" />
@@ -1891,6 +1913,33 @@ function DriveView() {
               onChange={value => setValue('sambaEnabled', value)}
               disabled={saveMutation.isPending}
             />
+            {values.sambaEnabled ? (
+              <div className="rounded-md border border-slate-200 bg-white p-3">
+                <div className="text-xs font-medium uppercase text-slate-500">Modo de acesso</div>
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  {[
+                    { id: 'protected', label: 'Protegido', detail: 'Exige usuario e senha.' },
+                    { id: 'public', label: 'Publico', detail: 'Permite acesso convidado.' }
+                  ].map(option => (
+                    <button
+                      key={option.id}
+                      type="button"
+                      onClick={() => setValue('sambaAuthMode', option.id)}
+                      className={`rounded-md border px-3 py-2 text-left text-sm transition ${values.sambaAuthMode === option.id ? 'border-slate-950 bg-slate-950 text-white' : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300'}`}
+                    >
+                      <div className="font-medium">{option.label}</div>
+                      <div className={`mt-0.5 text-xs ${values.sambaAuthMode === option.id ? 'text-slate-300' : 'text-slate-500'}`}>{option.detail}</div>
+                    </button>
+                  ))}
+                </div>
+                {values.sambaAuthMode !== 'public' ? (
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <Field label="Usuario Samba" value={values.sambaUsername} onChange={value => setValue('sambaUsername', value)} placeholder="tronsystem" autoComplete="username" />
+                    <Field label="Senha Samba" type="password" value={values.sambaPassword} onChange={value => setValue('sambaPassword', value)} placeholder={settings.sambaUsername ? 'manter senha atual' : 'minimo 8 caracteres'} autoComplete="new-password" />
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm">
               <div className="text-xs font-medium uppercase text-slate-500">Caminho previsto</div>
               <div className="mt-1 break-all font-medium text-slate-950">{projectedPath}</div>

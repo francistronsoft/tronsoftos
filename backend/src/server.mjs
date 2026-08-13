@@ -1872,7 +1872,9 @@ function defaultDriveSettings() {
     directoryName: 'drive',
     path: '',
     quotaGb: 0,
-    sambaEnabled: false,
+    sambaEnabled: true,
+    sambaAuthMode: 'protected',
+    sambaUsername: 'tronsystem',
     updatedAt: null
   };
 }
@@ -1897,6 +1899,8 @@ function publicDriveSettings(settings = readJson(driveSettingsPath, {})) {
     path: mountPath ? path.join(mountPath, directoryName) : String(merged.path || ''),
     quotaGb: Number(merged.quotaGb || 0),
     sambaEnabled: !!merged.sambaEnabled,
+    sambaAuthMode: merged.sambaAuthMode === 'public' ? 'public' : 'protected',
+    sambaUsername: String(merged.sambaUsername || 'tronsystem'),
     updatedAt: merged.updatedAt || null
   };
 }
@@ -1982,6 +1986,34 @@ function safeDriveName(value, fallback) {
   return normalized;
 }
 
+function safeSambaUsername(value) {
+  const normalized = String(value || 'tronsystem').trim().toLowerCase();
+  if (!/^[a-z_][a-z0-9_-]{2,31}$/.test(normalized)) {
+    throw Object.assign(new Error('Usuario Samba deve comecar com letra e usar apenas letras, numeros, hifen ou underline.'), { statusCode: 400 });
+  }
+  return normalized;
+}
+
+function safeSambaPassword(value, required) {
+  const password = String(value || '');
+  if (!password && required) {
+    throw Object.assign(new Error('Informe a senha do usuario Samba para o modo protegido.'), { statusCode: 400 });
+  }
+  if (password && (password.length < 8 || password.length > 128)) {
+    throw Object.assign(new Error('Senha Samba deve ter entre 8 e 128 caracteres.'), { statusCode: 400 });
+  }
+  return password;
+}
+
+function writeSambaPasswordFile(password) {
+  ensureStateDir();
+  const tmpDir = fs.mkdtempSync(path.join(stateDir, 'drive-samba-'));
+  fs.chmodSync(tmpDir, 0o700);
+  const passwordPath = path.join(tmpDir, 'password.secret');
+  fs.writeFileSync(passwordPath, `${password}\n`, { mode: 0o600 });
+  return { tmpDir, passwordPath };
+}
+
 async function writeDriveSettings(body) {
   const mounts = await driveMounts();
   if (!String(body.mountPath || '').trim()) {
@@ -1993,6 +2025,15 @@ async function writeDriveSettings(body) {
 
   const directoryName = safeDriveName(body.directoryName, 'drive');
   const shareName = safeDriveName(body.shareName, 'tronsystem-drive');
+  const sambaAuthMode = body.sambaAuthMode === 'public' ? 'public' : 'protected';
+  const sambaUsername = safeSambaUsername(body.sambaUsername);
+  const previousSettings = publicDriveSettings();
+  const canKeepSambaPassword = body.keepSambaPassword === true
+    && !!previousSettings.updatedAt
+    && previousSettings.sambaEnabled
+    && previousSettings.sambaAuthMode === 'protected'
+    && previousSettings.sambaUsername === sambaUsername;
+  const sambaPassword = safeSambaPassword(body.sambaPassword, body.sambaEnabled === true && sambaAuthMode === 'protected' && !canKeepSambaPassword);
   const drivePath = path.resolve(path.join(mountPath, directoryName));
   const relative = path.relative(mountPath, drivePath);
   if (relative.startsWith('..') || path.isAbsolute(relative)) {
@@ -2014,17 +2055,30 @@ async function writeDriveSettings(body) {
     path: drivePath,
     quotaGb: Math.max(0, Number(body.quotaGb || 0)),
     sambaEnabled: body.sambaEnabled === true,
+    sambaAuthMode,
+    sambaUsername,
     updatedAt: new Date().toISOString()
   };
-  ensureStateDir();
-  fs.writeFileSync(driveSettingsPath, JSON.stringify(settings, null, 2));
   let samba = null;
   if (settings.sambaEnabled) {
-    const out = await privilegedRun('/usr/local/sbin/tronsoftos-network', ['drive-samba', drivePath, shareName], {
-      timeout: 120_000,
-      maxBuffer: 1024 * 1024 * 2
-    });
-    samba = parseJsonLinesBestEffort(out.stdout).at(-1) || { ok: true };
+    let secret = null;
+    try {
+      if (sambaAuthMode === 'protected' && sambaPassword) secret = writeSambaPasswordFile(sambaPassword);
+      const out = await privilegedRun('/usr/local/sbin/tronsoftos-network', [
+        'drive-samba',
+        drivePath,
+        shareName,
+        sambaAuthMode,
+        sambaUsername,
+        secret?.passwordPath || ''
+      ], {
+        timeout: 120_000,
+        maxBuffer: 1024 * 1024 * 2
+      });
+      samba = parseJsonLinesBestEffort(out.stdout).at(-1) || { ok: true };
+    } finally {
+      if (secret) fs.rmSync(secret.tmpDir, { recursive: true, force: true });
+    }
   } else {
     const out = await privilegedRun('/usr/local/sbin/tronsoftos-network', ['drive-samba-disable'], {
       timeout: 60_000,
@@ -2032,7 +2086,9 @@ async function writeDriveSettings(body) {
     }).catch(err => ({ stdout: JSON.stringify({ ok: false, error: err.message }) }));
     samba = parseJsonLinesBestEffort(out.stdout).at(-1) || { ok: true };
   }
-  appendEvent('DRIVE_SETTINGS_UPDATED', { mountPath, path: drivePath, shareName, enabled: settings.enabled, sambaEnabled: settings.sambaEnabled, samba });
+  ensureStateDir();
+  fs.writeFileSync(driveSettingsPath, JSON.stringify(settings, null, 2));
+  appendEvent('DRIVE_SETTINGS_UPDATED', { mountPath, path: drivePath, shareName, enabled: settings.enabled, sambaEnabled: settings.sambaEnabled, sambaAuthMode, sambaUsername, samba });
   return driveStatus();
 }
 

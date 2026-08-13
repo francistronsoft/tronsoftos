@@ -37,6 +37,14 @@ valid_drive_path() {
   [[ "$1" =~ ^/[^[:cntrl:]]+$ ]] && [[ "$1" != *".."* ]]
 }
 
+valid_samba_user() {
+  [[ "$1" =~ ^[a-z_][a-z0-9_-]{2,31}$ ]]
+}
+
+valid_samba_secret_path() {
+  [[ "$1" =~ ^/opt/tronsoftos/state/drive-samba-[A-Za-z0-9._-]+/password\.secret$ ]]
+}
+
 env_escape() {
   printf '%s' "$1" | sed 's/[\/&]/\\&/g'
 }
@@ -452,21 +460,80 @@ drive_samba_remove_block() {
 drive_samba() {
   local share_path="${1:-}"
   local share_name="${2:-tronsystem-drive}"
+  local auth_mode="${3:-protected}"
+  local samba_user="${4:-tronsystem}"
+  local password_file="${5:-}"
   local smb_conf="/etc/samba/smb.conf"
 
   valid_drive_path "$share_path" || fail "Caminho do compartilhamento invalido"
   valid_share_name "$share_name" || fail "Nome do compartilhamento invalido"
+  [[ "$auth_mode" == "public" || "$auth_mode" == "protected" ]] || fail "Modo de acesso Samba invalido"
+  valid_samba_user "$samba_user" || fail "Usuario Samba invalido"
   [ -d "$share_path" ] || fail "Pasta do compartilhamento nao existe"
   if ! command -v smbd >/dev/null 2>&1 && [ ! -x /usr/sbin/smbd ]; then
     fail "Samba nao instalado; atualize o TronSystem para instalar o pacote samba"
   fi
+  if [[ "$auth_mode" == "protected" ]]; then
+    command -v smbpasswd >/dev/null 2>&1 || [ -x /usr/bin/smbpasswd ] || fail "smbpasswd nao encontrado; instale samba-common-bin"
+    local useradd_bin
+    local pdbedit_bin
+    useradd_bin="$(command -v useradd || true)"
+    useradd_bin="${useradd_bin:-/usr/sbin/useradd}"
+    pdbedit_bin="$(command -v pdbedit || true)"
+    pdbedit_bin="${pdbedit_bin:-/usr/bin/pdbedit}"
+    [ -x "$useradd_bin" ] || fail "useradd nao encontrado"
+    [ -x "$pdbedit_bin" ] || fail "pdbedit nao encontrado"
+    if ! id "$samba_user" >/dev/null 2>&1; then
+      "$useradd_bin" --system --no-create-home --shell /usr/sbin/nologin "$samba_user"
+    fi
+    if [ -n "$password_file" ]; then
+      valid_samba_secret_path "$password_file" || fail "Arquivo de senha Samba invalido"
+      [ -f "$password_file" ] || fail "Arquivo de senha Samba nao encontrado"
+      local smbpasswd_bin
+      smbpasswd_bin="$(command -v smbpasswd || true)"
+      smbpasswd_bin="${smbpasswd_bin:-/usr/bin/smbpasswd}"
+      {
+        cat "$password_file"
+        cat "$password_file"
+      } | "$smbpasswd_bin" -s -a "$samba_user" >/dev/null
+      "$smbpasswd_bin" -e "$samba_user" >/dev/null
+    else
+      "$pdbedit_bin" -L -u "$samba_user" >/dev/null 2>&1 || fail "Informe a senha para criar o usuario Samba protegido"
+    fi
+  fi
 
   install -d -m 0755 /etc/samba
   [ -f "$smb_conf" ] || printf '[global]\n   workgroup = WORKGROUP\n   server role = standalone server\n' > "$smb_conf"
-  chmod 0777 "$share_path" 2>/dev/null || true
+  if [[ "$auth_mode" == "protected" ]]; then
+    chown "$samba_user:$samba_user" "$share_path" 2>/dev/null || true
+    chmod 0770 "$share_path" 2>/dev/null || true
+  else
+    chmod 0777 "$share_path" 2>/dev/null || true
+  fi
 
   drive_samba_remove_block "$smb_conf"
-  cat >> "$smb_conf" <<EOF
+  if [[ "$auth_mode" == "protected" ]]; then
+    cat >> "$smb_conf" <<EOF
+# BEGIN TRONSYSTEM DRIVE SHARE
+[global]
+   map to guest = Bad User
+   usershare allow guests = no
+
+[${share_name}]
+   path = ${share_path}
+   browseable = yes
+   read only = no
+   guest ok = no
+   public = no
+   valid users = ${samba_user}
+   force user = ${samba_user}
+   force group = ${samba_user}
+   force create mode = 0660
+   force directory mode = 0770
+# END TRONSYSTEM DRIVE SHARE
+EOF
+  else
+    cat >> "$smb_conf" <<EOF
 # BEGIN TRONSYSTEM DRIVE SHARE
 [global]
    map to guest = Bad User
@@ -482,6 +549,7 @@ drive_samba() {
    force directory mode = 0777
 # END TRONSYSTEM DRIVE SHARE
 EOF
+  fi
 
   local testparm_bin
   testparm_bin="$(command -v testparm || true)"
@@ -495,7 +563,7 @@ EOF
     systemctl enable nmbd.service >/dev/null 2>&1 || true
     systemctl restart nmbd.service >/dev/null 2>&1 || true
   fi
-  printf '{"ok":true,"shareName":"%s","path":"%s"}\n' "$(json_escape "$share_name")" "$(json_escape "$share_path")"
+  printf '{"ok":true,"shareName":"%s","path":"%s","authMode":"%s","username":"%s"}\n' "$(json_escape "$share_name")" "$(json_escape "$share_path")" "$auth_mode" "$(json_escape "$samba_user")"
 }
 
 drive_samba_disable() {
