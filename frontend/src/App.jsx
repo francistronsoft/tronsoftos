@@ -3021,9 +3021,8 @@ function AuthenticatedApp({ user, onLogout }) {
           </button>
           <div>
             <div className="text-lg font-semibold leading-none tracking-normal">
-              <span className="text-slate-100">tron</span><span className="text-sky-300">soft</span><span className="ml-1 font-black text-white">OS</span>
+              <span className="text-slate-100">Tron</span><span className="text-sky-300">System</span>
             </div>
-            <div className="text-xs text-slate-400">Appliance Console</div>
           </div>
         </div>
         <nav className="space-y-1 p-3">
