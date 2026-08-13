@@ -1994,6 +1994,63 @@ async function driveMounts() {
   return sortDriveMounts(await dfDriveMounts(['/']));
 }
 
+function parseSambaSections(text) {
+  const sections = [];
+  let current = null;
+  let managed = false;
+  for (const rawLine of String(text || '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (line === '# BEGIN TRONSYSTEM DRIVE SHARE') managed = true;
+    if (line === '# END TRONSYSTEM DRIVE SHARE') managed = false;
+    const header = line.match(/^\[([^\]]+)\]$/);
+    if (header) {
+      current = { name: header[1], options: {}, managed };
+      sections.push(current);
+      continue;
+    }
+    if (!current || !line || line.startsWith('#') || line.startsWith(';')) continue;
+    const pair = line.match(/^([^=]+?)\s*=\s*(.*)$/);
+    if (pair) current.options[pair[1].trim().toLowerCase()] = pair[2].trim();
+  }
+  return sections;
+}
+
+async function sambaShares(settings) {
+  if (process.platform === 'win32') return [];
+  let content = '';
+  try {
+    const out = await run('testparm', ['-s', '/etc/samba/smb.conf'], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+    content = out.stdout || '';
+  } catch {
+    try {
+      content = fs.readFileSync('/etc/samba/smb.conf', 'utf8');
+    } catch {
+      return [];
+    }
+  }
+  return parseSambaSections(content)
+    .filter(section => section.name !== 'global')
+    .map(section => {
+      const pathValue = section.options.path || '';
+      const guestOk = /^(yes|true|1)$/i.test(section.options['guest ok'] || section.options.public || '');
+      const available = !/^(no|false|0)$/i.test(section.options.available || 'yes');
+      const name = section.name;
+      const managed = section.managed || name === settings.shareName || (settings.path && pathValue === settings.path);
+      return {
+        name,
+        path: pathValue,
+        available,
+        browseable: !/^(no|false|0)$/i.test(section.options.browseable || 'yes'),
+        readOnly: /^(yes|true|1)$/i.test(section.options['read only'] || 'no'),
+        guestOk,
+        authMode: guestOk ? 'public' : 'protected',
+        validUsers: section.options['valid users'] || '',
+        managed,
+        kind: name === 'homes' ? 'homes' : name === 'printers' || name === 'print$' ? 'system' : managed ? 'tronsystem' : 'external'
+      };
+    });
+}
+
 async function driveStatus() {
   const settings = publicDriveSettings();
   const mounts = await driveMounts();
@@ -2001,7 +2058,7 @@ async function driveStatus() {
     ? mounts.find(item => normalizeMountPath(item.target) === normalizeMountPath(settings.mountPath)) || null
     : null;
   const usage = settings.path ? await diskUsageForPath(settings.path) : null;
-  return { settings, mounts, selectedMount, usage };
+  return { settings, mounts, selectedMount, usage, sambaShares: await sambaShares(settings) };
 }
 
 function safeDriveName(value, fallback) {
