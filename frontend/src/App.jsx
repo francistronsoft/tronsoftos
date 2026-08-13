@@ -1783,6 +1783,7 @@ function DriveView() {
     kind: 'tronsystem'
   }];
   const [form, setForm] = useState(null);
+  const [shareForms, setShareForms] = useState({});
   const values = form || {
     enabled: settings.enabled || false,
     shareName: settings.shareName || 'tronsystem-drive',
@@ -1796,6 +1797,7 @@ function DriveView() {
   };
   const selectedMount = mounts.find(item => item.target === values.mountPath) || drive.selectedMount || null;
   const setValue = (key, value) => setForm(previous => ({ ...(previous || values), [key]: value }));
+  const setShareValue = (name, key, value) => setShareForms(previous => ({ ...previous, [name]: { ...(previous[name] || {}), [key]: value } }));
   const saveMutation = useMutation({
     mutationFn: payload => fetch('/api/drive', {
       method: 'PATCH',
@@ -1806,6 +1808,7 @@ function DriveView() {
       return response.json();
     }),
     onSuccess: data => {
+      setShareForms({});
       setForm({
         enabled: data.settings.enabled,
         shareName: data.settings.shareName,
@@ -1821,6 +1824,18 @@ function DriveView() {
       queryClient.invalidateQueries({ queryKey: ['events'] });
     }
   });
+  const saveShareSettings = share => {
+    const shareForm = shareForms[share.name] || {};
+    saveMutation.mutate({
+      ...values,
+      quotaGb: shareForm.quotaGb ?? settings.quotaGb ?? 0,
+      sambaPassword: shareForm.sambaPassword || '',
+      sambaEnabled: settings.sambaEnabled,
+      sambaAuthMode: settings.sambaAuthMode || share.authMode || 'protected',
+      sambaUsername: settings.sambaUsername || share.validUsers || values.sambaUsername,
+      keepSambaPassword: !shareForm.sambaPassword
+    });
+  };
   const projectedPath = values.mountPath ? `${values.mountPath.replace(/\/+$/, '')}/${values.directoryName || 'drive'}`.replace('//', '/') : '-';
   const percent = selectedMount?.percentUsed ?? 0;
 
@@ -1977,6 +1992,8 @@ function DriveView() {
             {displayedSambaShares.map(share => {
               const isDriveShare = share.managed && share.name === settings.shareName;
               const status = share.available ? (share.authMode === 'public' ? 'Publico' : 'Protegido') : 'Indisponivel';
+              const shareForm = shareForms[share.name] || {};
+              const quotaGb = shareForm.quotaGb ?? settings.quotaGb ?? 0;
               return (
                 <div key={`${share.name}-${share.path}`} className="rounded-md border border-slate-200 bg-white p-3">
                   <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1987,6 +2004,7 @@ function DriveView() {
                         <span className={`rounded-md px-2 py-0.5 text-xs font-medium ${share.available ? 'bg-green-50 text-green-700' : 'bg-slate-100 text-slate-500'}`}>{status}</span>
                       </div>
                       <div className="mt-1 break-all text-sm text-slate-500">{share.path || 'sem caminho definido'}</div>
+                      <div className="mt-1 text-xs text-slate-500">Cota: {Number(settings.quotaGb || 0) > 0 ? `${settings.quotaGb} GB` : 'sem cota'}</div>
                       {share.validUsers ? <div className="mt-1 text-xs text-slate-500">Usuarios: {share.validUsers}</div> : null}
                     </div>
                     {isDriveShare ? (
@@ -2002,6 +2020,40 @@ function DriveView() {
                       </div>
                     ) : null}
                   </div>
+                  {isDriveShare ? (
+                    <div className="mt-3 grid gap-3 border-t border-slate-100 pt-3 md:grid-cols-[minmax(140px,0.5fr)_minmax(180px,0.7fr)_auto]">
+                      <Field
+                        label="Alterar cota em GB"
+                        type="number"
+                        value={quotaGb}
+                        onChange={value => setShareValue(share.name, 'quotaGb', value)}
+                        placeholder="0 sem cota"
+                      />
+                      {settings.sambaAuthMode !== 'public' ? (
+                        <Field
+                          label="Alterar senha Samba"
+                          type="password"
+                          value={shareForm.sambaPassword || ''}
+                          onChange={value => setShareValue(share.name, 'sambaPassword', value)}
+                          placeholder="nova senha"
+                          autoComplete="new-password"
+                        />
+                      ) : (
+                        <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500">Senha indisponivel no modo publico.</div>
+                      )}
+                      <div className="flex items-end">
+                        <button
+                          type="button"
+                          disabled={saveMutation.isPending}
+                          onClick={() => saveShareSettings(share)}
+                          className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
+                        >
+                          <Save className="h-4 w-4" />
+                          Salvar ajustes
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               );
             })}
