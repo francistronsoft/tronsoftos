@@ -2875,7 +2875,7 @@ function LoginView({ onAuthenticated }) {
           </div>
           <div>
             <div className="text-xl font-semibold text-slate-950">
-              <span>tron</span><span className="text-sky-600">soft</span><span className="ml-1 font-black">OS</span>
+              <span>Tron</span><span className="text-sky-600">System</span>
             </div>
             <div className="text-sm text-slate-500">Acesso tecnico</div>
           </div>
