@@ -1940,32 +1940,58 @@ function visibleDriveMount(mount) {
   return true;
 }
 
+function flattenFindmnt(filesystems = []) {
+  const mounts = [];
+  for (const item of filesystems) {
+    mounts.push(item);
+    if (Array.isArray(item.children)) mounts.push(...flattenFindmnt(item.children));
+  }
+  return mounts;
+}
+
+function sortDriveMounts(mounts) {
+  const byTarget = new Map();
+  for (const mount of mounts) {
+    if (!byTarget.has(mount.target)) byTarget.set(mount.target, mount);
+  }
+  return [...byTarget.values()].sort((left, right) => {
+    if (left.recommended !== right.recommended) return left.recommended ? -1 : 1;
+    if (left.target === '/') return 1;
+    if (right.target === '/') return -1;
+    return right.free - left.free;
+  });
+}
+
+async function dfDriveMounts(args = []) {
+  const out = await run('df', ['-PB1', ...args], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+  return out.stdout.trim().split(/\r?\n/).slice(1).map(line => {
+    const columns = line.trim().split(/\s+/);
+    return publicMount({
+      source: columns[0],
+      total: columns[1],
+      used: columns[2],
+      free: columns[3],
+      percentUsed: columns[4],
+      target: columns.slice(5).join(' ')
+    });
+  }).filter(visibleDriveMount);
+}
+
 async function driveMounts() {
   if (process.platform === 'win32') return [];
   try {
     const out = await run('findmnt', ['-J', '-b', '-o', 'TARGET,SOURCE,FSTYPE,SIZE,USED,AVAIL,USE%,OPTIONS'], { timeout: 10_000, maxBuffer: 1024 * 1024 });
     const payload = JSON.parse(out.stdout || '{}');
-    return (payload.filesystems || [])
+    const mounts = flattenFindmnt(payload.filesystems || [])
       .map(publicMount)
-      .filter(visibleDriveMount)
-      .sort((left, right) => {
-        if (left.recommended !== right.recommended) return left.recommended ? -1 : 1;
-        return right.free - left.free;
-      });
+      .filter(visibleDriveMount);
+    if (mounts.length > 0) return sortDriveMounts(mounts);
   } catch {
-    const out = await run('df', ['-PB1', '-x', 'tmpfs', '-x', 'devtmpfs'], { timeout: 10_000, maxBuffer: 1024 * 1024 });
-    return out.stdout.trim().split(/\r?\n/).slice(1).map(line => {
-      const columns = line.trim().split(/\s+/);
-      return publicMount({
-        source: columns[0],
-        total: columns[1],
-        used: columns[2],
-        free: columns[3],
-        percentUsed: columns[4],
-        target: columns.slice(5).join(' ')
-      });
-    }).filter(visibleDriveMount);
+    // Fall through to df fallback below.
   }
+  const mounts = await dfDriveMounts(['-x', 'tmpfs', '-x', 'devtmpfs']).catch(() => []);
+  if (mounts.length > 0) return sortDriveMounts(mounts);
+  return sortDriveMounts(await dfDriveMounts(['/']));
 }
 
 async function driveStatus() {

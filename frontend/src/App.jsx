@@ -1833,7 +1833,7 @@ function DriveView() {
                 <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-4 text-sm text-slate-500">Carregando discos...</div>
               ) : null}
               {!driveQuery.isLoading && mounts.length === 0 ? (
-                <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-4 text-sm text-slate-500">Nenhum disco de dados encontrado pelo Debian.</div>
+                <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-4 text-sm text-slate-500">Nenhuma unidade foi carregada. Tente salvar para ver o erro detalhado do servidor.</div>
               ) : null}
               {mounts.map(mount => {
                 const selected = mount.target === values.mountPath;
@@ -1949,7 +1949,7 @@ function DriveView() {
                 Disco selecionado com {formatBytes(selectedMount.free)} livres. Uso atual: {percent}%.
               </div>
             ) : null}
-            <button disabled={saveMutation.isPending || !values.mountPath} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
+            <button disabled={saveMutation.isPending} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
               <Save className="h-4 w-4" />
               Salvar compartilhamento
             </button>
