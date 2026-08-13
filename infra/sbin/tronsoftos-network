@@ -519,6 +519,10 @@ drive_samba() {
    map to guest = Bad User
    usershare allow guests = no
 
+[homes]
+   available = no
+   browseable = no
+
 [${share_name}]
    path = ${share_path}
    browseable = yes
@@ -538,6 +542,10 @@ EOF
 [global]
    map to guest = Bad User
    usershare allow guests = yes
+
+[homes]
+   available = no
+   browseable = no
 
 [${share_name}]
    path = ${share_path}

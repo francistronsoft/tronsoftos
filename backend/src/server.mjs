@@ -2020,6 +2020,14 @@ function safeSambaUsername(value) {
   return normalized;
 }
 
+function optionalSambaUsername(value, fallback = 'tronsystem') {
+  try {
+    return safeSambaUsername(value || fallback);
+  } catch {
+    return fallback;
+  }
+}
+
 function safeSambaPassword(value, required) {
   const password = String(value || '');
   if (!password && required) {
@@ -2051,15 +2059,19 @@ async function writeDriveSettings(body) {
 
   const directoryName = safeDriveName(body.directoryName, 'drive');
   const shareName = safeDriveName(body.shareName, 'tronsystem-drive');
-  const sambaAuthMode = body.sambaAuthMode === 'public' ? 'public' : 'protected';
-  const sambaUsername = safeSambaUsername(body.sambaUsername);
   const previousSettings = publicDriveSettings();
+  const sambaEnabled = body.sambaEnabled === true;
+  const sambaAuthMode = body.sambaAuthMode === 'public' ? 'public' : 'protected';
+  const sambaUsername = sambaEnabled
+    ? safeSambaUsername(body.sambaUsername)
+    : optionalSambaUsername(body.sambaUsername, previousSettings.sambaUsername || 'tronsystem');
   const canKeepSambaPassword = body.keepSambaPassword === true
     && !!previousSettings.updatedAt
-    && previousSettings.sambaEnabled
     && previousSettings.sambaAuthMode === 'protected'
     && previousSettings.sambaUsername === sambaUsername;
-  const sambaPassword = safeSambaPassword(body.sambaPassword, body.sambaEnabled === true && sambaAuthMode === 'protected' && !canKeepSambaPassword);
+  const sambaPassword = sambaEnabled && sambaAuthMode === 'protected'
+    ? safeSambaPassword(body.sambaPassword, !canKeepSambaPassword)
+    : '';
   const drivePath = path.resolve(path.join(mountPath, directoryName));
   const relative = path.relative(mountPath, drivePath);
   if (relative.startsWith('..') || path.isAbsolute(relative)) {
@@ -2080,7 +2092,7 @@ async function writeDriveSettings(body) {
     directoryName,
     path: drivePath,
     quotaGb: Math.max(0, Number(body.quotaGb || 0)),
-    sambaEnabled: body.sambaEnabled === true,
+    sambaEnabled,
     sambaAuthMode,
     sambaUsername,
     updatedAt: new Date().toISOString()
