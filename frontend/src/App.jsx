@@ -1773,6 +1773,15 @@ function DriveView() {
   const settings = drive.settings || {};
   const mounts = drive.mounts || [];
   const sambaShares = drive.sambaShares || [];
+  const displayedSambaShares = sambaShares.length || !settings.path ? sambaShares : [{
+    name: settings.shareName || 'tronsystem-drive',
+    path: settings.path,
+    available: false,
+    authMode: settings.sambaAuthMode || 'protected',
+    validUsers: settings.sambaUsername || '',
+    managed: true,
+    kind: 'tronsystem'
+  }];
   const [form, setForm] = useState(null);
   const values = form || {
     enabled: settings.enabled || false,
@@ -1960,12 +1969,12 @@ function DriveView() {
         </div>
       </Card>
 
-      <Card title="Compartilhamentos Samba" icon={Network} action={<StatusPill value={sambaShares.length ? 'online' : 'disabled'} />}>
-        {sambaShares.length === 0 ? (
-          <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-4 text-sm text-slate-500">Nenhum compartilhamento Samba encontrado no servidor.</div>
+      <Card title="Pastas TronSystem no Samba" icon={Network} action={<StatusPill value={displayedSambaShares.some(share => share.available) ? 'online' : 'disabled'} />}>
+        {displayedSambaShares.length === 0 ? (
+          <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-4 text-sm text-slate-500">Nenhuma pasta do TronSystem publicada no Samba.</div>
         ) : (
           <div className="grid gap-3">
-            {sambaShares.map(share => {
+            {displayedSambaShares.map(share => {
               const isDriveShare = share.managed && share.name === settings.shareName;
               const status = share.available ? (share.authMode === 'public' ? 'Publico' : 'Protegido') : 'Indisponivel';
               return (
@@ -1974,24 +1983,23 @@ function DriveView() {
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <div className="font-semibold text-slate-950">{share.name}</div>
-                        <span className={`rounded-md px-2 py-0.5 text-xs font-medium ${share.managed ? 'bg-sky-50 text-sky-700' : share.kind === 'system' || share.kind === 'homes' ? 'bg-slate-100 text-slate-600' : 'bg-amber-50 text-amber-700'}`}>
-                          {share.managed ? 'TronSystem' : share.kind === 'system' || share.kind === 'homes' ? 'Sistema' : 'Externo'}
-                        </span>
+                        <span className="rounded-md bg-sky-50 px-2 py-0.5 text-xs font-medium text-sky-700">TronSystem</span>
                         <span className={`rounded-md px-2 py-0.5 text-xs font-medium ${share.available ? 'bg-green-50 text-green-700' : 'bg-slate-100 text-slate-500'}`}>{status}</span>
                       </div>
                       <div className="mt-1 break-all text-sm text-slate-500">{share.path || 'sem caminho definido'}</div>
                       {share.validUsers ? <div className="mt-1 text-xs text-slate-500">Usuarios: {share.validUsers}</div> : null}
                     </div>
-                    {isDriveShare && settings.sambaEnabled ? (
-                      <button
-                        type="button"
-                        disabled={saveMutation.isPending}
-                        onClick={() => saveMutation.mutate({ ...values, sambaEnabled: false, keepSambaPassword: true })}
-                        className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                      >
-                        <Square className="h-4 w-4" />
-                        Despublicar
-                      </button>
+                    {isDriveShare ? (
+                      <div className="min-w-[220px]">
+                        <ToggleSwitch
+                          label={settings.sambaEnabled ? 'Publicado via Samba' : 'Publicar via Samba'}
+                          description={settings.sambaEnabled ? 'Desative para remover da rede.' : 'Ative para exibir na rede.'}
+                          icon={Network}
+                          checked={settings.sambaEnabled}
+                          onChange={value => saveMutation.mutate({ ...values, sambaEnabled: value, keepSambaPassword: true })}
+                          disabled={saveMutation.isPending}
+                        />
+                      </div>
                     ) : null}
                   </div>
                 </div>

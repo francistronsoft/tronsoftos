@@ -2048,7 +2048,8 @@ async function sambaShares(settings) {
         managed,
         kind: name === 'homes' ? 'homes' : name === 'printers' || name === 'print$' ? 'system' : managed ? 'tronsystem' : 'external'
       };
-    });
+    })
+    .filter(share => share.managed && share.kind === 'tronsystem');
 }
 
 async function driveStatus() {
