@@ -101,6 +101,8 @@ services:
       - ${TRONSOFTOS_STATE_DIR:-/opt/tronsoftos/state}:${TRONSOFTOS_STATE_DIR:-/opt/tronsoftos/state}
       - ${STORAGE_ROOT}/config-backups:/config-backups
       - ${STORAGE_ROOT}/update-backups:/update-backups
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   worker:
     build:
@@ -136,6 +138,8 @@ services:
       - ${TRONSOFTOS_STATE_DIR:-/opt/tronsoftos/state}:${TRONSOFTOS_STATE_DIR:-/opt/tronsoftos/state}
       - ${STORAGE_ROOT}/config-backups:/config-backups
       - ${STORAGE_ROOT}/update-backups:/update-backups
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 networks:
   default:
