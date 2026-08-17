@@ -550,7 +550,7 @@ async function createAlertOnce(type, severity, message) {
 async function resolveActiveAlertsByType(type) {
   await prisma.alert.updateMany({
     where: { type, resolved: false },
-    data: { resolved: true, resolvedAt: new Date() }
+    data: { resolved: true }
   });
 }
 
