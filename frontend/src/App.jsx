@@ -242,7 +242,7 @@ function Card({ title, icon: Icon, children, action, className = '' }) {
   );
 }
 
-function Stat({ label, value, detail, icon: Icon, tone = 'slate' }) {
+function Stat({ label, value, detail, icon: Icon, tone = 'slate', valueClassName = 'text-slate-950' }) {
   const toneClass = {
     green: 'bg-green-50 text-green-700',
     amber: 'bg-amber-50 text-amber-700',
@@ -255,7 +255,7 @@ function Stat({ label, value, detail, icon: Icon, tone = 'slate' }) {
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="text-xs font-medium uppercase text-slate-500">{label}</div>
-          <div className="mt-2 text-2xl font-semibold text-slate-950">{value}</div>
+          <div className={`mt-2 text-2xl font-semibold ${valueClassName}`}>{value}</div>
           <div className="mt-1 min-h-5 text-sm text-slate-500">{detail}</div>
         </div>
         <div className={`rounded-md p-2 ${toneClass}`}>{Icon ? <Icon className="h-5 w-5" /> : null}</div>
@@ -461,10 +461,13 @@ function DashboardView({ dashboard }) {
       ? `${formatBytes(driveQuota.free)} livre de ${formatBytes(driveQuota.total)} (${driveQuota.percentUsed}% usado)`
       : 'aguardando Google Drive';
   const driveUsageTone = driveQuota?.ok === false ? 'amber' : driveQuota ? 'green' : 'slate';
+  const currentMode = String(dashboard.cluster.mode || 'simple').toUpperCase();
+  const currentModeTone = currentMode === 'HA' ? 'sky' : 'green';
+  const currentModeValueClass = currentMode === 'HA' ? 'text-sky-700' : 'text-green-700';
   return (
     <div className="space-y-5">
       <div className="grid gap-4 lg:grid-cols-6">
-        <Stat label="No atual" value={dashboard.cluster.nodeName} detail={dashboard.cluster.mode} icon={Server} tone="sky" />
+        <Stat label="No atual" value={currentMode} detail="" icon={Server} tone={currentModeTone} valueClassName={currentModeValueClass} />
         <Stat label="Tempo ligado" value={formatDurationSeconds(dashboard.hostUptimeSeconds)} detail="uptime do servidor" icon={FileClock} tone="green" />
         <Stat label="Papel" value={dashboard.cluster.nodeRole} detail={dashboard.cluster.vip || 'VIP nao configurado'} icon={ShieldCheck} tone="green" />
         <Stat label="Containers online" value={`${onlineContainers}/${troncomandaContainers.length}`} detail="TronComanda" icon={Boxes} tone="slate" />
