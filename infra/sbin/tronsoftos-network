@@ -591,11 +591,40 @@ drive_samba_disable() {
 
 firebird_script() {
   local script_path="${1:-}"
+  local child_pid=""
+  local child_group=false
+  local status=0
   [[ "$script_path" =~ ^/tmp/tronsoftos-firebird-[A-Za-z0-9._-]+\.sh$ ]] || fail "Script Firebird invalido"
   [ -f "$script_path" ] || fail "Script Firebird nao encontrado"
   grep -q '^# TronFire host Firebird script$' "$script_path" || fail "Script Firebird sem assinatura esperada"
   chmod 0700 "$script_path"
-  TERM=dumb FIREBIRD=/usr/local/firebird LD_LIBRARY_PATH="/usr/local/firebird/lib:${LD_LIBRARY_PATH:-}" bash "$script_path"
+  cleanup_firebird_script() {
+    [ -n "$child_pid" ] || return 0
+    if ! kill -0 "$child_pid" >/dev/null 2>&1; then
+      return 0
+    fi
+    if [ "$child_group" = true ]; then
+      kill -TERM "-$child_pid" >/dev/null 2>&1 || true
+      sleep 2
+      kill -KILL "-$child_pid" >/dev/null 2>&1 || true
+    else
+      kill -TERM "$child_pid" >/dev/null 2>&1 || true
+      sleep 2
+      kill -KILL "$child_pid" >/dev/null 2>&1 || true
+    fi
+  }
+  trap cleanup_firebird_script INT TERM EXIT
+  if command -v setsid >/dev/null 2>&1; then
+    TERM=dumb FIREBIRD=/usr/local/firebird LD_LIBRARY_PATH="/usr/local/firebird/lib:${LD_LIBRARY_PATH:-}" setsid bash "$script_path" &
+    child_group=true
+  else
+    TERM=dumb FIREBIRD=/usr/local/firebird LD_LIBRARY_PATH="/usr/local/firebird/lib:${LD_LIBRARY_PATH:-}" bash "$script_path" &
+  fi
+  child_pid="$!"
+  wait "$child_pid" || status="$?"
+  child_pid=""
+  trap - INT TERM EXIT
+  [ "$status" -eq 0 ] || exit "$status"
   printf '{"ok":true,"script":"%s"}\n' "$(json_escape "$script_path")"
 }
 
