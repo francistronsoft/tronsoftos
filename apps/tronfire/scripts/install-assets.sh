@@ -7,12 +7,17 @@ DEST_DIR="$ROOT_DIR/docker/firebird25"
 FIREBIRD_PACKAGE_NAME="FirebirdCS-2.5.9.27139-0.amd64.tar.gz"
 TEMPLATE_NAME="template.fdb"
 
-if [ -f "$ENV_FILE" ]; then
-  set -a
-  # shellcheck disable=SC1090
-  . "$ENV_FILE"
-  set +a
-fi
+env_value() {
+  local file="$1"
+  local key="$2"
+  [ -f "$file" ] || return 0
+  grep "^$key=" "$file" | tail -n1 | cut -d= -f2-
+}
+
+FIREBIRD_PACKAGE_URL="${FIREBIRD_PACKAGE_URL:-$(env_value "$ENV_FILE" "FIREBIRD_PACKAGE_URL")}"
+FIREBIRD_TEMPLATE_URL="${FIREBIRD_TEMPLATE_URL:-$(env_value "$ENV_FILE" "FIREBIRD_TEMPLATE_URL")}"
+FIREBIRD_PACKAGE_SHA256="${FIREBIRD_PACKAGE_SHA256:-$(env_value "$ENV_FILE" "FIREBIRD_PACKAGE_SHA256")}"
+FIREBIRD_TEMPLATE_SHA256="${FIREBIRD_TEMPLATE_SHA256:-$(env_value "$ENV_FILE" "FIREBIRD_TEMPLATE_SHA256")}"
 
 download() {
   local url="$1"
