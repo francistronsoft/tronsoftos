@@ -20,8 +20,10 @@ const HOST_PROC_ROOT = process.env.HOST_PROC_ROOT || '/host/proc';
 const HOST_SYS_ROOT = process.env.HOST_SYS_ROOT || '/host/sys';
 const FIREBIRD_HOST_TARGET = 'firebird_host';
 const TRONSOFTOS_STATE_DIR = process.env.TRONSOFTOS_STATE_DIR || '/opt/tronsoftos/state';
+const TRONSOFTOS_API_URL = String(process.env.TRONSOFTOS_API_URL || 'http://host.docker.internal:8080').replace(/\/+$/, '');
 const HA_SYNC_ACTIVE_FILE = process.env.TRONSOFTOS_HA_SYNC_ACTIVE_FILE || `${TRONSOFTOS_STATE_DIR}/ha-sync.active`;
 const CLUSTER_LOCK_FILE = process.env.TRONSOFTOS_CLUSTER_LOCK || `${TRONSOFTOS_STATE_DIR}/cluster-lock.json`;
+const CLUSTER_SECRETS_FILE = process.env.TRONSOFTOS_CLUSTER_SECRETS || `${TRONSOFTOS_STATE_DIR}/cluster-secrets.env`;
 const DEFAULT_BACKUP_FREQUENCY_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_FREQUENCY_MINUTES, 20);
 const DEFAULT_BACKUP_RETENTION_DAYS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_RETENTION_DAYS, 30);
 const BACKUP_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_TIMEOUT_MINUTES, 240, 30, 1440);
@@ -85,13 +87,70 @@ async function docker(args, timeout = 60_000) {
 }
 
 async function dockerExec(args, timeout = 60_000) {
-  if (FIREBIRD_EXEC_MODE === 'host' || FIREBIRD_EXEC_MODE === 'direct') {
+  if (FIREBIRD_EXEC_MODE === 'host') {
+    return runHostFirebirdShell(args, timeout);
+  }
+  if (FIREBIRD_EXEC_MODE === 'direct') {
     const [command, ...commandArgs] = args;
     const { stdout, stderr } = await execFileAsync(command, commandArgs, firebirdExecOptions(timeout));
     return { stdout, stderr };
   }
   const { stdout, stderr } = await execFileAsync('docker', ['exec', FIREBIRD_CONTAINER, ...args], { timeout, maxBuffer: 1024 * 1024 * 5 });
   return { stdout, stderr };
+}
+
+function parseEnvFile(filePath) {
+  try {
+    return Object.fromEntries(
+      fs.readFileSync(filePath, 'utf8')
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(line => line && !line.startsWith('#') && line.includes('='))
+        .map(line => {
+          const index = line.indexOf('=');
+          return [line.slice(0, index).trim(), line.slice(index + 1).trim().replace(/^['"]|['"]$/g, '')];
+        })
+    );
+  } catch {
+    return {};
+  }
+}
+
+function internalTokenValue() {
+  return process.env.TRONSOFTOS_INTERNAL_TOKEN || parseEnvFile(CLUSTER_SECRETS_FILE).TRONSOFTOS_INTERNAL_TOKEN || '';
+}
+
+function shellCommandFromArgs(args = []) {
+  if (args[0] === 'sh' && args[1] === '-lc') return String(args[2] || '');
+  const [command, ...commandArgs] = args;
+  return [command, ...commandArgs].map(shQuote).join(' ');
+}
+
+async function runHostFirebirdShell(args, timeoutMs = 60_000) {
+  const token = internalTokenValue();
+  if (!token) throw new Error('TRONSOFTOS_INTERNAL_TOKEN nao configurado');
+  const response = await fetch(`${TRONSOFTOS_API_URL}/api/host/firebird/script`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-tronsoftos-token': token
+    },
+    body: JSON.stringify({
+      script: `# TronFire host Firebird script\n${shellCommandFromArgs(args)}\n`,
+      timeoutMs
+    }),
+    signal: AbortSignal.timeout(timeoutMs + 60_000)
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload.error || `TronSoftOS HTTP ${response.status}`);
+    error.payload = payload;
+    throw error;
+  }
+  return {
+    stdout: payload.stdout || '',
+    stderr: payload.stderr || ''
+  };
 }
 
 function isPrimaryNode() {
