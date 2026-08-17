@@ -1,6 +1,8 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs';
+import http from 'node:http';
+import https from 'node:https';
 const execFileAsync = promisify(execFile);
 const TRONSOFTOS_STATE_DIR = process.env.TRONSOFTOS_STATE_DIR || '/opt/tronsoftos/state';
 const CLUSTER_SECRETS_FILE = process.env.TRONSOFTOS_CLUSTER_SECRETS || `${TRONSOFTOS_STATE_DIR}/cluster-secrets.env`;
@@ -91,22 +93,61 @@ function stripHostScriptControlOutput(stdout = '') {
     .join('\n');
 }
 
+function postJsonLong(urlString, body, headers = {}, timeoutMs = 60_000) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlString);
+    const data = JSON.stringify(body);
+    const client = url.protocol === 'https:' ? https : http;
+    const req = client.request(url, {
+      method: 'POST',
+      headers: {
+        ...headers,
+        'content-length': Buffer.byteLength(data)
+      }
+    }, (res) => {
+      const chunks = [];
+      res.setEncoding('utf8');
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => {
+        const text = chunks.join('');
+        let payload = {};
+        try {
+          payload = text ? JSON.parse(text) : {};
+        } catch (err) {
+          const error = new Error(`Resposta invalida do TronSystem: ${err.message}`);
+          error.statusCode = res.statusCode;
+          error.body = text.slice(0, 1000);
+          reject(error);
+          return;
+        }
+        resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, payload });
+      });
+    });
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`Tempo limite excedido na chamada HTTP host apos ${Math.round(timeoutMs / 60000)} min`));
+    });
+    req.on('error', reject);
+    req.write(data);
+    req.end();
+  });
+}
+
 async function runHostFirebirdShell(args, timeoutMs = 60_000) {
   const token = internalTokenValue();
   if (!token) throw new Error('TRONSOFTOS_INTERNAL_TOKEN nao configurado');
-  const response = await fetch(`${TRONSOFTOS_API_URL}/api/host/firebird/script`, {
-    method: 'POST',
-    headers: {
+  const response = await postJsonLong(
+    `${TRONSOFTOS_API_URL}/api/host/firebird/script`,
+    {
+      script: `# TronFire host Firebird script\n${shellCommandFromArgs(args)}\n`,
+      timeoutMs
+    },
+    {
       'content-type': 'application/json',
       'x-tronsoftos-token': token
     },
-    body: JSON.stringify({
-      script: `# TronFire host Firebird script\n${shellCommandFromArgs(args)}\n`,
-      timeoutMs
-    }),
-    signal: AbortSignal.timeout(timeoutMs + 60_000)
-  });
-  const payload = await response.json().catch(() => ({}));
+    timeoutMs + 120_000
+  );
+  const payload = response.payload || {};
   if (!response.ok) {
     const error = new Error(payload.error || `TronSoftOS HTTP ${response.status}`);
     error.payload = payload;
