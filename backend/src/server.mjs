@@ -5044,6 +5044,8 @@ function centralHostPayload() {
   const cpuModel = cpus.find(cpu => cpu?.model)?.model || '';
   return {
     hostname: os.hostname(),
+    serverTime: new Date().toISOString(),
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || process.env.TZ || '',
     os: `${os.type()} ${os.release()}`,
     architecture: os.arch(),
     ip: primaryHostIp(),

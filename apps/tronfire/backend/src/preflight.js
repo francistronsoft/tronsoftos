@@ -4,7 +4,7 @@ import fs from 'node:fs';
 
 const FIREBIRD_BIN = process.env.FIREBIRD_BIN || '/usr/local/firebird/bin';
 const FIREBIRD_EXEC_MODE = String(process.env.FIREBIRD_EXEC_MODE || 'container').toLowerCase();
-const FIREBIRD_HOST = process.env.FIREBIRD_HOST || 'host.docker.internal';
+const FIREBIRD_HOST = process.env.FIREBIRD_HOST || (FIREBIRD_EXEC_MODE === 'host' || FIREBIRD_EXEC_MODE === 'direct' ? 'localhost' : 'host.docker.internal');
 const DEPLOYMENT_MODE = String(process.env.TRONFIRE_DEPLOYMENT_MODE || 'simple').toLowerCase();
 const NODE_ROLE = String(process.env.TRONFIRE_NODE_ROLE || 'primary').toLowerCase();
 const dirs = ['/firebird/data','/firebird/backups','/firebird/uploads','/firebird/templates','/firebird/restore-work','/firebird/quarantine','/firebird/logs'];
@@ -55,36 +55,38 @@ export async function databaseDiagnostics() {
   const dbs = await prisma.managedDatabase.findMany({ where: { type: { not: 'ARQUIVADO' } }, orderBy: [{ isPrimary: 'desc' }, { name: 'asc' }] });
   const diagnostics = [];
   for (const db of dbs) {
-    try {
-      const [version, licensedUnit] = await Promise.all([
-        queryDatabaseValue(db, 'select first 1 VERSAO from VERSAO_BANCO;'),
-        queryDatabaseValue(db, 'select first 1 NOME from EMPRESA_SINTEGRA;')
-      ]);
+    const base = {
+      id: db.id,
+      name: db.name,
+      alias: db.alias,
+      path: effectiveDatabasePath(db),
+      pathRole: effectiveDatabasePath(db) === db.filePath ? 'production' : 'standby_read_only',
+      fileSizeBytes: databaseFileSize(db)
+    };
+    const [versionResult, licensedUnitResult] = await Promise.allSettled([
+      queryDatabaseValue(db, 'select first 1 VERSAO from VERSAO_BANCO;'),
+      queryDatabaseValue(db, 'select first 1 NOME from EMPRESA_SINTEGRA;')
+    ]);
+    const versionError = versionResult.status === 'rejected' ? versionResult.reason : null;
+    const licensedUnitError = licensedUnitResult.status === 'rejected' ? licensedUnitResult.reason : null;
+    if (versionError && licensedUnitError) {
       diagnostics.push({
-        id: db.id,
-        name: db.name,
-        alias: db.alias,
-        ok: true,
-        path: effectiveDatabasePath(db),
-        pathRole: effectiveDatabasePath(db) === db.filePath ? 'production' : 'standby_read_only',
-        fileSizeBytes: databaseFileSize(db),
-        version: version || 'Nao informado',
-        licensedUnit: licensedUnit || 'Nao informado'
-      });
-    } catch (err) {
-      diagnostics.push({
-        id: db.id,
-        name: db.name,
-        alias: db.alias,
+        ...base,
         ok: false,
-        path: effectiveDatabasePath(db),
-        pathRole: effectiveDatabasePath(db) === db.filePath ? 'production' : 'standby_read_only',
-        fileSizeBytes: databaseFileSize(db),
-        version: 'Erro',
-        licensedUnit: 'Erro',
-        error: err.message
+        version: 'Nao informado',
+        licensedUnit: 'Nao informado',
+        error: `${versionError.message}; ${licensedUnitError.message}`
       });
+      continue;
     }
+    diagnostics.push({
+      ...base,
+      ok: true,
+      version: versionResult.status === 'fulfilled' && versionResult.value ? versionResult.value : 'Nao informado',
+      licensedUnit: licensedUnitResult.status === 'fulfilled' && licensedUnitResult.value ? licensedUnitResult.value : 'Nao informado',
+      versionError: versionError?.message || '',
+      licensedUnitError: licensedUnitError?.message || ''
+    });
   }
   return diagnostics;
 }

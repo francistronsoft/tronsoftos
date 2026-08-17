@@ -37,13 +37,13 @@ const tronsoftosApiUrl = String(process.env.TRONSOFTOS_API_URL || 'http://host.d
 const defaultProductionAlias = 'erp_tronsoft';
 const defaultBackupFrequencyMinutes = normalizeBackupMinutes(process.env.TRONFIRE_BACKUP_FREQUENCY_MINUTES, 20);
 const defaultBackupRetentionDays = normalizeBackupMinutes(process.env.TRONFIRE_BACKUP_RETENTION_DAYS, 30);
-const backupTimeoutMinutes = normalizeBackupMinutes(process.env.TRONFIRE_BACKUP_TIMEOUT_MINUTES, 240, 30, 1440);
-const backupValidationTimeoutMinutes = normalizeBackupMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_TIMEOUT_MINUTES, backupTimeoutMinutes, 30, 1440);
+const backupTimeoutMinutes = normalizeBackupMinutes(process.env.TRONFIRE_BACKUP_TIMEOUT_MINUTES, 120, 30, 1440);
+const backupValidationTimeoutMinutes = normalizeBackupMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_TIMEOUT_MINUTES, 45, 15, 240);
 const backupValidationTimeoutMs = backupValidationTimeoutMinutes * 60 * 1000;
-const configuredRunningBackupTtlMinutes = Number(process.env.TRONFIRE_BACKUP_RUNNING_TTL_MINUTES || 360);
+const configuredRunningBackupTtlMinutes = Number(process.env.TRONFIRE_BACKUP_RUNNING_TTL_MINUTES || 60);
 const runningBackupTtlMinutes = Number.isFinite(configuredRunningBackupTtlMinutes)
   ? Math.max(configuredRunningBackupTtlMinutes, 30)
-  : 360;
+  : 60;
 const runningBackupTtlMs = runningBackupTtlMinutes * 60 * 1000;
 
 function normalizeBackupMinutes(value, fallback, min = 1, max = 10080) {
@@ -1628,6 +1628,8 @@ app.get('/api/internal/database-version', async (req) => {
       fileSizeBytes: database.fileSizeBytes ?? null,
       sizeMb: database.fileSizeBytes ? Math.round((Number(database.fileSizeBytes) / 1024 / 1024) * 10) / 10 : null,
       error: database.error || '',
+      versionError: database.versionError || '',
+      licensedUnitError: database.licensedUnitError || '',
       indexHealth,
       indexAudit
     });

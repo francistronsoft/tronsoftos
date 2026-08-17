@@ -26,15 +26,15 @@ const CLUSTER_LOCK_FILE = process.env.TRONSOFTOS_CLUSTER_LOCK || `${TRONSOFTOS_S
 const CLUSTER_SECRETS_FILE = process.env.TRONSOFTOS_CLUSTER_SECRETS || `${TRONSOFTOS_STATE_DIR}/cluster-secrets.env`;
 const DEFAULT_BACKUP_FREQUENCY_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_FREQUENCY_MINUTES, 20);
 const DEFAULT_BACKUP_RETENTION_DAYS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_RETENTION_DAYS, 30);
-const BACKUP_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_TIMEOUT_MINUTES, 240, 30, 1440);
-const BACKUP_VALIDATION_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_TIMEOUT_MINUTES, BACKUP_TIMEOUT_MINUTES, 30, 1440);
+const BACKUP_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_TIMEOUT_MINUTES, 120, 30, 1440);
+const BACKUP_VALIDATION_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_TIMEOUT_MINUTES, 45, 15, 240);
 const ORPHANED_BACKUP_MIN_AGE_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_ORPHANED_MIN_AGE_MINUTES, 5, 1, 60);
 const FIREBIRD_SESSION_RETENTION_DAYS = 30;
 const FIREBIRD_UNRESPONSIVE_FAILURE_THRESHOLD = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_UNRESPONSIVE_FAILURES, 2, 1, 10);
-const CONFIGURED_RUNNING_BACKUP_TTL_MINUTES = Number(process.env.TRONFIRE_BACKUP_RUNNING_TTL_MINUTES || 360);
+const CONFIGURED_RUNNING_BACKUP_TTL_MINUTES = Number(process.env.TRONFIRE_BACKUP_RUNNING_TTL_MINUTES || 60);
 const RUNNING_BACKUP_TTL_MINUTES = Number.isFinite(CONFIGURED_RUNNING_BACKUP_TTL_MINUTES)
   ? Math.max(CONFIGURED_RUNNING_BACKUP_TTL_MINUTES, 30)
-  : 360;
+  : 60;
 const RUNNING_BACKUP_TTL_MS = RUNNING_BACKUP_TTL_MINUTES * 60 * 1000;
 const BACKUP_TIMEOUT_MS = BACKUP_TIMEOUT_MINUTES * 60 * 1000;
 const BACKUP_VALIDATION_TIMEOUT_MS = BACKUP_VALIDATION_TIMEOUT_MINUTES * 60 * 1000;
@@ -1058,6 +1058,9 @@ async function runBackup(db, reason = 'AUTO') {
       where: { id: job.id },
       data: { status: 'SUCCESS', finishedAt: new Date(), backupSize: BigInt(sizeOut.trim()), sha256: sha }
     });
+    await resolveActiveAlertsByType('BACKUP_FAILED');
+    await resolveActiveAlertsByType(`BACKUP_RUNNING_ORPHANED_${db.alias}`);
+    await resolveActiveAlertsByType('BACKUP_RUNNING_STALE_WITH_PROCESS');
     await uploadBackupJobToExternal(db, job.id, backupPath);
     console.log(`[worker] backup ${reason} OK: ${db.alias}`);
   } catch (err) {
@@ -1177,10 +1180,15 @@ async function checkDatabases() {
 }
 
 async function checkTools() {
+  let missing = 0;
   for (const bin of ['gbak','gfix','gstat','isql']) {
     try { await dockerExec(['test','-x',`${FIREBIRD_BIN}/${bin}`]); }
-    catch { await prisma.alert.create({ data: { type: 'FIREBIRD_TOOL_MISSING', severity: 'CRITICAL', message: `Utilitário ausente: ${bin}` } }); }
+    catch {
+      missing += 1;
+      await createAlertOnce('FIREBIRD_TOOL_MISSING', 'CRITICAL', `Utilitário ausente: ${bin}`);
+    }
   }
+  if (missing === 0) await resolveActiveAlertsByType('FIREBIRD_TOOL_MISSING');
 }
 
 cron.schedule('*/5 * * * *', async () => {
