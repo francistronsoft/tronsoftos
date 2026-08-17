@@ -202,6 +202,30 @@ run_with_retry() {
   return 1
 }
 
+configure_time_sync() {
+  local timezone="${TRONSOFTOS_TIMEZONE:-America/Sao_Paulo}"
+  if command -v timedatectl >/dev/null 2>&1; then
+    timedatectl set-timezone "$timezone" || echo "Aviso: nao foi possivel configurar timezone $timezone." >&2
+  fi
+
+  if [ "${TRONSOFTOS_ENABLE_NTP:-true}" != "true" ]; then
+    echo "Sincronizacao NTP desativada por TRONSOFTOS_ENABLE_NTP=false."
+    return 0
+  fi
+
+  if ! systemctl list-unit-files systemd-timesyncd.service >/dev/null 2>&1; then
+    apt_get install -y systemd-timesyncd || {
+      echo "Aviso: systemd-timesyncd nao foi instalado; sincronizacao NTP ficara indisponivel ate instalar um servico NTP." >&2
+      return 0
+    }
+  fi
+
+  if command -v timedatectl >/dev/null 2>&1; then
+    timedatectl set-ntp true || echo "Aviso: nao foi possivel ativar NTP via timedatectl." >&2
+  fi
+  systemctl enable --now systemd-timesyncd.service >/dev/null 2>&1 || echo "Aviso: systemd-timesyncd nao iniciou automaticamente." >&2
+}
+
 if [ "$(id -u)" -ne 0 ]; then
   echo "Execute como root: sudo ./install.sh" >&2
   exit 77
@@ -212,6 +236,7 @@ apt_get update
 apt_get install -y ca-certificates curl gnupg openssl rsync openssh-client openssh-server keepalived rclone nodejs npm sudo
 apt_get install -y samba samba-common-bin || echo "Aviso: samba nao foi instalado; compartilhamento via rede ficara indisponivel ate instalar o pacote samba." >&2
 install_docker
+configure_time_sync
 
 echo "Criando usuario e diretorios..."
 if ! getent group "$GROUP_NAME" >/dev/null; then
