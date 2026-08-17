@@ -481,7 +481,7 @@ function DashboardView({ dashboard }) {
           detailClassName="text-white/80"
         />
         <Stat label="Tempo ligado" value={formatDurationSeconds(dashboard.hostUptimeSeconds)} detail="uptime do servidor" icon={FileClock} tone="green" />
-        <Stat label="Papel" value={dashboard.cluster.nodeRole} detail={dashboard.cluster.vip || 'VIP nao configurado'} icon={ShieldCheck} tone="green" />
+        <Stat label="Papel" value={dashboard.cluster.nodeRole} detail={dashboard.cluster.vip || 'Não possui H.A.'} icon={ShieldCheck} tone="green" />
         <Stat label="Containers online" value={`${onlineContainers}/${troncomandaContainers.length}`} detail="TronComanda" icon={Boxes} tone="slate" />
         <Stat label="Alertas" value={alerts.length} detail={alerts[0]?.message || 'sem alertas ativos'} icon={AlertTriangle} tone={alerts.length ? 'amber' : 'green'} />
         <Stat label="Hora servidor" value={formatDateTime(dashboard.generatedAt)} detail="gerado pelo backend" icon={FileClock} tone="slate" />
