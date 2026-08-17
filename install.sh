@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_DIR="/etc/tronsoftos"
 ENV_FILE="${ENV_DIR}/tronsoftos.env"
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
 if [ -f "$ENV_FILE" ]; then
   set -a
   # shellcheck disable=SC1090
