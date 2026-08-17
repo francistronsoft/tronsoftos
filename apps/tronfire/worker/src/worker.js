@@ -148,9 +148,23 @@ async function runHostFirebirdShell(args, timeoutMs = 60_000) {
     throw error;
   }
   return {
-    stdout: payload.stdout || '',
+    stdout: stripHostScriptControlOutput(payload.stdout || ''),
     stderr: payload.stderr || ''
   };
+}
+
+function stripHostScriptControlOutput(stdout = '') {
+  return String(stdout || '')
+    .split(/\r?\n/)
+    .filter((line) => {
+      try {
+        const parsed = JSON.parse(line);
+        return !(parsed?.ok === true && String(parsed?.script || '').includes('tronsoftos-firebird-'));
+      } catch {
+        return true;
+      }
+    })
+    .join('\n');
 }
 
 function isPrimaryNode() {
