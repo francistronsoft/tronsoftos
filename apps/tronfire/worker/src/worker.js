@@ -15,7 +15,7 @@ const FIREBIRD_EXEC_MODE = String(process.env.FIREBIRD_EXEC_MODE || 'container')
 const TRONFIRE_DEPLOYMENT_MODE = String(process.env.TRONFIRE_DEPLOYMENT_MODE || 'simple').toLowerCase();
 const TRONFIRE_NODE_ROLE = String(process.env.TRONFIRE_NODE_ROLE || 'primary').toLowerCase();
 const TRONSOFTOS_NODE_NAME = String(process.env.TRONSOFTOS_NODE_NAME || '').trim();
-const FIREBIRD_HOST = process.env.FIREBIRD_HOST || 'host.docker.internal';
+const FIREBIRD_HOST = process.env.FIREBIRD_HOST || (FIREBIRD_EXEC_MODE === 'host' || FIREBIRD_EXEC_MODE === 'direct' ? 'localhost' : 'host.docker.internal');
 const HOST_PROC_ROOT = process.env.HOST_PROC_ROOT || '/host/proc';
 const HOST_SYS_ROOT = process.env.HOST_SYS_ROOT || '/host/sys';
 const FIREBIRD_HOST_TARGET = 'firebird_host';
