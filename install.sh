@@ -367,10 +367,9 @@ systemctl daemon-reload
 
 echo "Subindo servicos do host..."
 cd "$APP_DIR/apps/tronfire"
-set -a
-. "$APP_DIR/apps/tronfire/.env"
-set +a
-if [ "${FIREBIRD_EXEC_MODE:-container}" = "host" ]; then
+tronfire_firebird_exec_mode="$(env_value "$APP_DIR/apps/tronfire/.env" "FIREBIRD_EXEC_MODE" | tr -d "\"'" | tr '[:upper:]' '[:lower:]')"
+tronfire_firebird_exec_mode="${tronfire_firebird_exec_mode:-container}"
+if [ "$tronfire_firebird_exec_mode" = "host" ]; then
   TRONSOFTOS_APP_DIR="$APP_DIR" bash "$APP_DIR/scripts/install-firebird25-host.sh"
 fi
 
@@ -379,7 +378,7 @@ systemctl enable --now tronsoftos-rclone-backup.timer
 
 echo "Subindo TronFire e aplicando migrations..."
 cd "$APP_DIR/apps/tronfire"
-if [ "${FIREBIRD_EXEC_MODE:-container}" = "host" ]; then
+if [ "$tronfire_firebird_exec_mode" = "host" ]; then
   run_with_retry "Subindo TronFire" docker compose -f docker-compose.yml -f docker-compose.host-firebird.yml up -d --build
   docker compose -f docker-compose.yml -f docker-compose.host-firebird.yml exec -T backend npx prisma migrate deploy
   docker compose -f docker-compose.yml -f docker-compose.host-firebird.yml exec -T backend node prisma/seed.js
