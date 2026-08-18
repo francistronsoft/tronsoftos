@@ -1591,11 +1591,17 @@ function ClusterView({ dashboard }) {
 
 function BackupsView({ dashboard }) {
   const queryClient = useQueryClient();
+  const [googleAuthPolling, setGoogleAuthPolling] = useState(false);
   const rcloneQuery = useQuery({ queryKey: ['rclone-settings'], queryFn: () => api('/api/backups/rclone') });
   const rclone = rcloneQuery.data || dashboard.backups.rclone || {};
-  const centralGoogleQuery = useQuery({ queryKey: ['central-google-oauth'], queryFn: () => api('/api/backups/google/central'), retry: false });
-  const centralGoogle = centralGoogleQuery.data || {};
   const driveConfigured = Boolean(rclone.remote && rclone.configConfigured);
+  const centralGoogleQuery = useQuery({
+    queryKey: ['central-google-oauth'],
+    queryFn: () => api('/api/backups/google/central'),
+    retry: false,
+    refetchInterval: query => (googleAuthPolling && !driveConfigured && query.state.data?.configured !== false ? 5000 : false)
+  });
+  const centralGoogle = centralGoogleQuery.data || {};
   const remoteBackupsQuery = useQuery({ queryKey: ['rclone-remote-backups'], queryFn: () => api('/api/backups/rclone/remote-files'), enabled: driveConfigured, staleTime: 30000 });
   const quota = dashboard.backups.quota;
   const quotaLabel = quota?.ok === false
@@ -1611,9 +1617,11 @@ function BackupsView({ dashboard }) {
       : 'Conta Google: aguardando autenticacao';
   const tokenStatus = rclone.tokenStatus || {};
   const needsGoogleReconnect = quota?.code === 'google_drive_auth_expired' || (tokenStatus.configured && !tokenStatus.hasRefreshToken);
+  const centralConnectedPendingApply = Boolean(centralGoogle.connected && !driveConfigured);
   const remoteFiles = remoteBackupsQuery.data?.files || [];
   const [downloadJobId, setDownloadJobId] = useState(null);
   const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false);
+  const [centralApplyAttemptKey, setCentralApplyAttemptKey] = useState('');
   const values = {
     enabled: rclone.enabled || false,
     bin: rclone.bin || '/usr/bin/rclone',
@@ -1625,6 +1633,17 @@ function BackupsView({ dashboard }) {
     remoteRetentionDays: rclone.remoteRetentionDays || 30,
     configContent: ''
   };
+  const centralApplyMutation = useMutation({
+    mutationFn: () => postApi('/api/backups/google/central/apply', values),
+    onSuccess: () => {
+      setGoogleAuthPolling(false);
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['rclone-settings'] });
+      queryClient.invalidateQueries({ queryKey: ['rclone-remote-backups'] });
+      queryClient.invalidateQueries({ queryKey: ['central-google-oauth'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    }
+  });
   const uploadTestMutation = useMutation({
     mutationFn: async () => {
       if (!driveConfigured) {
@@ -1643,7 +1662,9 @@ function BackupsView({ dashboard }) {
   const centralGoogleStartMutation = useMutation({
     mutationFn: () => postApi('/api/backups/google/central/start', { remote: values.remote, path: values.path }),
     onSuccess: data => {
+      setGoogleAuthPolling(true);
       queryClient.invalidateQueries({ queryKey: ['events'] });
+      queryClient.invalidateQueries({ queryKey: ['central-google-oauth'] });
       if (data.authUrl) window.open(data.authUrl, '_blank', 'noopener,noreferrer');
     }
   });
@@ -1678,14 +1699,21 @@ function BackupsView({ dashboard }) {
     enabled: !!downloadJobId,
     refetchInterval: query => query.state.data?.status === 'running' ? 1200 : false
   });
+  const centralApplyKey = `${googleAccountEmail || 'google'}|${values.remote}|${values.path}`;
+
+  useEffect(() => {
+    if (!centralConnectedPendingApply || centralApplyMutation.isPending || centralApplyAttemptKey === centralApplyKey) return;
+    setCentralApplyAttemptKey(centralApplyKey);
+    centralApplyMutation.mutate();
+  }, [centralApplyKey, centralApplyAttemptKey, centralApplyMutation, centralConnectedPendingApply]);
 
   return (
     <div className="grid gap-5 xl:grid-cols-[1fr_1fr]">
-      <Card title="Backups no Google Drive" icon={Cloud} action={<StatusPill value={remoteBackupsQuery.isError ? 'warning' : driveConfigured ? 'online' : centralGoogle.connected ? 'warning' : 'disabled'} />} className="xl:col-span-2">
+      <Card title="Backups no Google Drive" icon={Cloud} action={<StatusPill value={remoteBackupsQuery.isError || centralApplyMutation.isError ? 'warning' : driveConfigured ? 'online' : centralGoogle.connected ? 'warning' : 'disabled'} />} className="xl:col-span-2">
         <div className="mb-4 grid gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-700 lg:grid-cols-[minmax(0,1fr)_auto]">
           <div>
-            <div className="font-medium text-slate-900">{remoteBackupsQuery.data?.target || (driveConfigured ? `${values.remote}:${values.path}` : 'Google Drive ainda nao aplicado')}</div>
-            <div className="text-xs text-slate-500">Use a Central para autorizar o Google Drive e confirme com upload de teste.</div>
+            <div className="font-medium text-slate-900">{remoteBackupsQuery.data?.target || (driveConfigured ? `${values.remote}:${values.path}` : centralConnectedPendingApply ? 'Google Drive autenticado; aplicando neste servidor' : 'Google Drive ainda nao aplicado')}</div>
+            <div className="text-xs text-slate-500">Use a Central para autorizar o Google Drive. O TronSoftOS aplica a configuracao local automaticamente; o upload de teste continua recomendado como conferencia final.</div>
             <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
               <StatusPill value={centralGoogleQuery.isError ? 'Central indisponivel' : centralGoogle.connected ? 'Google conectado' : 'Google pendente'} />
               <span className={googleAccountEmail ? 'font-medium text-slate-700' : 'text-amber-700'}>{googleAccountLabel}</span>
@@ -1733,6 +1761,8 @@ function BackupsView({ dashboard }) {
           </div>
         </div>
         {uploadTestMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Upload OK: {uploadTestMutation.data.target}</div> : null}
+        {centralApplyMutation.isPending ? <div className="mb-3 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800">Google autenticado na Central. Aplicando rclone neste servidor...</div> : null}
+        {centralConnectedPendingApply && !centralApplyMutation.isPending && !centralApplyMutation.isError ? <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">Google conectado na Central, mas o rclone local ainda nao foi confirmado. O TronSoftOS esta tentando aplicar automaticamente.</div> : null}
         {cleanupMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Gdrive limpo: {cleanupMutation.data.removed} arquivo(s) removido(s), {formatBytesValue(cleanupMutation.data.freedBytes)} liberados.</div> : null}
         {needsGoogleReconnect ? (
           <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
@@ -1741,7 +1771,7 @@ function BackupsView({ dashboard }) {
           </div>
         ) : null}
         {resetAuthMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">{resetAuthMutation.data.message}</div> : null}
-        {centralGoogleStartMutation.isError || uploadTestMutation.isError || resetAuthMutation.isError || cleanupMutation.isError ? <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{centralGoogleStartMutation.error?.message || uploadTestMutation.error?.message || resetAuthMutation.error?.message || cleanupMutation.error?.message}</div> : null}
+        {centralGoogleStartMutation.isError || centralApplyMutation.isError || uploadTestMutation.isError || resetAuthMutation.isError || cleanupMutation.isError ? <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{centralGoogleStartMutation.error?.message || centralApplyMutation.error?.message || uploadTestMutation.error?.message || resetAuthMutation.error?.message || cleanupMutation.error?.message}</div> : null}
         <div className="overflow-hidden rounded-md border border-slate-200">
           {remoteFiles.length ? remoteFiles.slice(0, 30).map(file => (
             <div key={file.path} className="grid grid-cols-[1fr_100px_170px_110px] items-center gap-3 border-b border-slate-100 px-3 py-2 text-sm last:border-0">
