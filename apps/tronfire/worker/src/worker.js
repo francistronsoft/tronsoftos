@@ -30,6 +30,8 @@ const DEFAULT_BACKUP_FREQUENCY_MINUTES = normalizePositiveMinutes(process.env.TR
 const DEFAULT_BACKUP_RETENTION_DAYS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_RETENTION_DAYS, 30);
 const BACKUP_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_TIMEOUT_MINUTES, 120, 30, 1440);
 const BACKUP_VALIDATION_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_TIMEOUT_MINUTES, 45, 15, 240);
+const FIREBIRD_QUERY_TIMEOUT_SECONDS = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_QUERY_TIMEOUT_SECONDS, 20, 5, 600);
+const FIREBIRD_HEALTH_COOLDOWN_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_HEALTH_COOLDOWN_MINUTES, 10, 1, 120);
 const ORPHANED_BACKUP_MIN_AGE_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_ORPHANED_MIN_AGE_MINUTES, 5, 1, 60);
 const FIREBIRD_SESSION_RETENTION_DAYS = 30;
 const FIREBIRD_UNRESPONSIVE_FAILURE_THRESHOLD = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_UNRESPONSIVE_FAILURES, 2, 1, 10);
@@ -49,9 +51,12 @@ const METRIC_CONTAINERS = [
   'tronfire_backend',
   'tronfire_worker'
 ].filter(name => FIREBIRD_EXEC_MODE === 'container' || name !== FIREBIRD_CONTAINER);
+const FIREBIRD_ROUTINE_LOCK_KEY = '__firebird_global__';
 let backupRunning = false;
 let sessionCollectionRunning = false;
 const firebirdSessionFailureCounts = new Map();
+const databaseRoutineLocks = new Map();
+const firebirdCircuitBreakers = new Map();
 
 function normalizePositiveMinutes(value, fallback, min = 1, max = 10080) {
   const number = Number(value);
@@ -303,15 +308,17 @@ async function queryFirebirdSessions(db) {
     'QUIT;'
   ].join('\n');
   const cmd = [
+    `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; }`,
     `printf %s ${shQuote(`${sql}\n`)}`,
     '|',
+    'run_with_timeout',
     shQuote(`${FIREBIRD_BIN}/isql`),
     '-q',
     '-user SYSDBA',
     `-password ${shQuote(FIREBIRD_PASSWORD)}`,
     shQuote(firebirdDbConnect(db.filePath))
   ].join(' ');
-  const { stdout } = await dockerExec(['sh', '-lc', cmd], 60_000);
+  const { stdout } = await dockerExec(['sh', '-lc', cmd], (FIREBIRD_QUERY_TIMEOUT_SECONDS + 15) * 1000);
   return parseFirebirdSessions(stdout);
 }
 
@@ -328,7 +335,9 @@ async function collectFirebirdSessionHistory() {
       orderBy: [{ isPrimary: 'desc' }, { updatedAt: 'asc' }]
     });
     if (!db) return;
-    const sessions = await queryFirebirdSessions(db);
+    if (databaseRoutineActive(db) || firebirdCircuitOpen(db)) return;
+    const sessions = await withDatabaseRoutineLock(db, 'session-history', () => queryFirebirdSessions(db));
+    if (!sessions) return;
     const now = new Date();
     const sourceNode = process.env.TRONSOFTOS_NODE_NAME || null;
     const sessionKeys = [];
@@ -393,7 +402,7 @@ async function collectFirebirdSessionHistory() {
     if (db?.id && db?.alias) {
       const failures = (firebirdSessionFailureCounts.get(db.id) || 0) + 1;
       firebirdSessionFailureCounts.set(db.id, failures);
-      if (failures >= FIREBIRD_UNRESPONSIVE_FAILURE_THRESHOLD) {
+      if (isFirebirdConnectivityError(err) && failures >= FIREBIRD_UNRESPONSIVE_FAILURE_THRESHOLD) {
         await createAlertOnce(
           `FIREBIRD_UNRESPONSIVE_${db.alias}`,
           'CRITICAL',
@@ -603,6 +612,115 @@ function firebirdConnectionFailureMessage(err) {
   return 'consulta de monitoramento falhou';
 }
 
+function circuitKey(db) {
+  return db?.id || db?.alias || String(db?.filePath || 'unknown');
+}
+
+function firebirdCircuit(db) {
+  return firebirdCircuitBreakers.get(circuitKey(db)) || { failures: 0, degradedUntil: 0, reason: '' };
+}
+
+function firebirdCircuitOpen(db) {
+  const state = firebirdCircuit(db);
+  if (!state.degradedUntil || Date.now() >= state.degradedUntil) return false;
+  return state;
+}
+
+function isFirebirdTimeoutError(err) {
+  const message = String(err?.message || err || '').toLowerCase();
+  return err?.killed || err?.signal || err?.code === 'ETIMEDOUT' || message.includes('timeout') || message.includes('tempo limite');
+}
+
+function isFirebirdConnectivityError(err) {
+  const message = String(err?.message || err || '').toLowerCase();
+  return isFirebirdTimeoutError(err)
+    || message.includes('errno = 110')
+    || message.includes('errno = 111')
+    || message.includes('connection refused')
+    || message.includes('unable to complete network request')
+    || message.includes('unavailable');
+}
+
+async function markFirebirdSuccess(db) {
+  firebirdCircuitBreakers.delete(circuitKey(db));
+  if (db?.alias) {
+    await resolveActiveAlertsByType(`FIREBIRD_DEGRADED_${db.alias}`);
+  }
+}
+
+async function markFirebirdFailure(db, err, context) {
+  if (!db?.id) return;
+  const key = circuitKey(db);
+  const current = firebirdCircuit(db);
+  const failures = current.failures + 1;
+  const reason = firebirdConnectionFailureMessage(err);
+  const data = { failures, reason, degradedUntil: current.degradedUntil || 0 };
+  if (isFirebirdConnectivityError(err) && (failures >= FIREBIRD_UNRESPONSIVE_FAILURE_THRESHOLD || isFirebirdTimeoutError(err))) {
+    data.degradedUntil = Date.now() + FIREBIRD_HEALTH_COOLDOWN_MINUTES * 60 * 1000;
+    await prisma.managedDatabase.update({
+      where: { id: db.id },
+      data: { status: 'DEGRADED', lastCheckAt: new Date() }
+    }).catch(() => {});
+    await createAlertOnce(
+      `FIREBIRD_DEGRADED_${db.alias}`,
+      'CRITICAL',
+      `Firebird degradado em ${db.name}: ${reason}. Rotinas automaticas pausadas por ${FIREBIRD_HEALTH_COOLDOWN_MINUTES} min. Origem: ${context}`
+    );
+  }
+  firebirdCircuitBreakers.set(key, data);
+}
+
+function activeRoutineLock(key) {
+  const active = databaseRoutineLocks.get(key);
+  if (!active) return false;
+  if (Date.now() - active.startedAt < 60 * 60 * 1000) return active;
+  databaseRoutineLocks.delete(key);
+  return false;
+}
+
+function databaseRoutineActive(db) {
+  return activeRoutineLock(FIREBIRD_ROUTINE_LOCK_KEY) || activeRoutineLock(circuitKey(db));
+}
+
+function setDatabaseRoutineLock(db, routine) {
+  const lock = { routine, databaseAlias: db?.alias || null, startedAt: Date.now() };
+  databaseRoutineLocks.set(FIREBIRD_ROUTINE_LOCK_KEY, lock);
+  databaseRoutineLocks.set(circuitKey(db), lock);
+}
+
+function clearDatabaseRoutineLock(db, routine) {
+  for (const key of [FIREBIRD_ROUTINE_LOCK_KEY, circuitKey(db)]) {
+    const current = databaseRoutineLocks.get(key);
+    if (current?.routine === routine) databaseRoutineLocks.delete(key);
+  }
+}
+
+async function withDatabaseRoutineLock(db, routine, fn) {
+  const key = circuitKey(db);
+  const active = activeRoutineLock(FIREBIRD_ROUTINE_LOCK_KEY) || activeRoutineLock(key);
+  if (active) {
+    console.log(`[worker] ${routine} ignorado: Firebird ja possui rotina ${active.routine} em andamento${active.databaseAlias ? ` para ${active.databaseAlias}` : ''}`);
+    return null;
+  }
+  const circuit = firebirdCircuitOpen(db);
+  if (circuit) {
+    const remainingMinutes = Math.ceil((circuit.degradedUntil - Date.now()) / 60000);
+    console.log(`[worker] ${routine} adiado: ${db.alias} em estado degradado por mais ${remainingMinutes} min (${circuit.reason})`);
+    return null;
+  }
+  setDatabaseRoutineLock(db, routine);
+  try {
+    const result = await fn();
+    await markFirebirdSuccess(db);
+    return result;
+  } catch (err) {
+    await markFirebirdFailure(db, err, routine);
+    throw err;
+  } finally {
+    clearDatabaseRoutineLock(db, routine);
+  }
+}
+
 async function backupToolProcesses() {
   try {
     const { stdout } = await dockerExec(['sh', '-lc', 'ps -eo pid,args 2>/dev/null || ps aux 2>/dev/null'], 10_000);
@@ -648,6 +766,11 @@ function commandTimeoutMessage(err, phase, timeoutMinutes) {
 function firebirdTimeoutCommand(minutes) {
   const timeout = Math.max(1, Math.round(Number(minutes) || BACKUP_TIMEOUT_MINUTES));
   return `if command -v timeout >/dev/null 2>&1; then timeout -k 30s ${timeout}m "$@"; else "$@"; fi`;
+}
+
+function firebirdTimeoutSecondsCommand(seconds = FIREBIRD_QUERY_TIMEOUT_SECONDS) {
+  const timeout = Math.max(5, Math.round(Number(seconds) || FIREBIRD_QUERY_TIMEOUT_SECONDS));
+  return `if command -v timeout >/dev/null 2>&1; then timeout -k 5s ${timeout}s "$@"; else "$@"; fi`;
 }
 
 async function markStaleRunningBackupsFailed(databaseId = null, reason = 'stale-running-backup-cleanup') {
@@ -997,7 +1120,7 @@ async function validateBackupRestore(db, backupPath, logPath, stamp) {
     `run_with_timeout ${shQuote(`${FIREBIRD_BIN}/gbak`)} -c -user SYSDBA -password ${shQuote(FIREBIRD_PASSWORD)} "$restore_src" ${shQuote(firebirdCreateTarget(tempRestorePath))} >> "$log" 2>&1 || fail 82 "Falha ao restaurar backup para validacao"`,
     'if [ "$restore_src" != "$backup" ]; then rm -f "$restore_src" || true; fi',
     'test -f "$restore" || fail 83 "Restore de validacao terminou sem arquivo restaurado"',
-    `${shQuote(`${FIREBIRD_BIN}/gstat`)} -h "$restore" >> "$log" 2>&1 || fail 84 "Falha no gstat do backup restaurado"`,
+    `run_with_timeout ${shQuote(`${FIREBIRD_BIN}/gstat`)} -h "$restore" >> "$log" 2>&1 || fail 84 "Falha no gstat do backup restaurado"`,
     'rm -f "$restore"',
     'echo "[validacao] backup aprovado" >> "$log"'
   ].join('; ');
@@ -1046,22 +1169,34 @@ async function runBackup(db, reason = 'AUTO') {
     console.log(`[worker] backup ${reason} ignorado: operacao ${currentDb.operationKind || 'desconhecida'} em andamento para ${db.alias}`);
     return;
   }
+  if (databaseRoutineActive(db)) {
+    console.log(`[worker] backup ${reason} ignorado: rotina Firebird ja em andamento para ${db.alias}`);
+    return;
+  }
+  if (firebirdCircuitOpen(db)) {
+    console.log(`[worker] backup ${reason} adiado: Firebird degradado para ${db.alias}`);
+    return;
+  }
   const stamp = backupStamp();
   const rawBackupPath = `/firebird/backups/${db.alias}_${stamp}.gbk`;
   const backupPath = `${rawBackupPath}.gz`;
   const manifestPath = `${backupPath}.manifest.json`;
   const logPath = `/firebird/logs/backup_${db.alias}_${stamp}.log`;
   const attemptStartedAt = new Date();
-  await prisma.managedDatabase.update({
-    where: { id: db.id },
-    data: { lastBackupAttemptAt: attemptStartedAt }
-  });
-  const job = await prisma.backupJob.create({
-    data: { databaseId: db.id, status: 'RUNNING', startedAt: attemptStartedAt, backupPath, manifestPath, logPath }
-  });
+  let job = null;
 
+  setDatabaseRoutineLock(db, `backup-${reason}`);
   try {
+    await prisma.managedDatabase.update({
+      where: { id: db.id },
+      data: { lastBackupAttemptAt: attemptStartedAt }
+    });
+    job = await prisma.backupJob.create({
+      data: { databaseId: db.id, status: 'RUNNING', startedAt: attemptStartedAt, backupPath, manifestPath, logPath }
+    });
     const cmd = [
+      `run_with_timeout() { ${firebirdTimeoutCommand(BACKUP_TIMEOUT_MINUTES)}; }`,
+      'run_with_timeout',
       `${shQuote(`${FIREBIRD_BIN}/gbak`)}`,
       '-b -v',
       '-user SYSDBA',
@@ -1072,7 +1207,7 @@ async function runBackup(db, reason = 'AUTO') {
       `&& gzip -f ${shQuote(rawBackupPath)}`
     ].join(' ');
     try {
-      await dockerExec(['sh', '-lc', cmd], BACKUP_TIMEOUT_MS);
+      await dockerExec(['sh', '-lc', cmd], BACKUP_TIMEOUT_MS + 60_000);
     } catch (err) {
       throw new Error(commandTimeoutMessage(err, 'geracao do backup Firebird', BACKUP_TIMEOUT_MINUTES));
     }
@@ -1102,16 +1237,22 @@ async function runBackup(db, reason = 'AUTO') {
     await resolveActiveAlertsByType('BACKUP_FAILED');
     await resolveActiveAlertsByType(`BACKUP_RUNNING_ORPHANED_${db.alias}`);
     await resolveActiveAlertsByType('BACKUP_RUNNING_STALE_WITH_PROCESS');
+    await markFirebirdSuccess(db);
     await uploadBackupJobToExternal(db, job.id, backupPath);
     console.log(`[worker] backup ${reason} OK: ${db.alias}`);
   } catch (err) {
+    await markFirebirdFailure(db, err, `backup-${reason}`);
     const quarantined = quarantineInvalidBackup(backupPath, manifestPath);
-    await prisma.backupJob.update({
-      where: { id: job.id },
-      data: { status: 'FAILED', finishedAt: new Date(), errorMessage: `${err.message}${quarantined.length ? ` | quarentena: ${quarantined.join(', ')}` : ''}` }
-    });
+    if (job) {
+      await prisma.backupJob.update({
+        where: { id: job.id },
+        data: { status: 'FAILED', finishedAt: new Date(), errorMessage: `${err.message}${quarantined.length ? ` | quarentena: ${quarantined.join(', ')}` : ''}` }
+      });
+    }
     await prisma.alert.create({ data: { type: 'BACKUP_FAILED', severity: 'CRITICAL', message: `Backup falhou: ${db.name}` } });
     console.error(`[worker] backup ${reason} erro: ${db.alias}`, err.message);
+  } finally {
+    clearDatabaseRoutineLock(db, `backup-${reason}`);
   }
 }
 
@@ -1199,6 +1340,7 @@ async function checkDatabases() {
       await markStaleRunningBackupsFailed(db.id, 'before-database-check');
       const runningBackup = await prisma.backupJob.count({ where: { databaseId: db.id, status: 'RUNNING' } });
       if (runningBackup > 0) continue;
+      if (databaseRoutineActive(db) || firebirdCircuitOpen(db)) continue;
       const logPath = `/firebird/logs/check_${db.alias}.log`;
       const cmd = [
         'set -e',
@@ -1206,10 +1348,12 @@ async function checkDatabases() {
         `db=${shQuote(firebirdDbConnect(db.filePath))}`,
         `log=${shQuote(logPath)}`,
         'test -f "$db_file"',
-        `printf 'select 1 from rdb$database;\\nquit;\\n' | ${shQuote(`${FIREBIRD_BIN}/isql`)} -user SYSDBA -password ${shQuote(FIREBIRD_PASSWORD)} "$db" > "$log" 2>&1`,
-        `${shQuote(`${FIREBIRD_BIN}/gstat`)} -h "$db_file" >> "$log" 2>&1`
+        `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; }`,
+        `printf 'select 1 from rdb$database;\\nquit;\\n' | run_with_timeout ${shQuote(`${FIREBIRD_BIN}/isql`)} -user SYSDBA -password ${shQuote(FIREBIRD_PASSWORD)} "$db" > "$log" 2>&1`,
+        `run_with_timeout ${shQuote(`${FIREBIRD_BIN}/gstat`)} -h "$db_file" >> "$log" 2>&1`
       ].join('; ');
-      await dockerExec(['sh','-lc', cmd], 120_000);
+      const checkResult = await withDatabaseRoutineLock(db, 'database-check', () => dockerExec(['sh','-lc', cmd], (FIREBIRD_QUERY_TIMEOUT_SECONDS * 2 + 20) * 1000));
+      if (!checkResult) continue;
       await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ONLINE', lastCheckAt: new Date() } });
       await prisma.alert.updateMany({ where: { type: `DATABASE_INTEGRITY_ERROR_${db.alias}`, resolved: false }, data: { resolved: true } });
       await prisma.alert.updateMany({ where: { type: `DATABASE_HEALTH_ERROR_${db.alias}`, resolved: false }, data: { resolved: true } });

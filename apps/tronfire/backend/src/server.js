@@ -39,6 +39,7 @@ const defaultBackupFrequencyMinutes = normalizeBackupMinutes(process.env.TRONFIR
 const defaultBackupRetentionDays = normalizeBackupMinutes(process.env.TRONFIRE_BACKUP_RETENTION_DAYS, 30);
 const backupTimeoutMinutes = normalizeBackupMinutes(process.env.TRONFIRE_BACKUP_TIMEOUT_MINUTES, 120, 30, 1440);
 const backupValidationTimeoutMinutes = normalizeBackupMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_TIMEOUT_MINUTES, 45, 15, 240);
+const firebirdQueryTimeoutSeconds = normalizeBackupMinutes(process.env.TRONFIRE_FIREBIRD_QUERY_TIMEOUT_SECONDS, 20, 5, 600);
 const backupValidationTimeoutMs = backupValidationTimeoutMinutes * 60 * 1000;
 const configuredRunningBackupTtlMinutes = Number(process.env.TRONFIRE_BACKUP_RUNNING_TTL_MINUTES || 60);
 const runningBackupTtlMinutes = Number.isFinite(configuredRunningBackupTtlMinutes)
@@ -140,6 +141,11 @@ function backupValidationFor(logPath) {
 
 function shellErrorText(err) {
   return [err?.stdout, err?.stderr, err?.message].filter(Boolean).join('\n').trim() || String(err);
+}
+
+function firebirdTimeoutSecondsCommand(seconds = firebirdQueryTimeoutSeconds) {
+  const timeout = Math.max(5, Math.round(Number(seconds) || firebirdQueryTimeoutSeconds));
+  return `if command -v timeout >/dev/null 2>&1; then timeout -k 5s ${timeout}s "$@"; else "$@"; fi`;
 }
 
 function isHaMode() {
@@ -539,15 +545,17 @@ async function firebirdAttachmentsForDatabase(db) {
     'QUIT;'
   ].join('\n');
   const cmd = [
+    `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; }`,
     `printf %s ${shQuote(`${sql}\n`)}`,
     '|',
+    'run_with_timeout',
     shQuote(`${firebirdBin}/isql`),
     '-q',
     '-user SYSDBA',
     `-password ${shQuote(password)}`,
     shQuote(connect)
   ].join(' ');
-  const out = await runFirebirdShellScript(cmd, 60_000);
+  const out = await runFirebirdShellScript(cmd, (firebirdQueryTimeoutSeconds + 15) * 1000);
   const attachments = parseFirebirdAttachments(out.stdout);
   return {
     databaseId: db.id,
@@ -694,15 +702,17 @@ async function indexHealthForDatabase(db) {
     'QUIT;'
   ].join('\n');
   const cmd = [
+    `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; }`,
     `printf %s ${shQuote(`${sql}\n`)}`,
     '|',
+    'run_with_timeout',
     shQuote(`${firebirdBin}/isql`),
     '-q',
     '-user SYSDBA',
     `-password ${shQuote(password)}`,
     shQuote(connect)
   ].join(' ');
-  const out = await runFirebirdShellScript(cmd, 60_000);
+  const out = await runFirebirdShellScript(cmd, (firebirdQueryTimeoutSeconds + 15) * 1000);
   const summary = parseIndexHealth(out.stdout);
   const classification = classifyIndexHealth(summary);
   const sizeTrend = await databaseSizeTrend(db, databaseFileSizeBytes(databasePath));
