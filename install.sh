@@ -4,16 +4,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_DIR="/etc/tronsoftos"
 ENV_FILE="${ENV_DIR}/tronsoftos.env"
-if [ -f "$ENV_FILE" ]; then
-  set -a
-  # shellcheck disable=SC1090
-  . "$ENV_FILE"
-  set +a
-fi
 
-APP_DIR="${TRONSOFTOS_APP_DIR:-$SCRIPT_DIR}"
-USER_NAME="${TRONSOFTOS_USER:-tronsoftos}"
-GROUP_NAME="${TRONSOFTOS_GROUP:-tronsoftos}"
+env_value() {
+  local file="$1"
+  local key="$2"
+  [ -f "$file" ] || return 0
+  grep "^$key=" "$file" | tail -n1 | cut -d= -f2-
+}
+
+APP_DIR="${TRONSOFTOS_APP_DIR:-$(env_value "$ENV_FILE" "TRONSOFTOS_APP_DIR")}"
+APP_DIR="${APP_DIR:-$SCRIPT_DIR}"
+USER_NAME="${TRONSOFTOS_USER:-$(env_value "$ENV_FILE" "TRONSOFTOS_USER")}"
+USER_NAME="${USER_NAME:-tronsoftos}"
+GROUP_NAME="${TRONSOFTOS_GROUP:-$(env_value "$ENV_FILE" "TRONSOFTOS_GROUP")}"
+GROUP_NAME="${GROUP_NAME:-tronsoftos}"
 
 prepare_frontend() {
   if [ ! -f "$APP_DIR/frontend/package.json" ]; then
@@ -149,13 +153,6 @@ set_env_value() {
   else
     printf '\n%s=%s\n' "$key" "$value" >> "$file"
   fi
-}
-
-env_value() {
-  local file="$1"
-  local key="$2"
-  [ -f "$file" ] || return 0
-  grep "^$key=" "$file" | tail -n1 | cut -d= -f2-
 }
 
 ensure_ha_sync_ssh_user() {
