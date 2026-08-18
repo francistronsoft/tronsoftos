@@ -5044,6 +5044,8 @@ function centralHostPayload() {
   const cpuModel = cpus.find(cpu => cpu?.model)?.model || '';
   return {
     hostname: os.hostname(),
+    serverTime: new Date().toISOString(),
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || process.env.TZ || '',
     os: `${os.type()} ${os.release()}`,
     architecture: os.arch(),
     ip: primaryHostIp(),
@@ -5814,7 +5816,11 @@ async function handleApi(req, reply, url) {
   if (req.method === 'POST' && url.pathname === '/api/cluster/pairing-file/import') return json(reply, 200, await importPairingFile(await readBody(req)));
   if (req.method === 'GET' && url.pathname === '/api/host/firebird') return json(reply, 200, await hostFirebirdStatus());
   if (req.method === 'POST' && url.pathname === '/api/host/firebird/aliases') return json(reply, 200, await hostFirebirdAliases(req));
-  if (req.method === 'POST' && url.pathname === '/api/host/firebird/script') return json(reply, 200, await hostFirebirdScript(req));
+  if (req.method === 'POST' && url.pathname === '/api/host/firebird/script') {
+    req.setTimeout?.(14_700_000);
+    reply.setTimeout?.(14_700_000);
+    return json(reply, 200, await hostFirebirdScript(req));
+  }
   if (req.method === 'GET' && url.pathname === '/api/host/network') return json(reply, 200, await hostNetworkStatus());
   if (req.method === 'POST' && url.pathname === '/api/host/network/static') return json(reply, 200, await hostNetworkStatic(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/host/network/vip') return json(reply, 200, await hostNetworkVip(await readBody(req)));
@@ -5875,10 +5881,18 @@ async function handleHttpRequest(req, reply, options = {}) {
 }
 
 const server = http.createServer((req, reply) => handleHttpRequest(req, reply));
+server.timeout = 0;
+server.requestTimeout = 14_700_000;
+server.headersTimeout = 65_000;
+server.keepAliveTimeout = 65_000;
 
 let friendlyServer = null;
 if (friendlyPort && friendlyPort !== port && friendlyPath) {
   friendlyServer = http.createServer((req, reply) => handleHttpRequest(req, reply, { friendly: true }));
+  friendlyServer.timeout = 0;
+  friendlyServer.requestTimeout = server.requestTimeout;
+  friendlyServer.headersTimeout = server.headersTimeout;
+  friendlyServer.keepAliveTimeout = server.keepAliveTimeout;
   friendlyServer.on('error', err => {
     const reason = err.code === 'EACCES'
       ? `permissao insuficiente para abrir a porta ${friendlyPort}`

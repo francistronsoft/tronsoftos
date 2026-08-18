@@ -37,10 +37,13 @@ const tronsoftosApiUrl = String(process.env.TRONSOFTOS_API_URL || 'http://host.d
 const defaultProductionAlias = 'erp_tronsoft';
 const defaultBackupFrequencyMinutes = normalizeBackupMinutes(process.env.TRONFIRE_BACKUP_FREQUENCY_MINUTES, 20);
 const defaultBackupRetentionDays = normalizeBackupMinutes(process.env.TRONFIRE_BACKUP_RETENTION_DAYS, 30);
-const configuredRunningBackupTtlMinutes = Number(process.env.TRONFIRE_BACKUP_RUNNING_TTL_MINUTES || 360);
+const backupTimeoutMinutes = normalizeBackupMinutes(process.env.TRONFIRE_BACKUP_TIMEOUT_MINUTES, 120, 30, 1440);
+const backupValidationTimeoutMinutes = normalizeBackupMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_TIMEOUT_MINUTES, 45, 15, 240);
+const backupValidationTimeoutMs = backupValidationTimeoutMinutes * 60 * 1000;
+const configuredRunningBackupTtlMinutes = Number(process.env.TRONFIRE_BACKUP_RUNNING_TTL_MINUTES || 60);
 const runningBackupTtlMinutes = Number.isFinite(configuredRunningBackupTtlMinutes)
   ? Math.max(configuredRunningBackupTtlMinutes, 30)
-  : 360;
+  : 60;
 const runningBackupTtlMs = runningBackupTtlMinutes * 60 * 1000;
 
 function normalizeBackupMinutes(value, fallback, min = 1, max = 10080) {
@@ -1327,6 +1330,11 @@ async function uploadBackupJobToExternal(req, db, jobId, backupPath) {
   return { skipped: true, managedBy: 'TronSoftOS' };
 }
 
+function firebirdTimeoutCommand(minutes) {
+  const timeout = Math.max(1, Math.round(Number(minutes) || backupTimeoutMinutes));
+  return `if command -v timeout >/dev/null 2>&1; then timeout -k 30s ${timeout}m "$@"; else "$@"; fi`;
+}
+
 async function validateBackupRestore(db, backupPath, logPath, token = timestamp14()) {
   const bin = process.env.FIREBIRD_BIN || '/usr/local/firebird/bin';
   const password = shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey');
@@ -1344,15 +1352,18 @@ async function validateBackupRestore(db, backupPath, logPath, token = timestamp1
     'rm -f "$restore"',
     'echo "[validacao] restaurando backup em area temporaria" >> "$log"',
     'restore_src="$backup"',
+    'cleanup_validation() { rm -f "$restore"; if [ "${restore_src:-$backup}" != "$backup" ]; then rm -f "$restore_src" || true; fi; }',
+    'trap cleanup_validation EXIT',
     'case "$backup" in *.gz) restore_src="$(mktemp /tmp/tronfire_backup_validate_XXXXXX.gbk)" || fail 81 "Falha ao criar arquivo temporario para validacao"; gzip -dc "$backup" > "$restore_src" || { rm -f "$restore_src"; fail 81 "Falha ao descompactar backup para validacao"; } ;; esac',
-    `${gbak} -c -v -user SYSDBA -password ${password} "$restore_src" ${shQuote(firebirdCreateTarget(tempRestorePath))} >> "$log" 2>&1 || fail 82 "Falha ao restaurar backup para validacao"`,
+    `run_with_timeout() { ${firebirdTimeoutCommand(backupValidationTimeoutMinutes)}; }`,
+    `run_with_timeout ${gbak} -c -v -user SYSDBA -password ${password} "$restore_src" ${shQuote(firebirdCreateTarget(tempRestorePath))} >> "$log" 2>&1 || fail 82 "Falha ao restaurar backup para validacao"`,
     'if [ "$restore_src" != "$backup" ]; then rm -f "$restore_src" || true; fi',
     'test -f "$restore" || fail 83 "Restore de validacao terminou sem arquivo restaurado"',
     `${gstat} -h "$restore" >> "$log" 2>&1 || fail 84 "Falha no gstat do backup restaurado"`,
     'rm -f "$restore"',
     'echo "[validacao] backup aprovado" >> "$log"'
   ].join('; ');
-  await runFirebirdShellScript(cmd, 1000 * 60 * 60 * 4);
+  await runFirebirdShellScript(cmd, backupValidationTimeoutMs + 60_000);
   return backupValidationFor(logPath);
 }
 
@@ -1617,6 +1628,8 @@ app.get('/api/internal/database-version', async (req) => {
       fileSizeBytes: database.fileSizeBytes ?? null,
       sizeMb: database.fileSizeBytes ? Math.round((Number(database.fileSizeBytes) / 1024 / 1024) * 10) / 10 : null,
       error: database.error || '',
+      versionError: database.versionError || '',
+      licensedUnitError: database.licensedUnitError || '',
       indexHealth,
       indexAudit
     });

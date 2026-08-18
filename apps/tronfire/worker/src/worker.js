@@ -2,6 +2,8 @@ import 'dotenv/config';
 import cron from 'node-cron';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import http from 'node:http';
+import https from 'node:https';
 import { PrismaClient } from '@prisma/client';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -15,24 +17,26 @@ const FIREBIRD_EXEC_MODE = String(process.env.FIREBIRD_EXEC_MODE || 'container')
 const TRONFIRE_DEPLOYMENT_MODE = String(process.env.TRONFIRE_DEPLOYMENT_MODE || 'simple').toLowerCase();
 const TRONFIRE_NODE_ROLE = String(process.env.TRONFIRE_NODE_ROLE || 'primary').toLowerCase();
 const TRONSOFTOS_NODE_NAME = String(process.env.TRONSOFTOS_NODE_NAME || '').trim();
-const FIREBIRD_HOST = process.env.FIREBIRD_HOST || 'host.docker.internal';
+const FIREBIRD_HOST = process.env.FIREBIRD_HOST || (FIREBIRD_EXEC_MODE === 'host' || FIREBIRD_EXEC_MODE === 'direct' ? 'localhost' : 'host.docker.internal');
 const HOST_PROC_ROOT = process.env.HOST_PROC_ROOT || '/host/proc';
 const HOST_SYS_ROOT = process.env.HOST_SYS_ROOT || '/host/sys';
 const FIREBIRD_HOST_TARGET = 'firebird_host';
 const TRONSOFTOS_STATE_DIR = process.env.TRONSOFTOS_STATE_DIR || '/opt/tronsoftos/state';
+const TRONSOFTOS_API_URL = String(process.env.TRONSOFTOS_API_URL || 'http://host.docker.internal:8080').replace(/\/+$/, '');
 const HA_SYNC_ACTIVE_FILE = process.env.TRONSOFTOS_HA_SYNC_ACTIVE_FILE || `${TRONSOFTOS_STATE_DIR}/ha-sync.active`;
 const CLUSTER_LOCK_FILE = process.env.TRONSOFTOS_CLUSTER_LOCK || `${TRONSOFTOS_STATE_DIR}/cluster-lock.json`;
+const CLUSTER_SECRETS_FILE = process.env.TRONSOFTOS_CLUSTER_SECRETS || `${TRONSOFTOS_STATE_DIR}/cluster-secrets.env`;
 const DEFAULT_BACKUP_FREQUENCY_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_FREQUENCY_MINUTES, 20);
 const DEFAULT_BACKUP_RETENTION_DAYS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_RETENTION_DAYS, 30);
-const BACKUP_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_TIMEOUT_MINUTES, 240, 30, 1440);
-const BACKUP_VALIDATION_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_TIMEOUT_MINUTES, BACKUP_TIMEOUT_MINUTES, 30, 1440);
+const BACKUP_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_TIMEOUT_MINUTES, 120, 30, 1440);
+const BACKUP_VALIDATION_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_TIMEOUT_MINUTES, 45, 15, 240);
 const ORPHANED_BACKUP_MIN_AGE_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_ORPHANED_MIN_AGE_MINUTES, 5, 1, 60);
 const FIREBIRD_SESSION_RETENTION_DAYS = 30;
 const FIREBIRD_UNRESPONSIVE_FAILURE_THRESHOLD = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_UNRESPONSIVE_FAILURES, 2, 1, 10);
-const CONFIGURED_RUNNING_BACKUP_TTL_MINUTES = Number(process.env.TRONFIRE_BACKUP_RUNNING_TTL_MINUTES || 360);
+const CONFIGURED_RUNNING_BACKUP_TTL_MINUTES = Number(process.env.TRONFIRE_BACKUP_RUNNING_TTL_MINUTES || 60);
 const RUNNING_BACKUP_TTL_MINUTES = Number.isFinite(CONFIGURED_RUNNING_BACKUP_TTL_MINUTES)
   ? Math.max(CONFIGURED_RUNNING_BACKUP_TTL_MINUTES, 30)
-  : 360;
+  : 60;
 const RUNNING_BACKUP_TTL_MS = RUNNING_BACKUP_TTL_MINUTES * 60 * 1000;
 const BACKUP_TIMEOUT_MS = BACKUP_TIMEOUT_MINUTES * 60 * 1000;
 const BACKUP_VALIDATION_TIMEOUT_MS = BACKUP_VALIDATION_TIMEOUT_MINUTES * 60 * 1000;
@@ -85,13 +89,123 @@ async function docker(args, timeout = 60_000) {
 }
 
 async function dockerExec(args, timeout = 60_000) {
-  if (FIREBIRD_EXEC_MODE === 'host' || FIREBIRD_EXEC_MODE === 'direct') {
+  if (FIREBIRD_EXEC_MODE === 'host') {
+    return runHostFirebirdShell(args, timeout);
+  }
+  if (FIREBIRD_EXEC_MODE === 'direct') {
     const [command, ...commandArgs] = args;
     const { stdout, stderr } = await execFileAsync(command, commandArgs, firebirdExecOptions(timeout));
     return { stdout, stderr };
   }
   const { stdout, stderr } = await execFileAsync('docker', ['exec', FIREBIRD_CONTAINER, ...args], { timeout, maxBuffer: 1024 * 1024 * 5 });
   return { stdout, stderr };
+}
+
+function parseEnvFile(filePath) {
+  try {
+    return Object.fromEntries(
+      fs.readFileSync(filePath, 'utf8')
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(line => line && !line.startsWith('#') && line.includes('='))
+        .map(line => {
+          const index = line.indexOf('=');
+          return [line.slice(0, index).trim(), line.slice(index + 1).trim().replace(/^['"]|['"]$/g, '')];
+        })
+    );
+  } catch {
+    return {};
+  }
+}
+
+function internalTokenValue() {
+  return process.env.TRONSOFTOS_INTERNAL_TOKEN || parseEnvFile(CLUSTER_SECRETS_FILE).TRONSOFTOS_INTERNAL_TOKEN || '';
+}
+
+function shellCommandFromArgs(args = []) {
+  if (args[0] === 'sh' && args[1] === '-lc') return String(args[2] || '');
+  const [command, ...commandArgs] = args;
+  return [command, ...commandArgs].map(shQuote).join(' ');
+}
+
+function postJsonLong(urlString, body, headers = {}, timeoutMs = 60_000) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlString);
+    const data = JSON.stringify(body);
+    const client = url.protocol === 'https:' ? https : http;
+    const req = client.request(url, {
+      method: 'POST',
+      headers: {
+        ...headers,
+        'content-length': Buffer.byteLength(data)
+      }
+    }, (res) => {
+      const chunks = [];
+      res.setEncoding('utf8');
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => {
+        const text = chunks.join('');
+        let payload = {};
+        try {
+          payload = text ? JSON.parse(text) : {};
+        } catch (err) {
+          const error = new Error(`Resposta invalida do TronSystem: ${err.message}`);
+          error.statusCode = res.statusCode;
+          error.body = text.slice(0, 1000);
+          reject(error);
+          return;
+        }
+        resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, payload });
+      });
+    });
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`Tempo limite excedido na chamada HTTP host apos ${Math.round(timeoutMs / 60000)} min`));
+    });
+    req.on('error', reject);
+    req.write(data);
+    req.end();
+  });
+}
+
+async function runHostFirebirdShell(args, timeoutMs = 60_000) {
+  const token = internalTokenValue();
+  if (!token) throw new Error('TRONSOFTOS_INTERNAL_TOKEN nao configurado');
+  const response = await postJsonLong(
+    `${TRONSOFTOS_API_URL}/api/host/firebird/script`,
+    {
+      script: `# TronFire host Firebird script\n${shellCommandFromArgs(args)}\n`,
+      timeoutMs
+    },
+    {
+      'content-type': 'application/json',
+      'x-tronsoftos-token': token
+    },
+    timeoutMs + 120_000
+  );
+  const payload = response.payload || {};
+  if (!response.ok) {
+    const error = new Error(payload.error || `TronSoftOS HTTP ${response.status}`);
+    error.payload = payload;
+    throw error;
+  }
+  return {
+    stdout: stripHostScriptControlOutput(payload.stdout || ''),
+    stderr: payload.stderr || ''
+  };
+}
+
+function stripHostScriptControlOutput(stdout = '') {
+  return String(stdout || '')
+    .split(/\r?\n/)
+    .filter((line) => {
+      try {
+        const parsed = JSON.parse(line);
+        return !(parsed?.ok === true && String(parsed?.script || '').includes('tronsoftos-firebird-'));
+      } catch {
+        return true;
+      }
+    })
+    .join('\n');
 }
 
 function isPrimaryNode() {
@@ -477,7 +591,7 @@ async function createAlertOnce(type, severity, message) {
 async function resolveActiveAlertsByType(type) {
   await prisma.alert.updateMany({
     where: { type, resolved: false },
-    data: { resolved: true, resolvedAt: new Date() }
+    data: { resolved: true }
   });
 }
 
@@ -529,6 +643,11 @@ function commandTimeoutMessage(err, phase, timeoutMinutes) {
   const timedOut = err?.killed || err?.signal === 'SIGTERM' || err?.code === 'ETIMEDOUT';
   if (!timedOut) return err?.message || String(err);
   return `Tempo limite excedido na ${phase} apos ${timeoutMinutes} min`;
+}
+
+function firebirdTimeoutCommand(minutes) {
+  const timeout = Math.max(1, Math.round(Number(minutes) || BACKUP_TIMEOUT_MINUTES));
+  return `if command -v timeout >/dev/null 2>&1; then timeout -k 30s ${timeout}m "$@"; else "$@"; fi`;
 }
 
 async function markStaleRunningBackupsFailed(databaseId = null, reason = 'stale-running-backup-cleanup') {
@@ -871,8 +990,11 @@ async function validateBackupRestore(db, backupPath, logPath, stamp) {
     'rm -f "$restore"',
     'echo "[validacao] restaurando backup em area temporaria" >> "$log"',
     'restore_src="$backup"',
+    'cleanup_validation() { rm -f "$restore"; if [ "${restore_src:-$backup}" != "$backup" ]; then rm -f "$restore_src" || true; fi; }',
+    'trap cleanup_validation EXIT',
     'case "$backup" in *.gz) restore_src="$(mktemp /tmp/tronfire_backup_validate_XXXXXX.gbk)" || fail 81 "Falha ao criar arquivo temporario para validacao"; gzip -dc "$backup" > "$restore_src" || { rm -f "$restore_src"; fail 81 "Falha ao descompactar backup para validacao"; } ;; esac',
-    `${shQuote(`${FIREBIRD_BIN}/gbak`)} -c -v -user SYSDBA -password ${shQuote(FIREBIRD_PASSWORD)} "$restore_src" ${shQuote(firebirdCreateTarget(tempRestorePath))} >> "$log" 2>&1 || fail 82 "Falha ao restaurar backup para validacao"`,
+    `run_with_timeout() { ${firebirdTimeoutCommand(BACKUP_VALIDATION_TIMEOUT_MINUTES)}; }`,
+    `run_with_timeout ${shQuote(`${FIREBIRD_BIN}/gbak`)} -c -user SYSDBA -password ${shQuote(FIREBIRD_PASSWORD)} "$restore_src" ${shQuote(firebirdCreateTarget(tempRestorePath))} >> "$log" 2>&1 || fail 82 "Falha ao restaurar backup para validacao"`,
     'if [ "$restore_src" != "$backup" ]; then rm -f "$restore_src" || true; fi',
     'test -f "$restore" || fail 83 "Restore de validacao terminou sem arquivo restaurado"',
     `${shQuote(`${FIREBIRD_BIN}/gstat`)} -h "$restore" >> "$log" 2>&1 || fail 84 "Falha no gstat do backup restaurado"`,
@@ -977,6 +1099,9 @@ async function runBackup(db, reason = 'AUTO') {
       where: { id: job.id },
       data: { status: 'SUCCESS', finishedAt: new Date(), backupSize: BigInt(sizeOut.trim()), sha256: sha }
     });
+    await resolveActiveAlertsByType('BACKUP_FAILED');
+    await resolveActiveAlertsByType(`BACKUP_RUNNING_ORPHANED_${db.alias}`);
+    await resolveActiveAlertsByType('BACKUP_RUNNING_STALE_WITH_PROCESS');
     await uploadBackupJobToExternal(db, job.id, backupPath);
     console.log(`[worker] backup ${reason} OK: ${db.alias}`);
   } catch (err) {
@@ -1096,10 +1221,15 @@ async function checkDatabases() {
 }
 
 async function checkTools() {
+  let missing = 0;
   for (const bin of ['gbak','gfix','gstat','isql']) {
     try { await dockerExec(['test','-x',`${FIREBIRD_BIN}/${bin}`]); }
-    catch { await prisma.alert.create({ data: { type: 'FIREBIRD_TOOL_MISSING', severity: 'CRITICAL', message: `Utilitário ausente: ${bin}` } }); }
+    catch {
+      missing += 1;
+      await createAlertOnce('FIREBIRD_TOOL_MISSING', 'CRITICAL', `Utilitário ausente: ${bin}`);
+    }
   }
+  if (missing === 0) await resolveActiveAlertsByType('FIREBIRD_TOOL_MISSING');
 }
 
 cron.schedule('*/5 * * * *', async () => {

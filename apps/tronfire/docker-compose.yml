@@ -101,6 +101,8 @@ services:
       - ${TRONSOFTOS_STATE_DIR:-/opt/tronsoftos/state}:${TRONSOFTOS_STATE_DIR:-/opt/tronsoftos/state}
       - ${STORAGE_ROOT}/config-backups:/config-backups
       - ${STORAGE_ROOT}/update-backups:/update-backups
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   worker:
     build:
@@ -126,6 +128,8 @@ services:
       TRONFIRE_NODE_ROLE: ${TRONFIRE_NODE_ROLE:-primary}
       TRONSOFTOS_NODE_NAME: ${TRONSOFTOS_NODE_NAME:-}
       TRONSOFTOS_CLUSTER_SECRETS: ${TRONSOFTOS_CLUSTER_SECRETS:-/opt/tronsoftos/state/cluster-secrets.env}
+      TRONSOFTOS_INTERNAL_TOKEN: ${TRONSOFTOS_INTERNAL_TOKEN:-}
+      TRONSOFTOS_API_URL: ${TRONSOFTOS_API_URL:-http://host.docker.internal:8080}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /proc:/host/proc:ro
@@ -134,6 +138,8 @@ services:
       - ${TRONSOFTOS_STATE_DIR:-/opt/tronsoftos/state}:${TRONSOFTOS_STATE_DIR:-/opt/tronsoftos/state}
       - ${STORAGE_ROOT}/config-backups:/config-backups
       - ${STORAGE_ROOT}/update-backups:/update-backups
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
 networks:
   default:
