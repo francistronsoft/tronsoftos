@@ -2587,18 +2587,40 @@ async function tronfireAlerts() {
     clearTimeout(timeout);
     if (!response.ok) return [];
     const alerts = await response.json();
-    return Array.isArray(alerts) ? alerts.map(alert => ({
-      source: 'TronFire',
-      severity: String(alert.severity || 'warning').toLowerCase(),
-      message: alert.message || alert.type || 'Alerta TronFire',
-      code: alert.type || null,
-      type: alert.type || null,
-      createdAt: alert.createdAt || null,
-      details: alert.details || null
-    })) : [];
+    return Array.isArray(alerts) ? alerts.map(normalizeTronfireAlert) : [];
   } catch {
     return [];
   }
+}
+
+function normalizeTronfireAlert(alert = {}) {
+  const type = String(alert.type || alert.code || '').trim();
+  const message = alert.message || type || 'Alerta TronFire';
+  const normalized = {
+    source: 'TronFire',
+    severity: String(alert.severity || 'warning').toLowerCase(),
+    title: alert.title || message,
+    message,
+    code: type || null,
+    type: type || null,
+    createdAt: alert.createdAt || null,
+    details: alert.details || null
+  };
+  if (type.startsWith('BACKUP_VALIDATION_OVERDUE_')) {
+    return {
+      ...normalized,
+      severity: 'warning',
+      title: 'Validacao diaria de backup pendente',
+      message: `${message}. Backups simples continuam sendo gerados; a validacao por restore/gstat roda na janela diaria configurada.`,
+      details: {
+        ...(alert.details || {}),
+        category: 'backup_validation',
+        validationMode: 'daily',
+        operationalImpact: 'backup_available_validation_pending'
+      }
+    };
+  }
+  return normalized;
 }
 
 async function tronfireCompanyIdentity() {
@@ -5499,7 +5521,7 @@ async function centralHeartbeat(token, payload) {
           severity: alert.severity || 'info',
           title,
           message: alert.message || title,
-          code: alert.code || centralAlertKey(alert)
+          code: stableAlertCode(alert)
         };
       })
     }
@@ -5510,6 +5532,10 @@ function centralAlertKey(alert) {
   return crypto.createHash('sha1')
     .update(`${alert.severity || 'info'}:${alert.message || alert.title || ''}`)
     .digest('hex');
+}
+
+function stableAlertCode(alert) {
+  return alert.code || alert.type || centralAlertKey(alert);
 }
 
 function writeCentralAlertStates() {
@@ -5526,7 +5552,7 @@ async function centralSendAlert(token, alert) {
       severity: alert.severity || 'info',
       title,
       message: alert.message || title,
-      code: alert.code || centralAlertKey(alert),
+      code: stableAlertCode(alert),
       details: {
         source: 'tronsoftos',
         node: nodeIdentity(),
@@ -5539,7 +5565,7 @@ async function centralSendAlert(token, alert) {
 async function centralSyncAlerts(token, alerts) {
   const activeKeys = new Set();
   for (const alert of alerts || []) {
-    const key = centralAlertKey(alert);
+    const key = stableAlertCode(alert);
     activeKeys.add(key);
     if (centralAlertStates.get(key) === 'active') continue;
     await centralSendAlert(token, alert);
