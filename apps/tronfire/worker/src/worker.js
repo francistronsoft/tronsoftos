@@ -30,6 +30,10 @@ const DEFAULT_BACKUP_FREQUENCY_MINUTES = normalizePositiveMinutes(process.env.TR
 const DEFAULT_BACKUP_RETENTION_DAYS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_RETENTION_DAYS, 30);
 const BACKUP_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_TIMEOUT_MINUTES, 120, 30, 1440);
 const BACKUP_VALIDATION_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_TIMEOUT_MINUTES, 45, 15, 240);
+const BACKUP_VALIDATION_MODE = String(process.env.TRONFIRE_BACKUP_VALIDATION_MODE || 'daily').toLowerCase();
+const BACKUP_VALIDATION_HOUR = normalizeHour(process.env.TRONFIRE_BACKUP_VALIDATION_HOUR, 2);
+const BACKUP_VALIDATION_WINDOW_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_WINDOW_MINUTES, 180, 30, 720);
+const BACKUP_VALIDATION_MAX_AGE_HOURS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_MAX_AGE_HOURS, 30, 6, 168);
 const FIREBIRD_QUERY_TIMEOUT_SECONDS = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_QUERY_TIMEOUT_SECONDS, 20, 5, 600);
 const FIREBIRD_HEALTH_COOLDOWN_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_HEALTH_COOLDOWN_MINUTES, 10, 1, 120);
 const ORPHANED_BACKUP_MIN_AGE_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_ORPHANED_MIN_AGE_MINUTES, 5, 1, 60);
@@ -62,6 +66,12 @@ function normalizePositiveMinutes(value, fallback, min = 1, max = 10080) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.max(min, Math.min(max, Math.round(number)));
+}
+
+function normalizeHour(value, fallback = 2) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(0, Math.min(23, Math.round(number)));
 }
 
 function haSyncActive() {
@@ -1100,6 +1110,107 @@ async function uploadBackupJobToExternal(db, jobId, backupPath) {
   console.log(`[worker] upload externo gerenciado pelo TronSoftOS: ${db.alias} ${backupPath}`);
 }
 
+function localDateKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function validationWindowInfo(now = new Date()) {
+  const startMinute = BACKUP_VALIDATION_HOUR * 60;
+  const endMinute = startMinute + BACKUP_VALIDATION_WINDOW_MINUTES;
+  const currentMinute = now.getHours() * 60 + now.getMinutes();
+  const wraps = endMinute >= 24 * 60;
+  const inWindow = wraps
+    ? currentMinute >= startMinute || currentMinute < (endMinute % (24 * 60))
+    : currentMinute >= startMinute && currentMinute < endMinute;
+  const anchor = new Date(now);
+  if (wraps && currentMinute < (endMinute % (24 * 60))) {
+    anchor.setDate(anchor.getDate() - 1);
+  }
+  return {
+    inWindow,
+    windowKey: localDateKey(anchor),
+    startHour: BACKUP_VALIDATION_HOUR,
+    windowMinutes: BACKUP_VALIDATION_WINDOW_MINUTES
+  };
+}
+
+function readBackupValidation(job) {
+  try {
+    if (!job?.manifestPath || !fs.existsSync(job.manifestPath)) return null;
+    return JSON.parse(fs.readFileSync(job.manifestPath, 'utf8')).validation || null;
+  } catch {
+    return null;
+  }
+}
+
+function validationMatchesWindow(validation, windowKey) {
+  if (!validation?.ok) return false;
+  if (validation.windowKey && validation.windowKey === windowKey) return true;
+  if (!validation.validatedAt) return false;
+  return localDateKey(new Date(validation.validatedAt)) === windowKey;
+}
+
+async function latestValidatedBackup(db, take = 80) {
+  const jobs = await prisma.backupJob.findMany({
+    where: { databaseId: db.id, status: 'SUCCESS', manifestPath: { not: null } },
+    orderBy: { createdAt: 'desc' },
+    take
+  });
+  for (const job of jobs) {
+    const validation = readBackupValidation(job);
+    if (validation?.ok) return { job, validation };
+  }
+  return null;
+}
+
+async function maybeAlertValidationOverdue(db, latest) {
+  const alertType = `BACKUP_VALIDATION_OVERDUE_${db.alias}`;
+  const validatedAt = latest?.validation?.validatedAt ? new Date(latest.validation.validatedAt).getTime() : 0;
+  const maxAgeMs = BACKUP_VALIDATION_MAX_AGE_HOURS * 60 * 60 * 1000;
+  if (validatedAt && Date.now() - validatedAt <= maxAgeMs) {
+    await resolveActiveAlertsByType(alertType);
+    return;
+  }
+  const ageText = validatedAt
+    ? `${Math.round((Date.now() - validatedAt) / 3600000)}h sem backup validado por restore`
+    : 'sem backup validado por restore';
+  await createAlertOnce(
+    alertType,
+    'WARNING',
+    `Validacao diaria de backup pendente para ${db.name}: ${ageText}`
+  );
+}
+
+async function backupValidationPlan(db, now = new Date()) {
+  if (BACKUP_VALIDATION_MODE === 'always') {
+    return { shouldValidate: true, reason: 'validation_mode_always', windowKey: localDateKey(now) };
+  }
+  if (BACKUP_VALIDATION_MODE === 'never') {
+    return { shouldValidate: false, reason: 'validation_mode_never', windowKey: localDateKey(now) };
+  }
+  const window = validationWindowInfo(now);
+  const latest = await latestValidatedBackup(db);
+  if (window.inWindow) {
+    if (latest && validationMatchesWindow(latest.validation, window.windowKey)) {
+      await resolveActiveAlertsByType(`BACKUP_VALIDATION_OVERDUE_${db.alias}`);
+      return { shouldValidate: false, reason: 'daily_validation_already_done', windowKey: window.windowKey, latest };
+    }
+    return { shouldValidate: true, reason: 'daily_validation_window', windowKey: window.windowKey, latest };
+  }
+  await maybeAlertValidationOverdue(db, latest);
+  return {
+    shouldValidate: false,
+    reason: 'outside_daily_validation_window',
+    windowKey: window.windowKey,
+    latest,
+    nextWindowHour: window.startHour,
+    windowMinutes: window.windowMinutes
+  };
+}
+
 async function validateBackupRestore(db, backupPath, logPath, stamp) {
   const tempRestorePath = `/firebird/restore-work/${db.alias}_backup_validate_${stamp}.fdb`;
   const cmd = [
@@ -1139,6 +1250,7 @@ async function validateBackupRestore(db, backupPath, logPath, stamp) {
     ok: true,
     method: 'gbak-restore-gstat',
     validatedAt: new Date().toISOString(),
+    windowKey: validationWindowInfo(new Date()).windowKey,
     logPath
   };
 }
@@ -1214,7 +1326,18 @@ async function runBackup(db, reason = 'AUTO') {
     const { stdout: sizeOut } = await dockerExec(['stat','-c','%s', backupPath]);
     const { stdout: shaOut } = await dockerExec(['sha256sum', backupPath]);
     const sha = shaOut.trim().split(/\s+/)[0];
-    const validation = await validateBackupRestore(db, backupPath, logPath, stamp);
+    const validationPlan = await backupValidationPlan(db);
+    const validation = validationPlan.shouldValidate
+      ? await validateBackupRestore(db, backupPath, logPath, stamp)
+      : {
+          skipped: true,
+          reason: validationPlan.reason,
+          mode: BACKUP_VALIDATION_MODE,
+          windowKey: validationPlan.windowKey,
+          nextWindowHour: validationPlan.nextWindowHour ?? null,
+          windowMinutes: validationPlan.windowMinutes ?? null,
+          lastValidatedAt: validationPlan.latest?.validation?.validatedAt || null
+        };
     const manifest = {
       databaseId: db.id,
       databaseAlias: db.alias,
@@ -1237,9 +1360,10 @@ async function runBackup(db, reason = 'AUTO') {
     await resolveActiveAlertsByType('BACKUP_FAILED');
     await resolveActiveAlertsByType(`BACKUP_RUNNING_ORPHANED_${db.alias}`);
     await resolveActiveAlertsByType('BACKUP_RUNNING_STALE_WITH_PROCESS');
+    if (validation?.ok) await resolveActiveAlertsByType(`BACKUP_VALIDATION_OVERDUE_${db.alias}`);
     await markFirebirdSuccess(db);
     await uploadBackupJobToExternal(db, job.id, backupPath);
-    console.log(`[worker] backup ${reason} OK: ${db.alias}`);
+    console.log(`[worker] backup ${reason} OK: ${db.alias}${validation?.ok ? ' (validado)' : ' (validacao diaria adiada)'}`);
   } catch (err) {
     await markFirebirdFailure(db, err, `backup-${reason}`);
     const quarantined = quarantineInvalidBackup(backupPath, manifestPath);
