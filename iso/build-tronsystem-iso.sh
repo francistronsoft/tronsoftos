@@ -39,7 +39,7 @@ label install
 	menu label ^Instalar TronSystem
 	menu default
 	kernel /install.amd/vmlinuz
-	append vga=788 initrd=/install.amd/initrd.gz auto=true priority=critical file=/cdrom/preseed.cfg --- quiet
+	append vga=788 initrd=/install.amd/initrd.gz --- quiet
 EOF
 
   cat > "$WORK_DIR/iso/isolinux/menu.cfg" <<'EOF'
@@ -59,7 +59,7 @@ set default="0"
 set timeout=5
 
 menuentry "Instalar TronSystem" {
-	linux /install.amd/vmlinuz vga=788 auto=true priority=critical file=/cdrom/preseed.cfg --- quiet
+	linux /install.amd/vmlinuz vga=788 --- quiet
 	initrd /install.amd/initrd.gz
 }
 EOF
