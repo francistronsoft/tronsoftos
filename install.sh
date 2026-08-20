@@ -233,7 +233,7 @@ fi
 
 echo "Instalando pacotes base..."
 apt_get update
-apt_get install -y ca-certificates curl gnupg openssl rsync openssh-client openssh-server keepalived rclone nodejs npm sudo
+apt_get install -y ca-certificates curl git gnupg openssl rsync openssh-client openssh-server keepalived rclone nodejs npm sudo
 apt_get install -y samba samba-common-bin || echo "Aviso: samba nao foi instalado; compartilhamento via rede ficara indisponivel ate instalar o pacote samba." >&2
 install_docker
 configure_time_sync
@@ -351,6 +351,8 @@ echo "Instalando systemd..."
 install -m 0755 "$APP_DIR/infra/sbin/tronsoftos-network" /usr/local/sbin/tronsoftos-network
 install -m 0755 "$APP_DIR/infra/sbin/tronsoftos-cloudflare-tunnel" /usr/local/sbin/tronsoftos-cloudflare-tunnel
 install -m 0440 "$APP_DIR/infra/sudoers/tronsoftos" /etc/sudoers.d/tronsoftos
+sed -i "s|/opt/tronsoftos|$APP_DIR|g" /etc/sudoers.d/tronsoftos
+visudo -cf /etc/sudoers.d/tronsoftos
 cp "$APP_DIR/infra/systemd/tronsoftos.service" /etc/systemd/system/tronsoftos.service
 cp "$APP_DIR/infra/systemd/tronsoftos-rclone-backup.service" /etc/systemd/system/tronsoftos-rclone-backup.service
 cp "$APP_DIR/infra/systemd/tronsoftos-rclone-backup.timer" /etc/systemd/system/tronsoftos-rclone-backup.timer
