@@ -3,7 +3,8 @@ set -euo pipefail
 
 BASE_ISO="${1:-}"
 OUT_ISO="${2:-tronsystem-debian13.iso}"
-WORK_DIR="${WORK_DIR:-/tmp/tronsystem-iso-build}"
+OUT_DIR="$(cd "$(dirname "$OUT_ISO")" && pwd)"
+WORK_DIR="${WORK_DIR:-$OUT_DIR/.tronsystem-iso-build}"
 
 if [ -z "$BASE_ISO" ] || [ ! -f "$BASE_ISO" ]; then
   echo "Uso: $0 /caminho/debian-13.iso [saida.iso]" >&2
