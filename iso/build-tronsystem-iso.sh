@@ -76,7 +76,7 @@ if [ -d "$WORK_DIR/iso/install.amd" ]; then
 fi
 
 find "$WORK_DIR/iso" -type f -name '*.cfg' -o -name 'txt.cfg' -o -name 'grub.cfg' | while read -r cfg; do
-  sed -i 's/---/auto=true priority=critical file=\/cdrom\/preseed.cfg ---/g' "$cfg" || true
+  sed -i 's/---/auto=true priority=critical file=\/preseed.cfg ---/g' "$cfg" || true
 done
 
 (
