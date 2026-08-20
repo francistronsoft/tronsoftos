@@ -32,6 +32,39 @@ trap - EXIT
 install -m 0644 "$SCRIPT_DIR/preseed-tronsystem.cfg" "$WORK_DIR/iso/preseed.cfg"
 install -m 0755 "$SCRIPT_DIR/tronsystem-late-command.sh" "$WORK_DIR/iso/tronsystem-late-command.sh"
 
+if [ -d "$WORK_DIR/iso/isolinux" ]; then
+  cat > "$WORK_DIR/iso/isolinux/txt.cfg" <<'EOF'
+default install
+label install
+	menu label ^Instalar TronSystem
+	menu default
+	kernel /install.amd/vmlinuz
+	append vga=788 initrd=/install.amd/initrd.gz auto=true priority=critical file=/cdrom/preseed.cfg --- quiet
+EOF
+
+  cat > "$WORK_DIR/iso/isolinux/menu.cfg" <<'EOF'
+menu hshift 4
+menu width 70
+menu title TronSystem installer menu (BIOS mode)
+include stdmenu.cfg
+include txt.cfg
+EOF
+
+  : > "$WORK_DIR/iso/isolinux/gtk.cfg"
+fi
+
+if [ -f "$WORK_DIR/iso/boot/grub/grub.cfg" ]; then
+  cat > "$WORK_DIR/iso/boot/grub/grub.cfg" <<'EOF'
+set default="0"
+set timeout=5
+
+menuentry "Instalar TronSystem" {
+	linux /install.amd/vmlinuz vga=788 auto=true priority=critical file=/cdrom/preseed.cfg --- quiet
+	initrd /install.amd/initrd.gz
+}
+EOF
+fi
+
 if [ -d "$WORK_DIR/iso/install.amd" ]; then
   mkdir -p "$WORK_DIR/initrd"
   cd "$WORK_DIR/initrd"
