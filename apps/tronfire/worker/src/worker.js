@@ -31,9 +31,10 @@ const DEFAULT_BACKUP_RETENTION_DAYS = normalizePositiveMinutes(process.env.TRONF
 const BACKUP_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_TIMEOUT_MINUTES, 120, 30, 1440);
 const BACKUP_VALIDATION_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_TIMEOUT_MINUTES, 45, 15, 240);
 const BACKUP_VALIDATION_MODE = String(process.env.TRONFIRE_BACKUP_VALIDATION_MODE || 'daily').toLowerCase();
-const BACKUP_VALIDATION_HOUR = normalizeHour(process.env.TRONFIRE_BACKUP_VALIDATION_HOUR, 2);
-const BACKUP_VALIDATION_WINDOW_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_WINDOW_MINUTES, 180, 30, 720);
+const BACKUP_VALIDATION_HOUR = normalizeHour(process.env.TRONFIRE_BACKUP_VALIDATION_HOUR, 4);
+const BACKUP_VALIDATION_WINDOW_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_WINDOW_MINUTES, 120, 30, 720);
 const BACKUP_VALIDATION_MAX_AGE_HOURS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_MAX_AGE_HOURS, 30, 6, 168);
+const BACKUP_VALIDATION_FAILURE_COOLDOWN_HOURS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_FAILURE_COOLDOWN_HOURS, 12, 1, 72);
 const FIREBIRD_QUERY_TIMEOUT_SECONDS = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_QUERY_TIMEOUT_SECONDS, 20, 5, 600);
 const FIREBIRD_HEALTH_COOLDOWN_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_HEALTH_COOLDOWN_MINUTES, 10, 1, 120);
 const ORPHANED_BACKUP_MIN_AGE_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_ORPHANED_MIN_AGE_MINUTES, 5, 1, 60);
@@ -68,7 +69,7 @@ function normalizePositiveMinutes(value, fallback, min = 1, max = 10080) {
   return Math.max(min, Math.min(max, Math.round(number)));
 }
 
-function normalizeHour(value, fallback = 2) {
+function normalizeHour(value, fallback = 4) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.max(0, Math.min(23, Math.round(number)));
@@ -616,6 +617,8 @@ async function resolveActiveAlertsByType(type) {
 
 function firebirdConnectionFailureMessage(err) {
   const message = String(err?.message || err || '').toLowerCase();
+  if (message.includes('internal error')) return 'erro interno do Firebird';
+  if (message.includes('socket hang up')) return 'conexao interrompida';
   if (message.includes('timeout') || message.includes('errno = 110') || message.includes('timed out')) return 'timeout de conexao';
   if (message.includes('connection refused') || message.includes('errno = 111')) return 'conexao recusada';
   if (message.includes('unavailable') || message.includes('unable to complete network request')) return 'falha de conexao';
@@ -644,6 +647,8 @@ function isFirebirdTimeoutError(err) {
 function isFirebirdConnectivityError(err) {
   const message = String(err?.message || err || '').toLowerCase();
   return isFirebirdTimeoutError(err)
+    || message.includes('internal error')
+    || message.includes('socket hang up')
     || message.includes('errno = 110')
     || message.includes('errno = 111')
     || message.includes('connection refused')
@@ -678,6 +683,34 @@ async function markFirebirdFailure(db, err, context) {
     );
   }
   firebirdCircuitBreakers.set(key, data);
+}
+
+async function markValidationFailureCircuit(db, err, windowKey) {
+  if (!db?.id) return;
+  const reason = firebirdConnectionFailureMessage(err);
+  const degradedUntil = Date.now() + BACKUP_VALIDATION_FAILURE_COOLDOWN_HOURS * 60 * 60 * 1000;
+  firebirdCircuitBreakers.set(circuitKey(db), {
+    failures: FIREBIRD_UNRESPONSIVE_FAILURE_THRESHOLD,
+    reason: `falha na validacao: ${reason}`,
+    degradedUntil
+  });
+  await prisma.managedDatabase.update({
+    where: { id: db.id },
+    data: { status: 'DEGRADED', lastCheckAt: new Date() }
+  }).catch(() => {});
+  await createAlertOnce(
+    `BACKUP_VALIDATION_FAILED_${db.alias}`,
+    'CRITICAL',
+    `Validacao do backup falhou para ${db.name}: ${reason}. Backup colocado em quarentena; novas validacoes serao evitadas ate a proxima janela diaria.`
+  );
+  await createAlertOnce(
+    `FIREBIRD_DEGRADED_${db.alias}`,
+    'CRITICAL',
+    `Firebird em protecao apos falha de validacao em ${db.name}: ${reason}. Coletas e rotinas pesadas serao pausadas temporariamente.`
+  );
+  if (windowKey) {
+    console.warn(`[worker] validacao bloqueada para ${db.alias} na janela ${windowKey}: ${reason}`);
+  }
 }
 
 function activeRoutineLock(key) {
@@ -1153,6 +1186,11 @@ function validationMatchesWindow(validation, windowKey) {
   return localDateKey(new Date(validation.validatedAt)) === windowKey;
 }
 
+function localDateStart(windowKey) {
+  const [year, month, day] = String(windowKey || localDateKey()).split('-').map(Number);
+  return new Date(year || new Date().getFullYear(), (month || 1) - 1, day || new Date().getDate());
+}
+
 async function latestValidatedBackup(db, take = 80) {
   const jobs = await prisma.backupJob.findMany({
     where: { databaseId: db.id, status: 'SUCCESS', manifestPath: { not: null } },
@@ -1184,6 +1222,20 @@ async function maybeAlertValidationOverdue(db, latest) {
   );
 }
 
+async function latestValidationFailureForWindow(db, windowKey) {
+  const since = localDateStart(windowKey);
+  const failedJobs = await prisma.backupJob.findMany({
+    where: {
+      databaseId: db.id,
+      status: 'FAILED',
+      createdAt: { gte: since }
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 10
+  });
+  return failedJobs.find(job => /validacao|validation|internal error|quarentena/i.test(String(job.errorMessage || ''))) || null;
+}
+
 async function backupValidationPlan(db, now = new Date()) {
   if (BACKUP_VALIDATION_MODE === 'always') {
     return { shouldValidate: true, reason: 'validation_mode_always', windowKey: localDateKey(now) };
@@ -1196,7 +1248,13 @@ async function backupValidationPlan(db, now = new Date()) {
   if (window.inWindow) {
     if (latest && validationMatchesWindow(latest.validation, window.windowKey)) {
       await resolveActiveAlertsByType(`BACKUP_VALIDATION_OVERDUE_${db.alias}`);
+      await resolveActiveAlertsByType(`BACKUP_VALIDATION_FAILED_${db.alias}`);
       return { shouldValidate: false, reason: 'daily_validation_already_done', windowKey: window.windowKey, latest };
+    }
+    const failed = await latestValidationFailureForWindow(db, window.windowKey);
+    if (failed) {
+      await markValidationFailureCircuit(db, new Error(failed.errorMessage || 'validacao falhou nesta janela'), window.windowKey);
+      return { shouldValidate: false, reason: 'daily_validation_failed_in_window', windowKey: window.windowKey, latest, failedJobId: failed.id };
     }
     return { shouldValidate: true, reason: 'daily_validation_window', windowKey: window.windowKey, latest };
   }
@@ -1244,7 +1302,11 @@ async function validateBackupRestore(db, backupPath, logPath, stamp) {
     } catch {
       // The original validation error is the one that matters.
     }
-    throw new Error(message);
+    const validationError = new Error(`Falha na validacao do backup Firebird: ${message}`);
+    validationError.phase = 'backup-validation';
+    validationError.validationFailure = true;
+    validationError.originalMessage = message;
+    throw validationError;
   }
   return {
     ok: true,
@@ -1358,14 +1420,23 @@ async function runBackup(db, reason = 'AUTO') {
       data: { status: 'SUCCESS', finishedAt: new Date(), backupSize: BigInt(sizeOut.trim()), sha256: sha }
     });
     await resolveActiveAlertsByType('BACKUP_FAILED');
+    if (validation?.ok) {
+      await resolveActiveAlertsByType(`BACKUP_VALIDATION_FAILED_${db.alias}`);
+      await resolveActiveAlertsByType(`FIREBIRD_DEGRADED_${db.alias}`);
+      await resolveActiveAlertsByType(`FIREBIRD_UNRESPONSIVE_${db.alias}`);
+      await markFirebirdSuccess(db);
+    }
     await resolveActiveAlertsByType(`BACKUP_RUNNING_ORPHANED_${db.alias}`);
     await resolveActiveAlertsByType('BACKUP_RUNNING_STALE_WITH_PROCESS');
     if (validation?.ok) await resolveActiveAlertsByType(`BACKUP_VALIDATION_OVERDUE_${db.alias}`);
-    await markFirebirdSuccess(db);
     await uploadBackupJobToExternal(db, job.id, backupPath);
     console.log(`[worker] backup ${reason} OK: ${db.alias}${validation?.ok ? ' (validado)' : ' (validacao diaria adiada)'}`);
   } catch (err) {
-    await markFirebirdFailure(db, err, `backup-${reason}`);
+    if (err.validationFailure) {
+      await markValidationFailureCircuit(db, err, validationWindowInfo(new Date()).windowKey);
+    } else {
+      await markFirebirdFailure(db, err, `backup-${reason}`);
+    }
     const quarantined = quarantineInvalidBackup(backupPath, manifestPath);
     if (job) {
       await prisma.backupJob.update({
@@ -1373,7 +1444,15 @@ async function runBackup(db, reason = 'AUTO') {
         data: { status: 'FAILED', finishedAt: new Date(), errorMessage: `${err.message}${quarantined.length ? ` | quarentena: ${quarantined.join(', ')}` : ''}` }
       });
     }
-    await prisma.alert.create({ data: { type: 'BACKUP_FAILED', severity: 'CRITICAL', message: `Backup falhou: ${db.name}` } });
+    if (err.validationFailure) {
+      await createAlertOnce(
+        `BACKUP_VALIDATION_FAILED_${db.alias}`,
+        'CRITICAL',
+        `Backup gerado, mas a validacao por restore falhou: ${db.name}. Arquivo enviado para quarentena.`
+      );
+    } else {
+      await prisma.alert.create({ data: { type: 'BACKUP_FAILED', severity: 'CRITICAL', message: `Backup falhou: ${db.name}` } });
+    }
     console.error(`[worker] backup ${reason} erro: ${db.alias}`, err.message);
   } finally {
     clearDatabaseRoutineLock(db, `backup-${reason}`);

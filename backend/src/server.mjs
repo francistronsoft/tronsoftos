@@ -2579,7 +2579,7 @@ async function tronfireAlerts() {
   try {
     const target = tronfireProxyTarget();
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2500);
+    const timeout = setTimeout(() => controller.abort(), 8000);
     const response = await fetch(new URL('/api/internal/alerts', target), {
       signal: controller.signal,
       headers: { 'x-tronsoftos-token': token }
@@ -2617,6 +2617,44 @@ function normalizeTronfireAlert(alert = {}) {
         category: 'backup_validation',
         validationMode: 'daily',
         operationalImpact: 'backup_available_validation_pending'
+      }
+    };
+  }
+  if (type.startsWith('BACKUP_VALIDATION_FAILED_')) {
+    return {
+      ...normalized,
+      severity: 'critical',
+      title: 'Validacao de backup falhou',
+      message: `${message}. O backup foi gerado, mas nao foi aprovado pelo restore/gstat; investigue antes de considerar esse ponto como recuperavel.`,
+      details: {
+        ...(alert.details || {}),
+        category: 'backup_validation',
+        operationalImpact: 'backup_generated_validation_failed'
+      }
+    };
+  }
+  if (type.startsWith('FIREBIRD_DEGRADED_') || type.startsWith('FIREBIRD_UNRESPONSIVE_')) {
+    return {
+      ...normalized,
+      severity: 'critical',
+      title: 'Firebird em risco operacional',
+      message: `${message}. Servico pode estar online, mas o ambiente requer acao tecnica.`,
+      details: {
+        ...(alert.details || {}),
+        category: 'firebird_health',
+        operationalImpact: 'service_online_with_database_risk'
+      }
+    };
+  }
+  if (type === 'BACKUP_FAILED') {
+    return {
+      ...normalized,
+      severity: 'critical',
+      title: 'Backup falhou',
+      details: {
+        ...(alert.details || {}),
+        category: 'backup',
+        operationalImpact: 'backup_failure'
       }
     };
   }
@@ -5252,8 +5290,8 @@ async function centralIdentify() {
 
 function centralStatusFromDashboard(payload) {
   if (payload.apps?.some(app => app.status === 'offline' && app.enabled !== false)) return 'offline';
-  if (payload.alerts?.some(alert => alert.severity === 'critical')) return 'warning';
-  if (payload.alerts?.some(alert => alert.severity === 'warning')) return 'warning';
+  if (payload.alerts?.some(alert => String(alert.severity || '').toLowerCase() === 'critical')) return 'warning';
+  if (payload.alerts?.some(alert => String(alert.severity || '').toLowerCase() === 'warning')) return 'warning';
   return 'online';
 }
 
@@ -5280,6 +5318,33 @@ function centralSystemMetricsPayload(payload = {}) {
     ...metrics,
     ...(latest ? { latest } : {}),
     ...(series.length ? { series } : {})
+  };
+}
+
+function centralFirebirdMetricsPayload(payload = {}) {
+  const metrics = payload.systemMetrics && typeof payload.systemMetrics === 'object' ? payload.systemMetrics : {};
+  const latestRows = Array.isArray(metrics.latest) ? metrics.latest : (metrics.latest ? [metrics.latest] : []);
+  const latestFirebird = latestRows.find(row => row && row.scope === 'FIREBIRD') || null;
+  const uptime = latestRows.find(row => row && row.target === 'firebird_uptime') || null;
+  const series = Array.isArray(metrics.series)
+    ? metrics.series
+        .filter(row => row && row.scope === 'FIREBIRD')
+        .map(row => ({
+          ...row,
+          collectedAt: row.collectedAt || row.createdAt || metrics.collectedAt || new Date().toISOString()
+        }))
+        .slice(-288)
+    : [];
+  if (!latestFirebird && !series.length && !uptime) return null;
+  return {
+    latest: latestFirebird
+      ? {
+          ...latestFirebird,
+          collectedAt: latestFirebird.collectedAt || latestFirebird.createdAt || metrics.collectedAt || new Date().toISOString()
+        }
+      : null,
+    uptimeSeconds: uptime?.uptimeSeconds ?? null,
+    series
   };
 }
 
@@ -5512,6 +5577,7 @@ async function centralHeartbeat(token, payload) {
       services: await centralServicesPayload(payload),
       metrics: {
         systemMetrics: centralSystemMetricsPayload(payload),
+        firebird: centralFirebirdMetricsPayload(payload),
         network: networkMetrics,
         hostUptimeSeconds: payload.hostUptimeSeconds ?? null
       },
@@ -5521,7 +5587,9 @@ async function centralHeartbeat(token, payload) {
           severity: alert.severity || 'info',
           title,
           message: alert.message || title,
-          code: stableAlertCode(alert)
+          code: stableAlertCode(alert),
+          source: alert.source || 'TronSoftOS',
+          details: alert.details || null
         };
       })
     }
