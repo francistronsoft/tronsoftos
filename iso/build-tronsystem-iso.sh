@@ -50,7 +50,9 @@ include stdmenu.cfg
 include txt.cfg
 EOF
 
-  : > "$WORK_DIR/iso/isolinux/gtk.cfg"
+  for gtk_cfg in "$WORK_DIR"/iso/isolinux/*gtk*.cfg; do
+    [ -e "$gtk_cfg" ] && : > "$gtk_cfg"
+  done
 fi
 
 if [ -f "$WORK_DIR/iso/boot/grub/grub.cfg" ]; then
