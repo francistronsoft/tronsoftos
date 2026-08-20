@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_DIR="${TRONSOFTOS_APP_DIR:-/opt/tronsoftos}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+APP_DIR="${TRONSOFTOS_APP_DIR:-$DEFAULT_APP_DIR}"
 BRANCH="${1:-dev}"
 REMOTE="${TRONSOFTOS_GIT_REMOTE:-origin}"
 TIMEOUT_MINUTES="${TRONSOFTOS_UPDATE_TIMEOUT_MINUTES:-30}"
