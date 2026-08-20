@@ -1,7 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_DIR="${TRONSOFTOS_APP_DIR:-/opt/tronsoftos}"
+default_app_dir() {
+  if [ -n "${TRONSOFTOS_APP_DIR:-}" ]; then
+    printf '%s\n' "$TRONSOFTOS_APP_DIR"
+  elif [ -d /opt/tronos ]; then
+    printf '%s\n' /opt/tronos
+  elif [ -d /opt/tronsoftos ]; then
+    printf '%s\n' /opt/tronsoftos
+  else
+    printf '%s\n' /opt/tronsoftos
+  fi
+}
+
+APP_DIR="$(default_app_dir)"
 SETTINGS_FILE="${TRONSOFTOS_CLOUDFLARE_SETTINGS:-$APP_DIR/state/cloudflare-settings.json}"
 CONTAINER_NAME="${TRONSOFTOS_CLOUDFLARED_CONTAINER:-tronsoftos_cloudflared}"
 IMAGE="${TRONSOFTOS_CLOUDFLARED_IMAGE:-cloudflare/cloudflared:latest}"
