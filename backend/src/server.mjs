@@ -2245,6 +2245,21 @@ async function privilegedRun(command, args, options = {}) {
   return run(command, args, options);
 }
 
+function commandErrorPayload(err) {
+  const stdout = String(err?.stdout || '');
+  const stderr = String(err?.stderr || '');
+  const message = String(err?.message || 'comando falhou');
+  const text = `${stdout}\n${stderr}\n${message}`.trim();
+  return {
+    ok: false,
+    error: text || message,
+    exitCode: Number.isInteger(err?.code) ? err.code : null,
+    signal: err?.signal || null,
+    stdout,
+    stderr
+  };
+}
+
 async function commandExists(command) {
   try {
     if (process.platform === 'win32') await run('where', [command], { timeout: 5000 });
@@ -3277,11 +3292,18 @@ async function hostFirebirdScript(req) {
   const tmpPath = `/tmp/tronsoftos-firebird-${Date.now()}-${Math.random().toString(16).slice(2)}.sh`;
   fs.writeFileSync(tmpPath, script, { mode: 0o700 });
   try {
-    const out = await privilegedRun('/usr/local/sbin/tronsoftos-network', ['firebird-script', tmpPath], {
-      timeout: timeoutMs,
-      maxBuffer: 1024 * 1024 * 10,
-      env: { ...process.env, TERM: 'dumb' }
-    });
+    let out;
+    try {
+      out = await privilegedRun('/usr/local/sbin/tronsoftos-network', ['firebird-script', tmpPath], {
+        timeout: timeoutMs,
+        maxBuffer: 1024 * 1024 * 10,
+        env: { ...process.env, TERM: 'dumb' }
+      });
+    } catch (err) {
+      const payload = commandErrorPayload(err);
+      appendEvent('FIREBIRD_HOST_SCRIPT_FAILED', { script: path.basename(tmpPath), error: payload.error, exitCode: payload.exitCode, signal: payload.signal });
+      return payload;
+    }
     const result = parseJsonLinesBestEffort(out.stdout).at(-1) || { ok: true };
     const stderr = stripTerminalNoise(out.stderr);
     appendEvent('FIREBIRD_HOST_SCRIPT_EXECUTED', { script: path.basename(tmpPath), ...(stderr ? { stderr } : {}) });

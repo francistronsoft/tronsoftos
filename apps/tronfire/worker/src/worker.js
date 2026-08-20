@@ -189,6 +189,13 @@ async function runHostFirebirdShell(args, timeoutMs = 60_000) {
     error.payload = payload;
     throw error;
   }
+  if (payload.ok === false) {
+    const error = new Error(payload.error || 'Script Firebird falhou no host');
+    error.payload = payload;
+    error.stdout = payload.stdout || '';
+    error.stderr = payload.stderr || '';
+    throw error;
+  }
   return {
     stdout: stripHostScriptControlOutput(payload.stdout || ''),
     stderr: payload.stderr || ''
