@@ -39,7 +39,8 @@ const FIREBIRD_QUERY_TIMEOUT_SECONDS = normalizePositiveMinutes(process.env.TRON
 const FIREBIRD_HEALTH_COOLDOWN_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_HEALTH_COOLDOWN_MINUTES, 10, 1, 120);
 const ORPHANED_BACKUP_MIN_AGE_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_ORPHANED_MIN_AGE_MINUTES, 5, 1, 60);
 const FIREBIRD_SESSION_RETENTION_DAYS = 30;
-const FIREBIRD_UNRESPONSIVE_FAILURE_THRESHOLD = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_UNRESPONSIVE_FAILURES, 2, 1, 10);
+const FIREBIRD_UNRESPONSIVE_FAILURE_THRESHOLD = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_UNRESPONSIVE_FAILURES, 5, 1, 10);
+const FIREBIRD_RESTORE_GRACE_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_RESTORE_GRACE_MINUTES, 5, 1, 60);
 const CONFIGURED_RUNNING_BACKUP_TTL_MINUTES = Number(process.env.TRONFIRE_BACKUP_RUNNING_TTL_MINUTES || 60);
 const RUNNING_BACKUP_TTL_MINUTES = Number.isFinite(CONFIGURED_RUNNING_BACKUP_TTL_MINUTES)
   ? Math.max(CONFIGURED_RUNNING_BACKUP_TTL_MINUTES, 30)
@@ -245,6 +246,11 @@ function databaseOperationActive(db, now = new Date()) {
   return new Date(db.operationExpiresAt) > now;
 }
 
+function databaseInPostRestoreGrace(db, now = new Date()) {
+  if (!db?.lastCheckAt) return false;
+  return now.getTime() - new Date(db.lastCheckAt).getTime() < FIREBIRD_RESTORE_GRACE_MINUTES * 60 * 1000;
+}
+
 async function clearExpiredDatabaseOperation(db) {
   const now = new Date();
   if (!db?.id || !db.operationExpiresAt || String(db.operationStatus || 'IDLE').toUpperCase() !== 'RUNNING') return db;
@@ -346,6 +352,12 @@ async function collectFirebirdSessionHistory() {
       orderBy: [{ isPrimary: 'desc' }, { updatedAt: 'asc' }]
     });
     if (!db) return;
+    db = await clearExpiredDatabaseOperation(db);
+    if (databaseOperationActive(db) || databaseInPostRestoreGrace(db)) {
+      firebirdSessionFailureCounts.delete(db.id);
+      firebirdCircuitBreakers.delete(circuitKey(db));
+      return;
+    }
     if (databaseRoutineActive(db) || firebirdCircuitOpen(db)) return;
     const sessions = await withDatabaseRoutineLock(db, 'session-history', () => queryFirebirdSessions(db));
     if (!sessions) return;
@@ -665,6 +677,7 @@ async function markFirebirdSuccess(db) {
 
 async function markFirebirdFailure(db, err, context) {
   if (!db?.id) return;
+  if (databaseInPostRestoreGrace(db)) return;
   const key = circuitKey(db);
   const current = firebirdCircuit(db);
   const failures = current.failures + 1;
@@ -1539,6 +1552,7 @@ async function checkDatabases() {
     try {
       const currentDb = await clearExpiredDatabaseOperation(db);
       if (databaseOperationActive(currentDb)) continue;
+      if (databaseInPostRestoreGrace(currentDb)) continue;
       await markOrphanedRunningBackupsFailed(db.id, 'before-database-check');
       await markStaleRunningBackupsFailed(db.id, 'before-database-check');
       const runningBackup = await prisma.backupJob.count({ where: { databaseId: db.id, status: 'RUNNING' } });
