@@ -4532,9 +4532,9 @@ function startCommandJob({ id = `${Date.now().toString(36)}-${Math.random().toSt
   return publicActionJob(job);
 }
 
-function privilegedCommandArgs(command, args) {
+function privilegedCommandArgs(command, args, options = {}) {
   if (process.getuid && process.getuid() !== 0) {
-    return { command: 'sudo', args: [command, ...args] };
+    return { command: 'sudo', args: options.preserveEnv ? ['-E', command, ...args] : [command, ...args] };
   }
   return { command, args };
 }
@@ -4850,7 +4850,7 @@ function startTronsoftosUpdate(body = {}) {
     });
   }
 
-  const cmd = privilegedCommandArgs('/usr/bin/bash', [script, branch]);
+  const cmd = privilegedCommandArgs('/usr/bin/bash', [script, branch], { preserveEnv: true });
   const updateJobId = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
   const env = {
     ...process.env,

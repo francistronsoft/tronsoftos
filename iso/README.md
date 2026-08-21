@@ -1,10 +1,10 @@
 # ISO TronSystem Debian 13
 
-Perfil para remasterizar a ISO Debian 13 como instalador texto do TronSystem.
+Perfil para remasterizar a ISO Debian 13 como instalador TronSystem preservando o menu original do Debian.
 
 Inclui:
 
-- sem ambiente grafico;
+- menu original do Debian preservado, incluindo instalacao grafica;
 - usuario `tronsoft`;
 - SSH habilitado;
 - pacotes `sudo`, `git`, `curl`, `ca-certificates` e `openssh-server`;
