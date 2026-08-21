@@ -3312,10 +3312,14 @@ async function hostFirebirdAction(action) {
 }
 
 function assertInternalToken(req) {
-  const expected = process.env.TRONSOFTOS_INTERNAL_TOKEN || '';
-  if (!expected) return;
+  const expected = internalTokenValue();
+  if (!expected) {
+    const error = new Error('TRONSOFTOS_INTERNAL_TOKEN nao configurado');
+    error.statusCode = 503;
+    throw error;
+  }
   const received = String(req.headers['x-tronsoftos-token'] || '');
-  if (received !== expected) {
+  if (!timingSafeEqualText(received, expected)) {
     const error = new Error('Token interno TronSoftOS invalido');
     error.statusCode = 403;
     throw error;
