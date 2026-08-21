@@ -33,11 +33,17 @@ install -m 0644 "$SCRIPT_DIR/preseed-tronsystem.cfg" "$WORK_DIR/iso/preseed.cfg"
 install -m 0755 "$SCRIPT_DIR/tronsystem-late-command.sh" "$WORK_DIR/iso/tronsystem-late-command.sh"
 
 if [ -d "$WORK_DIR/iso/install.amd" ]; then
-  mkdir -p "$WORK_DIR/initrd"
-  cd "$WORK_DIR/initrd"
-  gzip -dc "$WORK_DIR/iso/install.amd/initrd.gz" | cpio -id --quiet
-  install -m 0644 "$WORK_DIR/iso/preseed.cfg" preseed.cfg
-  find . | cpio -o -H newc --quiet | gzip -9 > "$WORK_DIR/iso/install.amd/initrd.gz"
+  find "$WORK_DIR/iso/install.amd" -name initrd.gz -type f | while read -r initrd; do
+    initrd_work="$WORK_DIR/initrd-$(printf '%s' "$initrd" | sha256sum | awk '{print $1}')"
+    rm -rf "$initrd_work"
+    mkdir -p "$initrd_work"
+    (
+      cd "$initrd_work"
+      gzip -dc "$initrd" | cpio -id --quiet
+      install -m 0644 "$WORK_DIR/iso/preseed.cfg" preseed.cfg
+      find . | cpio -o -H newc --quiet | gzip -9 > "$initrd"
+    )
+  done
 fi
 
 find "$WORK_DIR/iso" -type f -name '*.cfg' -o -name 'txt.cfg' -o -name 'grub.cfg' | while read -r cfg; do
