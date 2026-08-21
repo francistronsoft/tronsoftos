@@ -782,7 +782,7 @@ function normalizeHaSyncSettings(body) {
 function writeHaSyncSettings(body) {
   const guard = clusterGuard();
   if (nodeIdentity().deploymentMode === 'ha' && guard.canServeProduction !== true) {
-    throw new Error('Sync HA deve ser configurado no no primary/ativo');
+    throw Object.assign(new Error(`Sync HA deve ser configurado no no primary/ativo. Status atual: ${guard.reason || guard.status}`), { statusCode: 409 });
   }
   ensureStateDir();
   const settings = normalizeHaSyncSettings(body);
@@ -794,7 +794,7 @@ function writeHaSyncSettings(body) {
 async function testHaSyncSsh(body = {}) {
   const guard = clusterGuard();
   if (nodeIdentity().deploymentMode === 'ha' && guard.canServeProduction !== true) {
-    throw new Error('Teste SSH do Sync HA deve ser executado no no primary/ativo');
+    throw Object.assign(new Error(`Teste SSH do Sync HA deve ser executado no no primary/ativo. Status atual: ${guard.reason || guard.status}`), { statusCode: 409 });
   }
   const settings = normalizeHaSyncSettings(body);
   const identityFile = path.join(stateDir, 'ssh/id_ed25519');
@@ -4251,7 +4251,7 @@ function startAppAction(app, action, options = {}) {
 function startHaSync() {
   const guard = clusterGuard();
   if (nodeIdentity().deploymentMode === 'ha' && guard.canServeProduction !== true) {
-    throw new Error('Sync HA deve ser executado no no primary/ativo');
+    throw Object.assign(new Error(`Sync HA deve ser executado no no primary/ativo. Status atual: ${guard.reason || guard.status}`), { statusCode: 409 });
   }
   const settings = publicHaSyncSettings(rawHaSyncSettings());
   if (settings.enabled !== true) throw new Error('sync HA desabilitado');
