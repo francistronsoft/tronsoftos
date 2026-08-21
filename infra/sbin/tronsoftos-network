@@ -93,6 +93,10 @@ apply_pairing() {
 
   install -m 0600 "$source_file" "$cluster_secrets"
   chown tronsoftos:tronsoftos "$cluster_secrets" 2>/dev/null || true
+  set_env_value "$cluster_secrets" "SESSION_SECRET" "$SESSION_SECRET"
+  set_env_value "$cluster_secrets" "TRONSOFTOS_INTERNAL_TOKEN" "$TRONSOFTOS_INTERNAL_TOKEN"
+  set_env_value "$cluster_secrets" "POSTGRES_PASSWORD" "$POSTGRES_PASSWORD"
+  set_env_value "$cluster_secrets" "FIREBIRD_PASSWORD" "$FIREBIRD_PASSWORD"
 
   set_env_value "$tronsoftos_env" "TRONSOFTOS_INTERNAL_TOKEN" "$TRONSOFTOS_INTERNAL_TOKEN"
   if [ -n "${HA_SYNC_SSH_USER:-}" ]; then
@@ -117,6 +121,14 @@ apply_pairing() {
   set_env_value "$tronfire_env" "SESSION_SECRET" "$SESSION_SECRET"
   set_env_value "$tronfire_env" "TRONSOFTOS_INTERNAL_TOKEN" "$TRONSOFTOS_INTERNAL_TOKEN"
   set_env_value "$tronfire_env" "FIREBIRD_PASSWORD" "$FIREBIRD_PASSWORD"
+  set_env_value "$tronfire_env" "POSTGRES_PASSWORD" "$POSTGRES_PASSWORD"
+
+  cluster_token="$(grep '^TRONSOFTOS_INTERNAL_TOKEN=' "$cluster_secrets" 2>/dev/null | tail -n1 | cut -d= -f2-)"
+  tronsoftos_token="$(grep '^TRONSOFTOS_INTERNAL_TOKEN=' "$tronsoftos_env" 2>/dev/null | tail -n1 | cut -d= -f2-)"
+  tronfire_token="$(grep '^TRONSOFTOS_INTERNAL_TOKEN=' "$tronfire_env" 2>/dev/null | tail -n1 | cut -d= -f2-)"
+  [ "$cluster_token" = "$TRONSOFTOS_INTERNAL_TOKEN" ] || fail "cluster-secrets.env ficou com token interno divergente"
+  [ "$tronsoftos_token" = "$TRONSOFTOS_INTERNAL_TOKEN" ] || fail "tronsoftos.env ficou com token interno divergente"
+  [ "$tronfire_token" = "$TRONSOFTOS_INTERNAL_TOKEN" ] || fail "TronFire .env ficou com token interno divergente"
 
   if [ -f "$troncomanda_env" ]; then
     set_env_value "$troncomanda_env" "TRONCOMANDA_FIREBIRD_PASSWORD" "$FIREBIRD_PASSWORD"

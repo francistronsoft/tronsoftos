@@ -156,6 +156,49 @@ set_env_value() {
   fi
 }
 
+env_value() {
+  local file="$1"
+  local key="$2"
+  [ -f "$file" ] || return 0
+  grep "^$key=" "$file" | tail -n1 | cut -d= -f2-
+}
+
+reconcile_internal_token_files() {
+  local tronfire_env="$APP_DIR/apps/tronfire/.env"
+  local cluster_secrets="$APP_DIR/state/cluster-secrets.env"
+  local effective_token=""
+  local env_token=""
+  local tronfire_token=""
+  local cluster_token=""
+
+  env_token="$(env_value "$ENV_FILE" "TRONSOFTOS_INTERNAL_TOKEN")"
+  tronfire_token="$(env_value "$tronfire_env" "TRONSOFTOS_INTERNAL_TOKEN")"
+  cluster_token="$(env_value "$cluster_secrets" "TRONSOFTOS_INTERNAL_TOKEN")"
+  effective_token="${env_token:-${tronfire_token:-$cluster_token}}"
+  [ -n "$effective_token" ] || return 0
+
+  if [ ! -f "$cluster_secrets" ]; then
+    install -d -m 0700 -o "$USER_NAME" -g "$GROUP_NAME" "$APP_DIR/state"
+    touch "$cluster_secrets"
+    chown "$USER_NAME:$GROUP_NAME" "$cluster_secrets" 2>/dev/null || true
+    chmod 0600 "$cluster_secrets"
+  fi
+
+  set_env_value "$ENV_FILE" "TRONSOFTOS_INTERNAL_TOKEN" "$effective_token"
+  set_env_value "$tronfire_env" "TRONSOFTOS_INTERNAL_TOKEN" "$effective_token"
+  set_env_value "$cluster_secrets" "TRONSOFTOS_INTERNAL_TOKEN" "$effective_token"
+  chown "$USER_NAME:$GROUP_NAME" "$cluster_secrets" 2>/dev/null || true
+  chmod 0600 "$cluster_secrets"
+
+  env_token="$(env_value "$ENV_FILE" "TRONSOFTOS_INTERNAL_TOKEN")"
+  tronfire_token="$(env_value "$tronfire_env" "TRONSOFTOS_INTERNAL_TOKEN")"
+  cluster_token="$(env_value "$cluster_secrets" "TRONSOFTOS_INTERNAL_TOKEN")"
+  if [ "$env_token" != "$effective_token" ] || [ "$tronfire_token" != "$effective_token" ] || [ "$cluster_token" != "$effective_token" ]; then
+    echo "TRONSOFTOS_INTERNAL_TOKEN divergente entre tronsoftos.env, TronFire .env e cluster-secrets.env" >&2
+    return 78
+  fi
+}
+
 ensure_ha_sync_ssh_user() {
   local ssh_user="$1"
   local app_dir="$2"
@@ -331,6 +374,7 @@ set_env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_CLUSTER_SECRETS" "$APP_D
 if [ -f "$APP_DIR/state/cluster-secrets.env" ] && [ -z "$(env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_INTERNAL_TOKEN")" ]; then
   set_env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_INTERNAL_TOKEN" "$(env_value "$APP_DIR/state/cluster-secrets.env" "TRONSOFTOS_INTERNAL_TOKEN")"
 fi
+reconcile_internal_token_files
 cd "$APP_DIR/apps/tronfire"
 bash scripts/install-assets.sh
 if [ -f "$APP_DIR/apps/tronfire/docker/firebird25/FirebirdCS-2.5.9.27139-0.amd64.tar.gz" ]; then
