@@ -539,7 +539,7 @@ async function firebirdAttachmentsForDatabase(db) {
     'QUIT;'
   ].join('\n');
   const cmd = [
-    `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; };`,
+    `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; }`,
     `printf %s ${shQuote(`${sql}\n`)}`,
     '|',
     'run_with_timeout',
@@ -696,7 +696,7 @@ async function indexHealthForDatabase(db) {
     'QUIT;'
   ].join('\n');
   const cmd = [
-    `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; };`,
+    `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; }`,
     `printf %s ${shQuote(`${sql}\n`)}`,
     '|',
     'run_with_timeout',
@@ -1359,7 +1359,7 @@ async function validateBackupRestore(db, backupPath, logPath, token = timestamp1
     'cleanup_validation() { rm -f "$restore"; if [ "${restore_src:-$backup}" != "$backup" ]; then rm -f "$restore_src" || true; fi; }',
     'trap cleanup_validation EXIT',
     'case "$backup" in *.gz) restore_src="$(mktemp /tmp/tronfire_backup_validate_XXXXXX.gbk)" || fail 81 "Falha ao criar arquivo temporario para validacao"; gzip -dc "$backup" > "$restore_src" || { rm -f "$restore_src"; fail 81 "Falha ao descompactar backup para validacao"; } ;; esac',
-    `run_with_timeout() { ${firebirdTimeoutCommand(backupValidationTimeoutMinutes)}; };`,
+    `run_with_timeout() { ${firebirdTimeoutCommand(backupValidationTimeoutMinutes)}; }`,
     `run_with_timeout ${gbak} -c -v -user SYSDBA -password ${password} "$restore_src" ${shQuote(firebirdCreateTarget(tempRestorePath))} >> "$log" 2>&1 || fail 82 "Falha ao restaurar backup para validacao"`,
     'if [ "$restore_src" != "$backup" ]; then rm -f "$restore_src" || true; fi',
     'test -f "$restore" || fail 83 "Restore de validacao terminou sem arquivo restaurado"',

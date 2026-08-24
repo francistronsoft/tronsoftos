@@ -269,7 +269,7 @@ apply_vip() {
   local check_target="/etc/keepalived/check-tronsoftos.sh"
   local conf_target="/etc/keepalived/keepalived.conf"
 
-  [ -f "$check_source" ] || fail "check-tronsoftos.sh nao encontrado"
+  [ -s "$check_source" ] || fail "check-tronsoftos.sh nao encontrado ou vazio"
   mkdir -p /etc/keepalived
   install -m 0755 "$check_source" "$check_target"
 

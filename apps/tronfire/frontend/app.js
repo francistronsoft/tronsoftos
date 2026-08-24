@@ -179,7 +179,17 @@ function operationBadge(db) {
   return `<span class="badge bg-warning text-dark" title="${escapeHtml(db.operationMessage || '')}">${escapeHtml(label)}</span>`;
 }
 
-function databaseStatusView(db, diagnostic) {
+function databaseStatusView(db, diagnostic, haStatus) {
+  const usingStandbyPath = diagnostic?.pathRole === 'standby_read_only'
+    || (diagnostic?.path && diagnostic.path !== db.filePath);
+  if (
+    haStatus?.deploymentMode === 'ha'
+    && haStatus?.nodeRole === 'standby'
+    && usingStandbyPath
+    && String(db.standbyStatus || '').toUpperCase() === 'READY'
+  ) {
+    return { text: 'Standby pronto', className: 'success', title: 'Arquivo standby restaurado e validado para promocao' };
+  }
   if (diagnostic?.ok === false) return { text: 'Erro/offline', className: 'danger', title: diagnostic.error || 'Falha ao consultar o banco' };
   if (diagnostic?.ok) return { text: 'Conexao OK', className: 'success', title: 'Consulta via isql respondeu; use gfix -online se o ERP ficar limitado por shutdown/maintenance' };
   if (db.status === 'ONLINE') return { text: 'Conexao OK', className: 'success', title: 'Ultima validacao respondeu; use gfix -online se precisar forcar o modo online do Firebird' };
@@ -813,9 +823,13 @@ function bindDatabaseSessionsPanel(db, slot) {
 }
 
 function databaseDetailsPanel(db, diagnostic, haStatus) {
-  const status = databaseStatusView(db, diagnostic);
   const diagnosticPath = diagnostic?.path || db.filePath;
   const usingStandbyPath = diagnostic?.pathRole === 'standby_read_only' || diagnosticPath !== db.filePath;
+  const status = databaseStatusView(db, diagnostic, haStatus);
+  const suppressDiagnosticError = haStatus?.deploymentMode === 'ha'
+    && haStatus?.nodeRole === 'standby'
+    && usingStandbyPath
+    && String(db.standbyStatus || '').toUpperCase() === 'READY';
   return `
     <div class="card mb-3" id="databaseDetailsPanel">
       <div class="card-header d-flex align-items-center justify-content-between">
@@ -844,7 +858,7 @@ function databaseDetailsPanel(db, diagnostic, haStatus) {
           <div class="col-md-3"><div class="subheader">Backup automatico</div><div>${db.backupEnabled ? 'Ativo' : 'Inativo'}</div></div>
           <div class="col-md-3"><div class="subheader">Frequencia</div><div>${escapeHtml(db.backupFrequencyMinutes)} min</div></div>
           <div class="col-md-3"><div class="subheader">Retencao</div><div>${escapeHtml(db.retentionDays)} dias</div></div>
-          ${diagnostic?.error ? `<div class="col-12"><div class="alert alert-danger mb-0">${escapeHtml(diagnostic.error)}</div></div>` : ''}
+          ${diagnostic?.error && !suppressDiagnosticError ? `<div class="col-12"><div class="alert alert-danger mb-0">${escapeHtml(diagnostic.error)}</div></div>` : ''}
         </div>
         <div class="mt-3 btn-list">
           <button class="btn btn-sm btn-outline-dark" data-detail-connection="${db.id}">Conexao</button>

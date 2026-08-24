@@ -5,13 +5,14 @@ BASE_ISO="${1:-}"
 OUT_ISO="${2:-tronsystem-debian13.iso}"
 OUT_DIR="$(cd "$(dirname "$OUT_ISO")" && pwd)"
 WORK_DIR="${WORK_DIR:-$OUT_DIR/.tronsystem-iso-build}"
+DOCKER_BUNDLE="${TRONSYSTEM_DOCKER_BUNDLE:-}"
 
 if [ -z "$BASE_ISO" ] || [ ! -f "$BASE_ISO" ]; then
   echo "Uso: $0 /caminho/debian-13.iso [saida.iso]" >&2
   exit 64
 fi
 
-for cmd in xorriso rsync sed sha256sum; do
+for cmd in xorriso rsync sed sha256sum tar; do
   command -v "$cmd" >/dev/null 2>&1 || {
     echo "Comando obrigatorio nao encontrado: $cmd" >&2
     exit 65
@@ -19,6 +20,7 @@ for cmd in xorriso rsync sed sha256sum; do
 done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR/mnt" "$WORK_DIR/iso"
 
@@ -31,6 +33,30 @@ trap - EXIT
 
 install -m 0644 "$SCRIPT_DIR/preseed-tronsystem.cfg" "$WORK_DIR/iso/preseed.cfg"
 install -m 0755 "$SCRIPT_DIR/tronsystem-late-command.sh" "$WORK_DIR/iso/tronsystem-late-command.sh"
+if [ -n "$DOCKER_BUNDLE" ] && [ -f "$DOCKER_BUNDLE" ]; then
+  install -m 0644 "$DOCKER_BUNDLE" "$WORK_DIR/iso/tronsystem-docker-images.tar"
+elif [ -f "$SCRIPT_DIR/tronsystem-docker-images.tar" ]; then
+  install -m 0644 "$SCRIPT_DIR/tronsystem-docker-images.tar" "$WORK_DIR/iso/tronsystem-docker-images.tar"
+else
+  echo "Aviso: bundle Docker nao informado; ISO fara pull/build das imagens na instalacao." >&2
+fi
+tar \
+  --exclude-vcs \
+  --exclude='./frontend/node_modules' \
+  --exclude='./frontend/dist' \
+  --exclude='./apps/tronfire/backend/node_modules' \
+  --exclude='./apps/tronfire/worker/node_modules' \
+  --exclude='./apps/tronfire/backend/prisma/dev.db' \
+  --exclude='./apps/tronfire/frontend/node_modules' \
+  --exclude='./apps/tronfire/frontend/dist' \
+  --exclude='./agent-windows/installer-win-x64' \
+  --exclude='./agent-windows/installer-output' \
+  --exclude='./iso/tronsystem-docker-images.tar' \
+  --exclude='./iso/tronsystem-source.tar.gz' \
+  --exclude='./state' \
+  --exclude='./logs' \
+  -czf "$WORK_DIR/iso/tronsystem-source.tar.gz" \
+  -C "$REPO_ROOT" .
 
 if [ -d "$WORK_DIR/iso/install.amd" ]; then
   find "$WORK_DIR/iso/install.amd" -name initrd.gz -type f | while read -r initrd; do
