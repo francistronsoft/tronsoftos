@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+trap 'rc=$?; echo "Instalacao falhou na linha $LINENO (exit $rc)." >&2; exit "$rc"' ERR
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_DIR="/etc/tronsoftos"
@@ -170,7 +171,7 @@ reconcile_internal_token_files() {
   env_token="$(env_value "$ENV_FILE" "TRONSOFTOS_INTERNAL_TOKEN")"
   tronfire_token="$(env_value "$tronfire_env" "TRONSOFTOS_INTERNAL_TOKEN")"
   cluster_token="$(env_value "$cluster_secrets" "TRONSOFTOS_INTERNAL_TOKEN")"
-  effective_token="${env_token:-${tronfire_token:-$cluster_token}}"
+  effective_token="${cluster_token:-${tronfire_token:-$env_token}}"
   [ -n "$effective_token" ] || return 0
 
   if [ ! -f "$cluster_secrets" ]; then
@@ -183,6 +184,17 @@ reconcile_internal_token_files() {
   set_env_value "$ENV_FILE" "TRONSOFTOS_INTERNAL_TOKEN" "$effective_token"
   set_env_value "$tronfire_env" "TRONSOFTOS_INTERNAL_TOKEN" "$effective_token"
   set_env_value "$cluster_secrets" "TRONSOFTOS_INTERNAL_TOKEN" "$effective_token"
+  for secret_key in SESSION_SECRET POSTGRES_PASSWORD FIREBIRD_PASSWORD; do
+    local secret_value=""
+    secret_value="$(env_value "$cluster_secrets" "$secret_key")"
+    secret_value="${secret_value:-$(env_value "$tronfire_env" "$secret_key")}"
+    secret_value="${secret_value:-$(env_value "$ENV_FILE" "$secret_key")}"
+    if [ -n "$secret_value" ]; then
+      set_env_value "$ENV_FILE" "$secret_key" "$secret_value"
+      set_env_value "$tronfire_env" "$secret_key" "$secret_value"
+      set_env_value "$cluster_secrets" "$secret_key" "$secret_value"
+    fi
+  done
   chown "$USER_NAME:$GROUP_NAME" "$cluster_secrets" 2>/dev/null || true
   chmod 0600 "$cluster_secrets"
 
@@ -433,7 +445,7 @@ systemctl daemon-reload
 echo "Subindo servicos do host..."
 cd "$APP_DIR/apps/tronfire"
 tronfire_firebird_exec_mode="$(env_value "$APP_DIR/apps/tronfire/.env" "FIREBIRD_EXEC_MODE" | tr -d "\"'" | tr '[:upper:]' '[:lower:]')"
-tronfire_firebird_exec_mode="${tronfire_firebird_exec_mode:-container}"
+tronfire_firebird_exec_mode="${tronfire_firebird_exec_mode:-host}"
 if [ "$tronfire_firebird_exec_mode" = "host" ]; then
   TRONSOFTOS_APP_DIR="$APP_DIR" bash "$APP_DIR/scripts/install-firebird25-host.sh"
 fi

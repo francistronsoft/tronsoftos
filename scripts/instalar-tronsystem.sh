@@ -33,7 +33,20 @@ else
 fi
 
 chmod +x "$APP_DIR/install.sh" "$APP_DIR/scripts/"*.sh 2>/dev/null || true
-TRONSOFTOS_APP_DIR="$APP_DIR" bash "$APP_DIR/install.sh"
+LOG_FILE="${TRONSOFTOS_INSTALL_LOG:-/var/log/tronsystem-instalar.log}"
+mkdir -p "$(dirname "$LOG_FILE")"
+echo "Log da instalacao: $LOG_FILE"
+set +e
+set -o pipefail
+TRONSOFTOS_APP_DIR="$APP_DIR" bash "$APP_DIR/install.sh" 2>&1 | tee "$LOG_FILE"
+rc=${PIPESTATUS[0]}
+set +o pipefail
+set -e
+if [ "$rc" -ne 0 ]; then
+  echo "Instalacao falhou (exit $rc). Ultimas linhas do log:"
+  tail -80 "$LOG_FILE" || true
+  exit "$rc"
+fi
 
 echo
 echo "Instalacao concluida."
