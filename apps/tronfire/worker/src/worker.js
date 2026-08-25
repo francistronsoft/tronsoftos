@@ -30,6 +30,7 @@ const DEFAULT_BACKUP_FREQUENCY_MINUTES = normalizePositiveMinutes(process.env.TR
 const DEFAULT_BACKUP_RETENTION_DAYS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_RETENTION_DAYS, 30);
 const BACKUP_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_TIMEOUT_MINUTES, 120, 30, 1440);
 const BACKUP_VALIDATION_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_TIMEOUT_MINUTES, 45, 15, 240);
+const BACKUP_RESTORE_VALIDATION_WINDOW = String(process.env.TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW || '00:00-05:00').trim();
 const ORPHANED_BACKUP_MIN_AGE_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_ORPHANED_MIN_AGE_MINUTES, 5, 1, 60);
 const FIREBIRD_SESSION_RETENTION_DAYS = 30;
 const FIREBIRD_UNRESPONSIVE_FAILURE_THRESHOLD = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_UNRESPONSIVE_FAILURES, 5, 1, 10);
@@ -58,6 +59,35 @@ function normalizePositiveMinutes(value, fallback, min = 1, max = 10080) {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.max(min, Math.min(max, Math.round(number)));
+}
+
+function parseClockMinutes(value) {
+  const match = String(value || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+  return hours * 60 + minutes;
+}
+
+function validationWindowStatus(now = new Date()) {
+  const value = BACKUP_RESTORE_VALIDATION_WINDOW.toLowerCase();
+  if (!value || ['off', 'false', 'disabled', 'never'].includes(value)) return { allowed: false, reason: 'disabled', window: BACKUP_RESTORE_VALIDATION_WINDOW };
+  if (['always', 'true', '*'].includes(value)) return { allowed: true, reason: 'always', window: BACKUP_RESTORE_VALIDATION_WINDOW };
+  const [startText, endText] = BACKUP_RESTORE_VALIDATION_WINDOW.split('-', 2).map(item => item?.trim());
+  const start = parseClockMinutes(startText);
+  const end = parseClockMinutes(endText);
+  if (start === null || end === null) return { allowed: false, reason: 'invalid_window', window: BACKUP_RESTORE_VALIDATION_WINDOW };
+  const current = now.getHours() * 60 + now.getMinutes();
+  const allowed = start <= end
+    ? current >= start && current < end
+    : current >= start || current < end;
+  return { allowed, reason: allowed ? 'inside_window' : 'outside_window', window: BACKUP_RESTORE_VALIDATION_WINDOW };
+}
+
+function shouldValidateBackupRestore(reason) {
+  if (String(reason || '').toUpperCase() !== 'AUTO') return { allowed: true, reason: 'manual_or_requested', window: BACKUP_RESTORE_VALIDATION_WINDOW };
+  return validationWindowStatus();
 }
 
 function haSyncActive() {
@@ -1101,7 +1131,16 @@ async function runBackup(db, reason = 'AUTO') {
     const { stdout: sizeOut } = await dockerExec(['stat','-c','%s', backupPath]);
     const { stdout: shaOut } = await dockerExec(['sha256sum', backupPath]);
     const sha = shaOut.trim().split(/\s+/)[0];
-    const validation = await validateBackupRestore(db, backupPath, logPath, stamp);
+    const validationDecision = shouldValidateBackupRestore(reason);
+    const validation = validationDecision.allowed
+      ? await validateBackupRestore(db, backupPath, logPath, stamp)
+      : {
+          ok: false,
+          skipped: true,
+          reason: validationDecision.reason,
+          window: validationDecision.window,
+          message: `Validacao de restore fora da janela configurada (${validationDecision.window})`
+        };
     const manifest = {
       databaseId: db.id,
       databaseAlias: db.alias,

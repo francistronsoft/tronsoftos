@@ -122,6 +122,18 @@ tronfire_images_available() {
   docker image inspect tronfire-backend:latest tronfire-worker:latest postgres:16-alpine redis:7-alpine >/dev/null 2>&1
 }
 
+tronfire_images_compatible() {
+  if docker run --rm --entrypoint sh tronfire-worker:latest -lc "grep -F '}; };\`,' /app/src/worker.js >/dev/null 2>&1"; then
+    echo "Imagem tronfire-worker local contem gerador de script antigo; rebuild sera executado."
+    return 1
+  fi
+  if docker run --rm --entrypoint sh tronfire-backend:latest -lc "grep -F '}; };\`,' /app/src/server.js >/dev/null 2>&1"; then
+    echo "Imagem tronfire-backend local contem gerador de script antigo; rebuild sera executado."
+    return 1
+  fi
+  return 0
+}
+
 tronfire_compose_up() {
   local label="$1"
   shift
@@ -129,7 +141,7 @@ tronfire_compose_up() {
     run_with_retry "$label" docker compose "$@" up -d --build
     return
   fi
-  if tronfire_images_available; then
+  if tronfire_images_available && tronfire_images_compatible; then
     echo "Imagens TronFire encontradas localmente; subindo sem rebuild."
     run_with_retry "$label" docker compose "$@" up -d
     return
@@ -413,6 +425,10 @@ set_env_value "$APP_DIR/apps/tronfire/.env" "APP_ROOT" "$APP_DIR/apps/tronfire"
 set_env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_STATE_DIR" "$APP_DIR/state"
 set_env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_CLUSTER_LOCK" "$APP_DIR/state/cluster-lock.json"
 set_env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_CLUSTER_SECRETS" "$APP_DIR/state/cluster-secrets.env"
+set_env_value "$APP_DIR/apps/tronfire/.env" "TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW" "$(env_value "$APP_DIR/apps/tronfire/.env" "TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW" || true)"
+if [ -z "$(env_value "$APP_DIR/apps/tronfire/.env" "TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW")" ]; then
+  set_env_value "$APP_DIR/apps/tronfire/.env" "TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW" "00:00-05:00"
+fi
 if [ -f "$APP_DIR/state/cluster-secrets.env" ] && [ -z "$(env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_INTERNAL_TOKEN")" ]; then
   set_env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_INTERNAL_TOKEN" "$(env_value "$APP_DIR/state/cluster-secrets.env" "TRONSOFTOS_INTERNAL_TOKEN")"
 fi
