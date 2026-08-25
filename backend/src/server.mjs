@@ -779,11 +779,17 @@ function normalizeHaSyncSettings(body) {
   return next;
 }
 
-function writeHaSyncSettings(body) {
+function assertHaSyncPrimary(actionLabel) {
+  const identity = nodeIdentity();
   const guard = clusterGuard();
-  if (nodeIdentity().deploymentMode === 'ha' && guard.canServeProduction !== true) {
-    throw Object.assign(new Error(`Sync HA deve ser configurado no no primary/ativo. Status atual: ${guard.reason || guard.status}`), { statusCode: 409 });
+  if (identity.deploymentMode === 'ha' && identity.nodeRole !== 'primary') {
+    throw Object.assign(new Error(`${actionLabel} deve ser executado no no primary. Status atual: ${guard.reason || guard.status}`), { statusCode: 409 });
   }
+  return { identity, guard };
+}
+
+function writeHaSyncSettings(body) {
+  assertHaSyncPrimary('Sync HA');
   ensureStateDir();
   const settings = normalizeHaSyncSettings(body);
   fs.writeFileSync(haSyncSettingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
@@ -792,10 +798,7 @@ function writeHaSyncSettings(body) {
 }
 
 async function testHaSyncSsh(body = {}) {
-  const guard = clusterGuard();
-  if (nodeIdentity().deploymentMode === 'ha' && guard.canServeProduction !== true) {
-    throw Object.assign(new Error(`Teste SSH do Sync HA deve ser executado no no primary/ativo. Status atual: ${guard.reason || guard.status}`), { statusCode: 409 });
-  }
+  assertHaSyncPrimary('Teste SSH do Sync HA');
   const settings = normalizeHaSyncSettings(body);
   const identityFile = path.join(stateDir, 'ssh/id_ed25519');
   const knownHosts = path.join(stateDir, 'known_hosts');
@@ -4189,10 +4192,7 @@ function startAppAction(app, action, options = {}) {
 }
 
 function startHaSync() {
-  const guard = clusterGuard();
-  if (nodeIdentity().deploymentMode === 'ha' && guard.canServeProduction !== true) {
-    throw Object.assign(new Error(`Sync HA deve ser executado no no primary/ativo. Status atual: ${guard.reason || guard.status}`), { statusCode: 409 });
-  }
+  assertHaSyncPrimary('Sync HA');
   const settings = publicHaSyncSettings(rawHaSyncSettings());
   if (settings.enabled !== true) throw new Error('sync HA desabilitado');
   if (!settings.standbyHost) throw new Error('host standby nao configurado');
