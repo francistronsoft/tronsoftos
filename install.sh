@@ -427,7 +427,7 @@ set_env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_CLUSTER_LOCK" "$APP_DIR/
 set_env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_CLUSTER_SECRETS" "$APP_DIR/state/cluster-secrets.env"
 set_env_value "$APP_DIR/apps/tronfire/.env" "TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW" "$(env_value "$APP_DIR/apps/tronfire/.env" "TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW" || true)"
 if [ -z "$(env_value "$APP_DIR/apps/tronfire/.env" "TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW")" ]; then
-  set_env_value "$APP_DIR/apps/tronfire/.env" "TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW" "00:00-05:00"
+  set_env_value "$APP_DIR/apps/tronfire/.env" "TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW" "03:00-06:00"
 fi
 if [ -f "$APP_DIR/state/cluster-secrets.env" ] && [ -z "$(env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_INTERNAL_TOKEN")" ]; then
   set_env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_INTERNAL_TOKEN" "$(env_value "$APP_DIR/state/cluster-secrets.env" "TRONSOFTOS_INTERNAL_TOKEN")"

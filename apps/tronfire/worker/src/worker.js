@@ -30,7 +30,7 @@ const DEFAULT_BACKUP_FREQUENCY_MINUTES = normalizePositiveMinutes(process.env.TR
 const DEFAULT_BACKUP_RETENTION_DAYS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_RETENTION_DAYS, 30);
 const BACKUP_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_TIMEOUT_MINUTES, 120, 30, 1440);
 const BACKUP_VALIDATION_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_TIMEOUT_MINUTES, 45, 15, 240);
-const BACKUP_RESTORE_VALIDATION_WINDOW = String(process.env.TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW || '00:00-05:00').trim();
+const BACKUP_RESTORE_VALIDATION_WINDOW = String(process.env.TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW || '03:00-06:00').trim();
 const ORPHANED_BACKUP_MIN_AGE_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_ORPHANED_MIN_AGE_MINUTES, 5, 1, 60);
 const FIREBIRD_SESSION_RETENTION_DAYS = 30;
 const FIREBIRD_UNRESPONSIVE_FAILURE_THRESHOLD = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_UNRESPONSIVE_FAILURES, 5, 1, 10);
@@ -85,9 +85,45 @@ function validationWindowStatus(now = new Date()) {
   return { allowed, reason: allowed ? 'inside_window' : 'outside_window', window: BACKUP_RESTORE_VALIDATION_WINDOW };
 }
 
-function shouldValidateBackupRestore(reason) {
+function sameLocalDate(left, right = new Date()) {
+  return left.getFullYear() === right.getFullYear()
+    && left.getMonth() === right.getMonth()
+    && left.getDate() === right.getDate();
+}
+
+async function backupRestoreAlreadyValidatedToday(db, now = new Date()) {
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const jobs = await prisma.backupJob.findMany({
+    where: {
+      databaseId: db.id,
+      status: 'SUCCESS',
+      finishedAt: { gte: todayStart },
+      manifestPath: { not: null }
+    },
+    orderBy: { finishedAt: 'desc' },
+    take: 20
+  });
+  for (const job of jobs) {
+    if (!job.manifestPath || !fs.existsSync(job.manifestPath)) continue;
+    try {
+      const manifest = JSON.parse(fs.readFileSync(job.manifestPath, 'utf8'));
+      const validatedAt = manifest?.validation?.validatedAt ? new Date(manifest.validation.validatedAt) : null;
+      if (manifest?.validation?.ok === true && validatedAt && sameLocalDate(validatedAt, now)) return true;
+    } catch {
+      // Ignore malformed old manifests; they should not block today's validation.
+    }
+  }
+  return false;
+}
+
+async function shouldValidateBackupRestore(db, reason) {
   if (String(reason || '').toUpperCase() !== 'AUTO') return { allowed: true, reason: 'manual_or_requested', window: BACKUP_RESTORE_VALIDATION_WINDOW };
-  return validationWindowStatus();
+  const windowStatus = validationWindowStatus();
+  if (!windowStatus.allowed) return windowStatus;
+  if (await backupRestoreAlreadyValidatedToday(db)) {
+    return { allowed: false, reason: 'already_validated_today', window: BACKUP_RESTORE_VALIDATION_WINDOW };
+  }
+  return windowStatus;
 }
 
 function haSyncActive() {
@@ -1131,7 +1167,7 @@ async function runBackup(db, reason = 'AUTO') {
     const { stdout: sizeOut } = await dockerExec(['stat','-c','%s', backupPath]);
     const { stdout: shaOut } = await dockerExec(['sha256sum', backupPath]);
     const sha = shaOut.trim().split(/\s+/)[0];
-    const validationDecision = shouldValidateBackupRestore(reason);
+    const validationDecision = await shouldValidateBackupRestore(db, reason);
     const validation = validationDecision.allowed
       ? await validateBackupRestore(db, backupPath, logPath, stamp)
       : {
@@ -1139,7 +1175,9 @@ async function runBackup(db, reason = 'AUTO') {
           skipped: true,
           reason: validationDecision.reason,
           window: validationDecision.window,
-          message: `Validacao de restore fora da janela configurada (${validationDecision.window})`
+          message: validationDecision.reason === 'already_validated_today'
+            ? `Validacao de restore ja executada hoje para ${db.alias}`
+            : `Validacao de restore fora da janela configurada (${validationDecision.window})`
         };
     const manifest = {
       databaseId: db.id,
