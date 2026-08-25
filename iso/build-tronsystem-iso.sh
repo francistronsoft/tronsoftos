@@ -6,6 +6,7 @@ OUT_ISO="${2:-tronsystem-debian13.iso}"
 OUT_DIR="$(cd "$(dirname "$OUT_ISO")" && pwd)"
 WORK_DIR="${WORK_DIR:-$OUT_DIR/.tronsystem-iso-build}"
 DOCKER_BUNDLE="${TRONSYSTEM_DOCKER_BUNDLE:-}"
+INCLUDE_DOCKER_BUNDLE="${TRONSYSTEM_INCLUDE_DOCKER_BUNDLE:-true}"
 
 if [ -z "$BASE_ISO" ] || [ ! -f "$BASE_ISO" ]; then
   echo "Uso: $0 /caminho/debian-13.iso [saida.iso]" >&2
@@ -33,7 +34,9 @@ trap - EXIT
 
 install -m 0644 "$SCRIPT_DIR/preseed-tronsystem.cfg" "$WORK_DIR/iso/preseed.cfg"
 install -m 0755 "$SCRIPT_DIR/tronsystem-late-command.sh" "$WORK_DIR/iso/tronsystem-late-command.sh"
-if [ -n "$DOCKER_BUNDLE" ] && [ -f "$DOCKER_BUNDLE" ]; then
+if [ "$INCLUDE_DOCKER_BUNDLE" = "false" ] || [ "$INCLUDE_DOCKER_BUNDLE" = "0" ]; then
+  echo "Aviso: bundle Docker desabilitado; ISO fara pull/build das imagens na instalacao." >&2
+elif [ -n "$DOCKER_BUNDLE" ] && [ -f "$DOCKER_BUNDLE" ]; then
   install -m 0644 "$DOCKER_BUNDLE" "$WORK_DIR/iso/tronsystem-docker-images.tar"
 elif [ -f "$SCRIPT_DIR/tronsystem-docker-images.tar" ]; then
   install -m 0644 "$SCRIPT_DIR/tronsystem-docker-images.tar" "$WORK_DIR/iso/tronsystem-docker-images.tar"
