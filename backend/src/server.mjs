@@ -4284,11 +4284,12 @@ function startHaSyncScheduler() {
       let settings = publicHaSyncSettings();
       const identity = nodeIdentity();
       if (!settings.enabled || !settings.autoEnabled || !settings.standbyHost) return;
-      if (identity.deploymentMode === 'ha' && clusterGuard().canServeProduction !== true) return;
+      if (identity.deploymentMode === 'ha' && identity.nodeRole !== 'primary') return;
       if (!settings.sshValidated) {
         await testHaSyncSsh(settings);
         settings = publicHaSyncSettings();
       }
+      if (identity.deploymentMode === 'ha' && clusterGuard().canServeProduction !== true) return;
       if (!shouldRunAutoHaSync(settings)) return;
       lastAutoHaSyncStartedAt = Date.now();
       appendEvent('HA_SYNC_AUTO_TRIGGERED', { standbyHost: settings.standbyHost, intervalMinutes: settings.intervalMinutes, syncMode: settings.syncMode });

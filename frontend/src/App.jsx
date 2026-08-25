@@ -891,14 +891,21 @@ function ClusterView({ dashboard }) {
     }
   });
   const syncMutation = useMutation({
-    mutationFn: payload => fetch('/api/cluster/sync', {
-      method: 'PATCH',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(payload)
-    }).then(async response => {
-      if (!response.ok) throw new Error((await response.json()).error || `HTTP ${response.status}`);
-      return response.json();
-    }),
+    mutationFn: async payload => {
+      const saved = await fetch('/api/cluster/sync', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload)
+      }).then(async response => {
+        if (!response.ok) throw new Error((await response.json()).error || `HTTP ${response.status}`);
+        return response.json();
+      });
+      if (saved.enabled && saved.standbyHost) {
+        await postApi('/api/cluster/sync/test-ssh', saved);
+        return api('/api/cluster/sync');
+      }
+      return saved;
+    },
     onSuccess: data => {
       setSyncForm(data);
       queryClient.invalidateQueries({ queryKey: ['ha-sync-settings'] });
