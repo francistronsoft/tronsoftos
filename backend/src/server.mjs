@@ -5184,21 +5184,34 @@ function writeCentralToken(token) {
 }
 
 async function centralRequest(pathname, { method = 'GET', token = '', body = null } = {}) {
-  const response = await fetch(`${centralBaseUrl()}${pathname}`, {
-    method,
-    headers: {
-      ...(body ? { 'content-type': 'application/json' } : {}),
-      ...(token ? { 'x-installation-token': token } : {})
-    },
-    body: body ? JSON.stringify(body) : undefined
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const error = new Error(payload.error || `Central HTTP ${response.status}`);
-    error.statusCode = response.status;
-    throw error;
+  const attempts = Math.max(1, Number(process.env.TRONSOFTOS_CENTRAL_REQUEST_ATTEMPTS || 3));
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetch(`${centralBaseUrl()}${pathname}`, {
+        method,
+        headers: {
+          ...(body ? { 'content-type': 'application/json' } : {}),
+          ...(token ? { 'x-installation-token': token } : {})
+        },
+        body: body ? JSON.stringify(body) : undefined
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const error = new Error(payload.error || `Central HTTP ${response.status}`);
+        error.statusCode = response.status;
+        throw error;
+      }
+      return payload;
+    } catch (err) {
+      if (err.statusCode) throw err;
+      lastError = err;
+      if (attempt < attempts) await delay(1000 * attempt);
+    }
   }
-  return payload;
+  const cause = lastError?.cause;
+  const causeMessage = cause?.code ? `${cause.code}: ${cause.message || ''}`.trim() : cause?.message || '';
+  throw new Error(causeMessage ? `${lastError?.message || 'fetch failed'} (${causeMessage})` : lastError?.message || 'fetch failed');
 }
 
 function requireCentralInstallationToken() {
