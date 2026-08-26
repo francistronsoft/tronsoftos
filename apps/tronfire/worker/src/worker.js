@@ -1092,7 +1092,7 @@ async function validateBackupRestore(db, backupPath, logPath, stamp) {
     'cleanup_validation() { rm -f "$restore"; if [ "${restore_src:-$backup}" != "$backup" ]; then rm -f "$restore_src" || true; fi; }',
     'trap cleanup_validation EXIT',
     'case "$backup" in *.gz) restore_src="$(mktemp /tmp/tronfire_backup_validate_XXXXXX.gbk)" || fail 81 "Falha ao criar arquivo temporario para validacao"; gzip -dc "$backup" > "$restore_src" || { rm -f "$restore_src"; fail 81 "Falha ao descompactar backup para validacao"; } ;; esac',
-    `run_with_timeout() { ${firebirdTimeoutCommand(BACKUP_VALIDATION_TIMEOUT_MINUTES)}; };`,
+    `run_with_timeout() { ${firebirdTimeoutCommand(BACKUP_VALIDATION_TIMEOUT_MINUTES)}; }`,
     `run_with_timeout ${shQuote(`${FIREBIRD_BIN}/gbak`)} -c -user SYSDBA -password ${shQuote(FIREBIRD_PASSWORD)} "$restore_src" ${shQuote(firebirdCreateTarget(tempRestorePath))} >> "$log" 2>&1 || fail 82 "Falha ao restaurar backup para validacao"`,
     'if [ "$restore_src" != "$backup" ]; then rm -f "$restore_src" || true; fi',
     'test -f "$restore" || fail 83 "Restore de validacao terminou sem arquivo restaurado"',
@@ -1319,7 +1319,7 @@ async function checkDatabases() {
         `db=${shQuote(firebirdDbConnect(db.filePath))}`,
         `log=${shQuote(logPath)}`,
         'test -f "$db_file"',
-        `run_with_timeout() { ${firebirdTimeoutCommand(2)}; };`,
+        `run_with_timeout() { ${firebirdTimeoutCommand(2)}; }`,
         `printf 'select 1 from rdb$database;\\nquit;\\n' | run_with_timeout ${shQuote(`${FIREBIRD_BIN}/isql`)} -user SYSDBA -password ${shQuote(FIREBIRD_PASSWORD)} "$db" > "$log" 2>&1`,
         `run_with_timeout ${shQuote(`${FIREBIRD_BIN}/gstat`)} -h "$db_file" >> "$log" 2>&1`
       ].join('; ');
