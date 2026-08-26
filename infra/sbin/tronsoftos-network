@@ -114,6 +114,22 @@ remove_dynamic_ipv4_addresses() {
       done
 }
 
+stop_iface_dhcp_client() {
+  local iface="$1"
+
+  if command -v timeout >/dev/null 2>&1 && command -v dhcpcd >/dev/null 2>&1; then
+    timeout 5s dhcpcd -k "$iface" >/dev/null 2>&1 || true
+    timeout 5s dhcpcd -x "$iface" >/dev/null 2>&1 || true
+  elif command -v dhcpcd >/dev/null 2>&1; then
+    dhcpcd -k "$iface" >/dev/null 2>&1 || true
+    dhcpcd -x "$iface" >/dev/null 2>&1 || true
+  fi
+
+  pkill -TERM -f "dhcpcd: .*${iface}" >/dev/null 2>&1 || true
+  sleep 1
+  pkill -KILL -f "dhcpcd: .*${iface}" >/dev/null 2>&1 || true
+}
+
 apply_pairing() {
   local app_dir="$1"
   local source_file="$2"
@@ -432,6 +448,7 @@ apply_static() {
     systemctl enable systemd-networkd.service >/dev/null 2>&1 || true
     if [ "$apply_now" = "true" ]; then
       systemctl restart dhcpcd.service >/dev/null 2>&1 || true
+      stop_iface_dhcp_client "$iface"
       systemctl restart systemd-networkd.service
       remove_dynamic_ipv4_addresses "$iface" "$address_cidr"
     fi

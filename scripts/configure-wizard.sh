@@ -279,6 +279,22 @@ remove_dynamic_ipv4_addresses() {
       done
 }
 
+stop_iface_dhcp_client() {
+  local iface="$1"
+
+  if command_exists timeout && command_exists dhcpcd; then
+    timeout 5s dhcpcd -k "$iface" >/dev/null 2>&1 || true
+    timeout 5s dhcpcd -x "$iface" >/dev/null 2>&1 || true
+  elif command_exists dhcpcd; then
+    dhcpcd -k "$iface" >/dev/null 2>&1 || true
+    dhcpcd -x "$iface" >/dev/null 2>&1 || true
+  fi
+
+  pkill -TERM -f "dhcpcd: .*${iface}" >/dev/null 2>&1 || true
+  sleep 1
+  pkill -KILL -f "dhcpcd: .*${iface}" >/dev/null 2>&1 || true
+}
+
 configure_static_ip() {
   local iface="$1"
   local address_cidr="$2"
@@ -343,6 +359,7 @@ configure_static_ip() {
     if [ "$apply_now" = "true" ]; then
       echo "Aplicando somente a interface $iface pelo systemd-networkd."
       systemctl restart dhcpcd.service >/dev/null 2>&1 || true
+      stop_iface_dhcp_client "$iface"
       if command_exists networkctl; then
         networkctl reload
         networkctl reconfigure "$iface"
