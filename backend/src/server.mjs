@@ -6,12 +6,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { setDefaultResultOrder } from 'node:dns';
 import dns from 'node:dns/promises';
 import { fileURLToPath } from 'node:url';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
+setDefaultResultOrder('ipv4first');
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = process.env.TRONSOFTOS_APP_DIR || path.resolve(__dirname, '../..');
 const port = Number(process.env.TRONSOFTOS_PORT || 8080);
