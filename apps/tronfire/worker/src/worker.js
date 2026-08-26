@@ -382,7 +382,7 @@ async function queryFirebirdSessions(db) {
     'QUIT;'
   ].join('\n');
   const cmd = [
-    `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; }`,
+    `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; };`,
     `printf %s ${shQuote(`${sql}\n`)}`,
     '|',
     'run_with_timeout',
@@ -603,16 +603,25 @@ function readHostCpuSample() {
 
 function readHostTemperatureCelsius() {
   const values = [];
+  const pushSensorValue = (raw, label = '') => {
+    if (!Number.isFinite(raw)) return;
+    const celsius = raw > 1000 ? raw / 1000 : raw;
+    if (celsius < 0 || celsius > 130) return;
+    const normalizedLabel = String(label || '').toLowerCase();
+    const cpuLike = /\b(cpu|core|package|x86_pkg_temp|k10temp|zenpower|tctl|tdie)\b/.test(normalizedLabel);
+    if (!cpuLike && celsius > 115) return;
+    values.push({ celsius, cpuLike });
+  };
   try {
     const thermalRoot = `${HOST_SYS_ROOT}/class/thermal`;
     for (const item of fs.readdirSync(thermalRoot, { withFileTypes: true })) {
       if (!item.isDirectory() || !item.name.startsWith('thermal_zone')) continue;
       const tempPath = `${thermalRoot}/${item.name}/temp`;
       if (!fs.existsSync(tempPath)) continue;
+      const typePath = `${thermalRoot}/${item.name}/type`;
+      const label = fs.existsSync(typePath) ? fs.readFileSync(typePath, 'utf8').trim() : item.name;
       const raw = Number(fs.readFileSync(tempPath, 'utf8').trim());
-      if (!Number.isFinite(raw)) continue;
-      const celsius = raw > 1000 ? raw / 1000 : raw;
-      if (celsius >= 0 && celsius <= 130) values.push(celsius);
+      pushSensorValue(raw, label);
     }
   } catch {
     // Some VMs and hosts do not expose thermal sensors to containers.
@@ -622,18 +631,22 @@ function readHostTemperatureCelsius() {
     for (const item of fs.readdirSync(hwmonRoot, { withFileTypes: true })) {
       if (!item.isDirectory() && !item.isSymbolicLink()) continue;
       const deviceRoot = `${hwmonRoot}/${item.name}`;
+      const deviceName = fs.existsSync(`${deviceRoot}/name`) ? fs.readFileSync(`${deviceRoot}/name`, 'utf8').trim() : item.name;
       for (const fileName of fs.readdirSync(deviceRoot)) {
         if (!/^temp\d+_input$/.test(fileName)) continue;
+        const sensorPrefix = fileName.replace(/_input$/, '');
+        const labelPath = `${deviceRoot}/${sensorPrefix}_label`;
+        const sensorLabel = fs.existsSync(labelPath) ? fs.readFileSync(labelPath, 'utf8').trim() : sensorPrefix;
         const raw = Number(fs.readFileSync(`${deviceRoot}/${fileName}`, 'utf8').trim());
-        if (!Number.isFinite(raw)) continue;
-        const celsius = raw > 1000 ? raw / 1000 : raw;
-        if (celsius >= 0 && celsius <= 130) values.push(celsius);
+        pushSensorValue(raw, `${deviceName} ${sensorLabel}`);
       }
     }
   } catch {
     // hwmon is optional and commonly absent inside virtual machines.
   }
-  return values.length ? Math.round(Math.max(...values) * 10) / 10 : null;
+  const cpuValues = values.filter(value => value.cpuLike);
+  const selected = cpuValues.length ? cpuValues : values;
+  return selected.length ? Math.round(Math.max(...selected.map(value => value.celsius)) * 10) / 10 : null;
 }
 
 async function readSensorsTemperatureCelsius() {
@@ -642,7 +655,7 @@ async function readSensorsTemperatureCelsius() {
     const values = [];
     for (const match of stdout.matchAll(/temp\d+_input:\s*([+-]?\d+(?:\.\d+)?)/g)) {
       const celsius = Number(match[1]);
-      if (Number.isFinite(celsius) && celsius >= 0 && celsius <= 130) values.push(celsius);
+      if (Number.isFinite(celsius) && celsius >= 0 && celsius <= 115) values.push(celsius);
     }
     return values.length ? Math.round(Math.max(...values) * 10) / 10 : null;
   } catch {
@@ -1079,7 +1092,7 @@ async function validateBackupRestore(db, backupPath, logPath, stamp) {
     'cleanup_validation() { rm -f "$restore"; if [ "${restore_src:-$backup}" != "$backup" ]; then rm -f "$restore_src" || true; fi; }',
     'trap cleanup_validation EXIT',
     'case "$backup" in *.gz) restore_src="$(mktemp /tmp/tronfire_backup_validate_XXXXXX.gbk)" || fail 81 "Falha ao criar arquivo temporario para validacao"; gzip -dc "$backup" > "$restore_src" || { rm -f "$restore_src"; fail 81 "Falha ao descompactar backup para validacao"; } ;; esac',
-    `run_with_timeout() { ${firebirdTimeoutCommand(BACKUP_VALIDATION_TIMEOUT_MINUTES)}; }`,
+    `run_with_timeout() { ${firebirdTimeoutCommand(BACKUP_VALIDATION_TIMEOUT_MINUTES)}; };`,
     `run_with_timeout ${shQuote(`${FIREBIRD_BIN}/gbak`)} -c -user SYSDBA -password ${shQuote(FIREBIRD_PASSWORD)} "$restore_src" ${shQuote(firebirdCreateTarget(tempRestorePath))} >> "$log" 2>&1 || fail 82 "Falha ao restaurar backup para validacao"`,
     'if [ "$restore_src" != "$backup" ]; then rm -f "$restore_src" || true; fi',
     'test -f "$restore" || fail 83 "Restore de validacao terminou sem arquivo restaurado"',
@@ -1148,7 +1161,7 @@ async function runBackup(db, reason = 'AUTO') {
 
   try {
     const cmd = [
-      `run_with_timeout() { ${firebirdTimeoutCommand(BACKUP_TIMEOUT_MINUTES)}; }`,
+      `run_with_timeout() { ${firebirdTimeoutCommand(BACKUP_TIMEOUT_MINUTES)}; };`,
       'run_with_timeout',
       `${shQuote(`${FIREBIRD_BIN}/gbak`)}`,
       '-b -v',
@@ -1306,7 +1319,7 @@ async function checkDatabases() {
         `db=${shQuote(firebirdDbConnect(db.filePath))}`,
         `log=${shQuote(logPath)}`,
         'test -f "$db_file"',
-        `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; }`,
+        `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; };`,
         `printf 'select 1 from rdb$database;\\nquit;\\n' | run_with_timeout ${shQuote(`${FIREBIRD_BIN}/isql`)} -user SYSDBA -password ${shQuote(FIREBIRD_PASSWORD)} "$db" > "$log" 2>&1`,
         `run_with_timeout ${shQuote(`${FIREBIRD_BIN}/gstat`)} -h "$db_file" >> "$log" 2>&1`
       ].join('; ');
