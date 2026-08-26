@@ -539,7 +539,7 @@ async function firebirdAttachmentsForDatabase(db) {
     'QUIT;'
   ].join('\n');
   const cmd = [
-    `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; };`,
+    `run_with_timeout() { ${firebirdTimeoutCommand(2)}; };`,
     `printf %s ${shQuote(`${sql}\n`)}`,
     '|',
     'run_with_timeout',
@@ -696,7 +696,7 @@ async function indexHealthForDatabase(db) {
     'QUIT;'
   ].join('\n');
   const cmd = [
-    `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; };`,
+    `run_with_timeout() { ${firebirdTimeoutCommand(2)}; };`,
     `printf %s ${shQuote(`${sql}\n`)}`,
     '|',
     'run_with_timeout',
