@@ -252,7 +252,7 @@ disable_iface_dhcp_sources() {
 
   if command_exists dhcpcd || [ -f /etc/dhcpcd.conf ]; then
     touch /etc/dhcpcd.conf
-    if ! grep -Eq "^[[:space:]]*denyinterfaces[[:space:]].*(^|[[:space:]])${iface}($|[[:space:]])" /etc/dhcpcd.conf; then
+    if ! awk -v iface="$iface" '$1 == "denyinterfaces" { for (i = 2; i <= NF; i++) if ($i == iface) found = 1 } END { exit found ? 0 : 1 }' /etc/dhcpcd.conf; then
       {
         echo
         echo "# Managed by TronSoftOS: static IP is handled by systemd-networkd."
@@ -265,10 +265,15 @@ disable_iface_dhcp_sources() {
 remove_dynamic_ipv4_addresses() {
   local iface="$1"
   local keep_cidr="$2"
+  local keep_vip_cidr=""
   local cidr
 
+  if [ -f /etc/tronsoftos/tronsoftos.env ]; then
+    keep_vip_cidr="$(grep '^HA_VIP_CIDR=' /etc/tronsoftos/tronsoftos.env | tail -n1 | cut -d= -f2- || true)"
+  fi
+
   ip -4 -o addr show dev "$iface" scope global 2>/dev/null \
-    | awk -v keep="$keep_cidr" '$4 != keep && $0 ~ / dynamic / { print $4 }' \
+    | awk -v keep="$keep_cidr" -v keep_vip="$keep_vip_cidr" '$4 != keep && (keep_vip == "" || $4 != keep_vip) { print $4 }' \
     | while read -r cidr; do
         [ -n "$cidr" ] && ip addr del "$cidr" dev "$iface" 2>/dev/null || true
       done
