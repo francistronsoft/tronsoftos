@@ -228,6 +228,52 @@ same_ipv4_prefix_hint() {
   fi
 }
 
+disable_iface_dhcp_sources() {
+  local iface="$1"
+  local file tmp backup
+
+  for file in /etc/network/interfaces /etc/network/interfaces.d/*; do
+    [ -f "$file" ] || continue
+    tmp="$(mktemp)"
+    awk -v iface="$iface" '
+      $1 == "iface" && $2 == iface && $3 == "inet" && $4 == "dhcp" {
+        print "iface " iface " inet manual"
+        next
+      }
+      { print }
+    ' "$file" > "$tmp"
+    if ! cmp -s "$file" "$tmp"; then
+      backup="$file.tronsoftos-bak-$(date +%Y%m%d%H%M%S)"
+      cp -a "$file" "$backup"
+      install -m 0644 "$tmp" "$file"
+    fi
+    rm -f "$tmp"
+  done
+
+  if command_exists dhcpcd || [ -f /etc/dhcpcd.conf ]; then
+    touch /etc/dhcpcd.conf
+    if ! grep -Eq "^[[:space:]]*denyinterfaces[[:space:]].*(^|[[:space:]])${iface}($|[[:space:]])" /etc/dhcpcd.conf; then
+      {
+        echo
+        echo "# Managed by TronSoftOS: static IP is handled by systemd-networkd."
+        echo "denyinterfaces $iface"
+      } >> /etc/dhcpcd.conf
+    fi
+  fi
+}
+
+remove_dynamic_ipv4_addresses() {
+  local iface="$1"
+  local keep_cidr="$2"
+  local cidr
+
+  ip -4 -o addr show dev "$iface" scope global 2>/dev/null \
+    | awk -v keep="$keep_cidr" '$4 != keep && $0 ~ / dynamic / { print $4 }' \
+    | while read -r cidr; do
+        [ -n "$cidr" ] && ip addr del "$cidr" dev "$iface" 2>/dev/null || true
+      done
+}
+
 configure_static_ip() {
   local iface="$1"
   local address_cidr="$2"
@@ -271,6 +317,7 @@ configure_static_ip() {
 
   if systemctl list-unit-files systemd-networkd.service >/dev/null 2>&1; then
     local network_file="/etc/systemd/network/10-tronsoftos-$iface.network"
+    disable_iface_dhcp_sources "$iface"
     {
       echo "[Match]"
       echo "Name=$iface"
@@ -290,12 +337,14 @@ configure_static_ip() {
     echo "IP fixo gravado em $network_file."
     if [ "$apply_now" = "true" ]; then
       echo "Aplicando somente a interface $iface pelo systemd-networkd."
+      systemctl restart dhcpcd.service >/dev/null 2>&1 || true
       if command_exists networkctl; then
         networkctl reload
         networkctl reconfigure "$iface"
       else
         systemctl restart systemd-networkd.service
       fi
+      remove_dynamic_ipv4_addresses "$iface" "$address_cidr"
     else
       echo "A configuracao sera aplicada ao reiniciar o systemd-networkd ou o servidor."
     fi
