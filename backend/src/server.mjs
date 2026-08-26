@@ -5288,6 +5288,35 @@ function centralSystemMetricsPayload(payload = {}) {
   };
 }
 
+function centralFirebirdMetricsPayload(payload = {}) {
+  const metrics = payload.systemMetrics && typeof payload.systemMetrics === 'object' ? payload.systemMetrics : {};
+  const latestRows = Array.isArray(metrics.latest) ? metrics.latest : (metrics.latest ? [metrics.latest] : []);
+  const latestFirebird = latestRows.find(row => row && row.scope === 'FIREBIRD' && row.target) || null;
+  const latest = latestFirebird && typeof latestFirebird === 'object'
+    ? {
+        ...latestFirebird,
+        collectedAt: latestFirebird.collectedAt || latestFirebird.createdAt || metrics.collectedAt || new Date().toISOString()
+      }
+    : null;
+  const series = Array.isArray(metrics.series)
+    ? metrics.series
+        .filter(row => row && row.scope === 'FIREBIRD')
+        .map(row => ({
+          ...row,
+          collectedAt: row.collectedAt || row.createdAt || metrics.collectedAt || new Date().toISOString()
+        }))
+        .slice(-288)
+    : [];
+  const uptimeMetric = latestRows.find(row => row && row.scope === 'SERVER' && row.target === 'firebird_uptime')
+    || (Array.isArray(metrics.series) ? [...metrics.series].reverse().find(row => row && row.scope === 'SERVER' && row.target === 'firebird_uptime') : null);
+  if (!latest && !series.length && !uptimeMetric) return null;
+  return {
+    ...(latest ? { latest } : {}),
+    ...(series.length ? { series } : {}),
+    uptimeSeconds: uptimeMetric?.uptimeSeconds ?? uptimeMetric?.value ?? null
+  };
+}
+
 function readInterfaceCounters(interfaceName = '') {
   const safeName = String(interfaceName || '').replace(/[^a-zA-Z0-9_.:-]/g, '');
   if (!safeName) return null;
@@ -5517,6 +5546,7 @@ async function centralHeartbeat(token, payload) {
       services: await centralServicesPayload(payload),
       metrics: {
         systemMetrics: centralSystemMetricsPayload(payload),
+        firebird: centralFirebirdMetricsPayload(payload),
         network: networkMetrics,
         hostUptimeSeconds: payload.hostUptimeSeconds ?? null
       },
