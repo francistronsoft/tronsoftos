@@ -48,6 +48,7 @@ const FIXED_HA_SYNC_INTERVAL_MINUTES = 3;
 const HA_SYNC_CRITICAL_LAG_MINUTES = 20;
 const DEFAULT_HA_SYNC_MODE = 'physical';
 const UPDATE_MAINTENANCE_TIMEOUT_MINUTES = 30;
+const RCLONE_BACKUP_UPLOAD_INTERVAL_MS = Math.max(60_000, Number(process.env.RCLONE_BACKUP_UPLOAD_INTERVAL_MS || 5 * 60 * 1000));
 const UPDATE_ALLOWED_BRANCHES = new Set(['main', 'dev']);
 const SESSION_COOKIE = 'tronsoftos_session';
 const SESSION_DURATION_SECONDS = 12 * 60 * 60;
@@ -58,6 +59,8 @@ const loginFailures = new Map();
 const maxActionLogLength = 1024 * 128;
 const dockerConfigDir = process.env.TRONSOFTOS_DOCKER_CONFIG || path.join(stateDir, 'docker-config');
 let rcloneQuotaCache = { key: null, checkedAt: 0, value: null };
+let rcloneBackupUploadTimer = null;
+let rcloneBackupUploadInFlight = false;
 let companyIdentityCache = { checkedAt: 0, value: null };
 let haSyncSchedulerTimer = null;
 let haSyncSchedulerBusy = false;
@@ -1751,6 +1754,85 @@ async function rcloneUploadTest() {
   } finally {
     fs.rmSync(testPath, { force: true });
   }
+}
+
+function rcloneUploadAllowedForNode(settings = rawRcloneSettings()) {
+  const uploadOnlyRole = String(settings.uploadOnlyRole || 'primary').toLowerCase();
+  if (uploadOnlyRole === 'any') return true;
+  const identity = nodeIdentity();
+  return String(identity.nodeRole || 'primary').toLowerCase() === uploadOnlyRole;
+}
+
+function localBackupUploadCandidates(backupDir) {
+  try {
+    return fs.readdirSync(backupDir, { withFileTypes: true })
+      .filter(entry => entry.isFile() && /\.(gbk|fbk|gbk\.gz|fbk\.gz|manifest\.json)$/i.test(entry.name))
+      .map(entry => entry.name)
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
+async function rcloneUploadBackups(reason = 'manual') {
+  if (rcloneBackupUploadInFlight) return { ok: false, skipped: true, reason: 'upload ja em execucao' };
+  rcloneBackupUploadInFlight = true;
+  try {
+    const settings = rawRcloneSettings();
+    const config = settings.config || defaultRcloneConfigPath();
+    const bin = settings.bin || '/usr/bin/rclone';
+    const target = rcloneTarget(settings);
+    const backupDir = process.env.FIREBIRD_BACKUP_DIR || '/opt/tronfire-storage/firebird/backups';
+    if (settings.enabled !== true) return { ok: false, skipped: true, reason: 'rclone desabilitado' };
+    if (!settings.remote) throw new Error('Google Drive nao configurado para backups');
+    if (!fs.existsSync(bin)) throw new Error(`binario rclone nao encontrado: ${bin}`);
+    if (!ensureRcloneConfigReadable(config)) throw new Error(`Configuracao do Google Drive nao aplicada: ${config}`);
+    if (!rcloneUploadAllowedForNode(settings)) {
+      return { ok: false, skipped: true, reason: `upload restrito ao papel ${settings.uploadOnlyRole || 'primary'}`, nodeRole: nodeIdentity().nodeRole };
+    }
+    const candidates = localBackupUploadCandidates(backupDir);
+    if (!candidates.length) return { ok: false, skipped: true, reason: 'nenhum backup local encontrado', backupDir };
+    appendEvent('RCLONE_BACKUP_UPLOAD_STARTED', { target, backupDir, files: candidates.length, reason });
+    const out = await run(bin, rcloneArgs([
+      'copy',
+      backupDir,
+      target,
+      ...rcloneBackupFilters(),
+      '--config',
+      config
+    ]), {
+      timeout: 1000 * 60 * 60 * 2,
+      maxBuffer: 1024 * 1024 * 5
+    });
+    rcloneQuotaCache = { key: null, checkedAt: 0, value: null };
+    const remote = await rcloneRemoteBackups().catch(() => null);
+    appendEvent('RCLONE_BACKUP_UPLOAD_OK', {
+      target,
+      backupDir,
+      files: candidates.length,
+      remoteFiles: remote?.files?.length ?? null,
+      stdout: out.stdout,
+      stderr: out.stderr
+    });
+    return { ok: true, target, backupDir, files: candidates.length, remoteFiles: remote?.files || [], stdout: out.stdout, stderr: out.stderr };
+  } catch (err) {
+    const details = googleDriveErrorDetails(err);
+    appendEvent('RCLONE_BACKUP_UPLOAD_FAILED', { error: details.message, code: details.code, activationUrl: details.activationUrl });
+    throw new Error(details.message);
+  } finally {
+    rcloneBackupUploadInFlight = false;
+  }
+}
+
+function startRcloneBackupUploadScheduler() {
+  if (rcloneBackupUploadTimer) clearInterval(rcloneBackupUploadTimer);
+  rcloneBackupUploadTimer = setInterval(() => {
+    rcloneUploadBackups('scheduled').catch(err => console.error(`Falha no upload automatico para Google Drive: ${err.message}`));
+  }, RCLONE_BACKUP_UPLOAD_INTERVAL_MS);
+  setTimeout(() => {
+    rcloneUploadBackups('startup').catch(err => console.error(`Falha no upload inicial para Google Drive: ${err.message}`));
+  }, 15_000).unref?.();
+  rcloneBackupUploadTimer.unref?.();
 }
 
 async function rcloneAbout({ force = false } = {}) {
@@ -5830,6 +5912,7 @@ async function handleApi(req, reply, url) {
   if (req.method === 'PATCH' && url.pathname === '/api/backups/rclone') return json(reply, 200, writeRcloneSettings(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/test') return json(reply, 200, await rcloneTest());
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/upload-test') return json(reply, 200, await rcloneUploadTest());
+  if (req.method === 'POST' && url.pathname === '/api/backups/rclone/upload-now') return json(reply, 200, await rcloneUploadBackups('manual'));
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/cleanup') return json(reply, 200, await rcloneCleanupRemoteBackups());
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/token') return json(reply, 200, saveGoogleDriveToken(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/reset-auth') return json(reply, 200, await resetGoogleDriveAuth());
@@ -5963,6 +6046,7 @@ if (friendlyPort && friendlyPort !== port && friendlyPath) {
 
 server.listen(port, '0.0.0.0', () => {
   ensureStateDir();
+  startRcloneBackupUploadScheduler();
   startHaSyncScheduler();
   startHaFailoverWatchdog();
   startCentralAgent();
