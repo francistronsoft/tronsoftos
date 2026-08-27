@@ -478,6 +478,18 @@ function alertSeverityClass(severity) {
 
 function alertDetailsText(alert) {
   const details = alert?.details || {};
+  if (details.kind === 'FIREBIRD_TRANSACTION_GAP') {
+    const parts = [];
+    const transactionHealth = details.transactionHealth || details;
+    if (details.checkedAt) parts.push(`Verificado: ${new Date(details.checkedAt).toLocaleString()}`);
+    parts.push(`Gap OIT/Next: ${formatInteger(details.gap ?? details.transactionGap?.gap)}`);
+    parts.push(`OIT ${formatInteger(transactionHealth.oldestTransaction)}, OAT ${formatInteger(transactionHealth.oldestActive)}, OST ${formatInteger(transactionHealth.oldestSnapshot)}, Next ${formatInteger(transactionHealth.nextTransaction)}`);
+    parts.push(`Sweep ${formatInteger(transactionHealth.sweepInterval)}`);
+    if (details.criticalThreshold !== undefined || details.warningThreshold !== undefined) {
+      parts.push(`Limites: aviso ${formatInteger(details.warningThreshold)}, critico ${formatInteger(details.criticalThreshold)}`);
+    }
+    return parts.join(' | ');
+  }
   if (details.kind !== 'DATABASE_MISSING_ACTIVE_INDEXES') return '';
   const parts = [];
   if (details.checkedAt) parts.push(`Verificado: ${new Date(details.checkedAt).toLocaleString()}`);

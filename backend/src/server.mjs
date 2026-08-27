@@ -2661,6 +2661,19 @@ function normalizeTronfireAlert(alert = {}) {
       }
     };
   }
+  if (type.startsWith('FIREBIRD_TRANSACTION_GAP_')) {
+    return {
+      ...normalized,
+      severity: normalized.severity === 'critical' ? 'critical' : 'warning',
+      title: 'Firebird com gap transacional',
+      message: `${message}. Verifique conexoes antigas, transacoes presas e necessidade de manutencao/sweep em janela segura.`,
+      details: {
+        ...(alert.details || {}),
+        category: 'firebird_health',
+        operationalImpact: 'transaction_gap_may_delay_garbage_collection'
+      }
+    };
+  }
   if (type === 'BACKUP_FAILED') {
     return {
       ...normalized,

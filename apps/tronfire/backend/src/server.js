@@ -629,6 +629,28 @@ function parseGstatHeader(stdout) {
   };
 }
 
+function transactionGapThreshold(name, fallback) {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function classifyTransactionHealth(health) {
+  const oldestTransaction = Number(health?.oldestTransaction);
+  const oldestActive = Number(health?.oldestActive);
+  const oldestSnapshot = Number(health?.oldestSnapshot);
+  const nextTransaction = Number(health?.nextTransaction);
+  if (!Number.isFinite(oldestTransaction) || !Number.isFinite(nextTransaction)) {
+    return { severity: 'OK', gap: null, activeGap: null, snapshotGap: null, warningThreshold: transactionGapThreshold('TRONFIRE_TRANSACTION_GAP_WARNING', 500000), criticalThreshold: transactionGapThreshold('TRONFIRE_TRANSACTION_GAP_CRITICAL', 1000000) };
+  }
+  const warningThreshold = transactionGapThreshold('TRONFIRE_TRANSACTION_GAP_WARNING', 500000);
+  const criticalThreshold = transactionGapThreshold('TRONFIRE_TRANSACTION_GAP_CRITICAL', 1000000);
+  const gap = Math.max(0, nextTransaction - oldestTransaction);
+  const activeGap = Number.isFinite(oldestActive) ? Math.max(0, nextTransaction - oldestActive) : null;
+  const snapshotGap = Number.isFinite(oldestSnapshot) ? Math.max(0, nextTransaction - oldestSnapshot) : null;
+  const severity = gap >= criticalThreshold ? 'CRITICAL' : gap >= warningThreshold ? 'WARNING' : 'OK';
+  return { severity, gap, activeGap, snapshotGap, warningThreshold, criticalThreshold };
+}
+
 function classifyIndexHealth(summary) {
   const activeRatio = summary.total > 0 ? summary.active / summary.total : 0;
   const userActiveRatio = summary.userNonConstraint.total > 0 ? summary.userNonConstraint.active / summary.userNonConstraint.total : 0;
@@ -749,6 +771,7 @@ async function indexHealthForDatabase(db) {
     activeUserIndexes: summary.userNonConstraint.active,
     inactiveUserIndexes: summary.userNonConstraint.inactive,
     transactionHealth,
+    transactionGap: classifyTransactionHealth(transactionHealth),
     oldestTransaction: transactionHealth.oldestTransaction,
     oldestActive: transactionHealth.oldestActive,
     oldestSnapshot: transactionHealth.oldestSnapshot,
@@ -857,7 +880,46 @@ async function refreshInactiveIndexAlert(db) {
   } else {
     await resolveActiveAlertsByType(type);
   }
+  await refreshTransactionGapAlert(db, health);
   return health;
+}
+
+async function refreshTransactionGapAlert(db, health) {
+  const type = `FIREBIRD_TRANSACTION_GAP_${db.alias}`;
+  const transactionGap = health.transactionGap || classifyTransactionHealth(health.transactionHealth || health);
+  if (!transactionGap || transactionGap.severity === 'OK') {
+    await resolveActiveAlertsByType(type);
+    return;
+  }
+  const transactionHealth = health.transactionHealth || {};
+  const sweepText = Number(transactionHealth.sweepInterval) === 0 ? ' Auto-sweep esta desativado neste banco.' : '';
+  const message = `Banco ${db.name} com gap transacional ${transactionGap.gap} entre OIT e Next. OIT ${transactionHealth.oldestTransaction ?? '-'}, OAT ${transactionHealth.oldestActive ?? '-'}, OST ${transactionHealth.oldestSnapshot ?? '-'}, Next ${transactionHealth.nextTransaction ?? '-'}.${sweepText}`;
+  const details = {
+    kind: 'FIREBIRD_TRANSACTION_GAP',
+    databaseId: db.id,
+    databaseName: db.name,
+    databaseAlias: db.alias,
+    checkedAt: health.checkedAt,
+    transactionHealth,
+    transactionGap,
+    oldestTransaction: transactionHealth.oldestTransaction ?? null,
+    oldestActive: transactionHealth.oldestActive ?? null,
+    oldestSnapshot: transactionHealth.oldestSnapshot ?? null,
+    nextTransaction: transactionHealth.nextTransaction ?? null,
+    sweepInterval: transactionHealth.sweepInterval ?? null,
+    gap: transactionGap.gap,
+    activeGap: transactionGap.activeGap,
+    snapshotGap: transactionGap.snapshotGap,
+    warningThreshold: transactionGap.warningThreshold,
+    criticalThreshold: transactionGap.criticalThreshold,
+    pathRole: health.pathRole
+  };
+  const existing = await prisma.alert.findFirst({ where: { type, resolved: false } });
+  if (existing) {
+    await prisma.alert.update({ where: { id: existing.id }, data: { severity: transactionGap.severity, message, details } });
+  } else {
+    await prisma.alert.create({ data: { type, severity: transactionGap.severity, message, details } });
+  }
 }
 
 async function refreshInactiveIndexAlertsForActiveDatabases() {
