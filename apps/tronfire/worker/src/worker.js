@@ -35,6 +35,8 @@ const BACKUP_VALIDATION_HOUR = normalizeHour(process.env.TRONFIRE_BACKUP_VALIDAT
 const BACKUP_VALIDATION_WINDOW_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_WINDOW_MINUTES, 120, 30, 720);
 const BACKUP_VALIDATION_MAX_AGE_HOURS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_MAX_AGE_HOURS, 30, 6, 168);
 const BACKUP_VALIDATION_FAILURE_COOLDOWN_HOURS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_FAILURE_COOLDOWN_HOURS, 12, 1, 72);
+const BACKUP_RESTORE_VALIDATION_WINDOW = String(process.env.TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW || '03:00-06:00').trim();
+const BACKUP_RESTORE_VALIDATION_WEEKDAY = String(process.env.TRONFIRE_BACKUP_RESTORE_VALIDATION_WEEKDAY || 'monday').trim();
 const FIREBIRD_QUERY_TIMEOUT_SECONDS = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_QUERY_TIMEOUT_SECONDS, 20, 5, 600);
 const FIREBIRD_HEALTH_COOLDOWN_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_HEALTH_COOLDOWN_MINUTES, 10, 1, 120);
 const ORPHANED_BACKUP_MIN_AGE_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_ORPHANED_MIN_AGE_MINUTES, 5, 1, 60);
@@ -1171,23 +1173,101 @@ function localDateKey(date = new Date()) {
 }
 
 function validationWindowInfo(now = new Date()) {
-  const startMinute = BACKUP_VALIDATION_HOUR * 60;
-  const endMinute = startMinute + BACKUP_VALIDATION_WINDOW_MINUTES;
+  const windowText = BACKUP_RESTORE_VALIDATION_WINDOW.toLowerCase();
+  if (!windowText || ['off', 'false', 'disabled', 'never'].includes(windowText)) {
+    return { inWindow: false, reason: 'validation_window_disabled', windowKey: localDateKey(now), window: BACKUP_RESTORE_VALIDATION_WINDOW };
+  }
+  if (['always', 'true', '*'].includes(windowText)) {
+    return { inWindow: true, reason: 'validation_window_always', windowKey: validationPeriodKey(now), window: BACKUP_RESTORE_VALIDATION_WINDOW };
+  }
+  const [startText, endText] = BACKUP_RESTORE_VALIDATION_WINDOW.split('-', 2).map(item => item?.trim());
+  const startMinute = parseClockMinutes(startText);
+  const endMinute = parseClockMinutes(endText);
+  if (startMinute === null || endMinute === null) {
+    return { inWindow: false, reason: 'invalid_validation_window', windowKey: localDateKey(now), window: BACKUP_RESTORE_VALIDATION_WINDOW };
+  }
   const currentMinute = now.getHours() * 60 + now.getMinutes();
-  const wraps = endMinute >= 24 * 60;
+  const wraps = startMinute > endMinute;
   const inWindow = wraps
-    ? currentMinute >= startMinute || currentMinute < (endMinute % (24 * 60))
+    ? currentMinute >= startMinute || currentMinute < endMinute
     : currentMinute >= startMinute && currentMinute < endMinute;
   const anchor = new Date(now);
-  if (wraps && currentMinute < (endMinute % (24 * 60))) {
+  if (wraps && currentMinute < endMinute) {
     anchor.setDate(anchor.getDate() - 1);
   }
   return {
     inWindow,
-    windowKey: localDateKey(anchor),
-    startHour: BACKUP_VALIDATION_HOUR,
-    windowMinutes: BACKUP_VALIDATION_WINDOW_MINUTES
+    reason: inWindow ? 'inside_window' : 'outside_window',
+    windowKey: validationPeriodKey(anchor),
+    window: BACKUP_RESTORE_VALIDATION_WINDOW,
+    weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY,
+    startHour: Math.floor(startMinute / 60),
+    windowMinutes: wraps ? (24 * 60 - startMinute) + endMinute : endMinute - startMinute
   };
+}
+
+function parseClockMinutes(value) {
+  const match = String(value || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+  return hours * 60 + minutes;
+}
+
+function parseValidationWeekdays(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text || ['off', 'false', 'disabled', 'never'].includes(text)) return { disabled: true, weekdays: new Set(), label: value };
+  if (['daily', 'always', 'true', '*', 'all'].includes(text)) return { daily: true, weekdays: new Set(), label: value };
+  const names = new Map([
+    ['0', 0], ['sun', 0], ['sunday', 0], ['domingo', 0],
+    ['1', 1], ['mon', 1], ['monday', 1], ['segunda', 1], ['segunda-feira', 1],
+    ['2', 2], ['tue', 2], ['tuesday', 2], ['terca', 2], ['terça', 2], ['terca-feira', 2], ['terça-feira', 2],
+    ['3', 3], ['wed', 3], ['wednesday', 3], ['quarta', 3], ['quarta-feira', 3],
+    ['4', 4], ['thu', 4], ['thursday', 4], ['quinta', 4], ['quinta-feira', 4],
+    ['5', 5], ['fri', 5], ['friday', 5], ['sexta', 5], ['sexta-feira', 5],
+    ['6', 6], ['sat', 6], ['saturday', 6], ['sabado', 6], ['sábado', 6]
+  ]);
+  const weekdays = new Set();
+  for (const item of text.split(/[,\s]+/).map(part => part.trim()).filter(Boolean)) {
+    if (!names.has(item)) return { invalid: true, weekdays: new Set(), label: value };
+    weekdays.add(names.get(item));
+  }
+  return { weekdays, label: value };
+}
+
+function validationWeekdayStatus(now = new Date()) {
+  const policy = parseValidationWeekdays(BACKUP_RESTORE_VALIDATION_WEEKDAY);
+  if (policy.disabled) return { allowed: false, reason: 'weekday_disabled', weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
+  if (policy.invalid || (!policy.daily && policy.weekdays.size === 0)) {
+    return { allowed: false, reason: 'invalid_weekday', weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
+  }
+  if (policy.daily) return { allowed: true, reason: 'daily', weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
+  const allowed = policy.weekdays.has(now.getDay());
+  return { allowed, reason: allowed ? 'inside_weekday' : 'outside_weekday', weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
+}
+
+function validationPeriodStart(date = new Date()) {
+  const policy = parseValidationWeekdays(BACKUP_RESTORE_VALIDATION_WEEKDAY);
+  const start = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  if (!policy.daily && policy.weekdays.size > 0) {
+    let nearestOffset = 7;
+    for (const weekday of policy.weekdays) {
+      const offset = (start.getDay() - weekday + 7) % 7;
+      if (offset < nearestOffset) nearestOffset = offset;
+    }
+    start.setDate(start.getDate() - nearestOffset);
+  }
+  return start;
+}
+
+function validationPeriodKey(date = new Date()) {
+  return localDateKey(validationPeriodStart(date));
+}
+
+function validationMatchesPeriod(validation, now = new Date()) {
+  if (!validation?.ok || !validation.validatedAt) return false;
+  return new Date(validation.validatedAt) >= validationPeriodStart(now);
 }
 
 function readBackupValidation(job) {
@@ -1258,32 +1338,44 @@ async function latestValidationFailureForWindow(db, windowKey) {
 
 async function backupValidationPlan(db, now = new Date()) {
   if (BACKUP_VALIDATION_MODE === 'always') {
-    return { shouldValidate: true, reason: 'validation_mode_always', windowKey: localDateKey(now) };
+    return { shouldValidate: true, reason: 'validation_mode_always', windowKey: validationPeriodKey(now), mode: 'always' };
   }
-  if (BACKUP_VALIDATION_MODE === 'never') {
-    return { shouldValidate: false, reason: 'validation_mode_never', windowKey: localDateKey(now) };
+  if (['never', 'off', 'disabled', 'false'].includes(BACKUP_VALIDATION_MODE)) {
+    return { shouldValidate: false, reason: 'validation_mode_never', windowKey: validationPeriodKey(now), mode: 'never' };
   }
+  const weekday = validationWeekdayStatus(now);
   const window = validationWindowInfo(now);
   const latest = await latestValidatedBackup(db);
+  if (!weekday.allowed) {
+    return {
+      shouldValidate: false,
+      reason: weekday.reason,
+      windowKey: window.windowKey,
+      latest,
+      weekday: weekday.weekday,
+      window: window.window
+    };
+  }
   if (window.inWindow) {
-    if (latest && validationMatchesWindow(latest.validation, window.windowKey)) {
+    if (latest && validationMatchesPeriod(latest.validation, now)) {
       await resolveActiveAlertsByType(`BACKUP_VALIDATION_OVERDUE_${db.alias}`);
       await resolveActiveAlertsByType(`BACKUP_VALIDATION_FAILED_${db.alias}`);
-      return { shouldValidate: false, reason: 'daily_validation_already_done', windowKey: window.windowKey, latest };
+      return { shouldValidate: false, reason: 'already_validated_this_period', windowKey: window.windowKey, latest, weekday: weekday.weekday, window: window.window };
     }
     const failed = await latestValidationFailureForWindow(db, window.windowKey);
     if (failed) {
       await markValidationFailureCircuit(db, new Error(failed.errorMessage || 'validacao falhou nesta janela'), window.windowKey);
-      return { shouldValidate: false, reason: 'daily_validation_failed_in_window', windowKey: window.windowKey, latest, failedJobId: failed.id };
+      return { shouldValidate: false, reason: 'validation_failed_in_window', windowKey: window.windowKey, latest, failedJobId: failed.id, weekday: weekday.weekday, window: window.window };
     }
-    return { shouldValidate: true, reason: 'daily_validation_window', windowKey: window.windowKey, latest };
+    return { shouldValidate: true, reason: 'weekly_validation_window', windowKey: window.windowKey, latest, weekday: weekday.weekday, window: window.window };
   }
-  await maybeAlertValidationOverdue(db, latest);
   return {
     shouldValidate: false,
-    reason: 'outside_daily_validation_window',
+    reason: window.reason || 'outside_validation_window',
     windowKey: window.windowKey,
     latest,
+    weekday: weekday.weekday,
+    window: window.window,
     nextWindowHour: window.startHour,
     windowMinutes: window.windowMinutes
   };
@@ -1414,7 +1506,9 @@ async function runBackup(db, reason = 'AUTO') {
       : {
           skipped: true,
           reason: validationPlan.reason,
-          mode: BACKUP_VALIDATION_MODE,
+          mode: 'weekly_window',
+          weekday: validationPlan.weekday || BACKUP_RESTORE_VALIDATION_WEEKDAY,
+          window: validationPlan.window || BACKUP_RESTORE_VALIDATION_WINDOW,
           windowKey: validationPlan.windowKey,
           nextWindowHour: validationPlan.nextWindowHour ?? null,
           windowMinutes: validationPlan.windowMinutes ?? null,
