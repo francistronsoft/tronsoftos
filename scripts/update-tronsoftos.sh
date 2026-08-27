@@ -257,6 +257,7 @@ if command -v timeout >/dev/null 2>&1; then
   TRONSOFTOS_GIT_COMMIT="$update_commit" \
   TRONSOFTOS_GIT_BRANCH="$update_branch" \
   TRONSOFTOS_BUILD_NUMBER="$update_build" \
+  TRONSOFTOS_FORCE_TRONFIRE_BUILD="${TRONSOFTOS_FORCE_TRONFIRE_BUILD:-true}" \
   TRONSOFTOS_SKIP_WIZARD=true \
   timeout --foreground "${TIMEOUT_MINUTES}m" bash "$APP_DIR/install.sh"
 else
@@ -264,6 +265,7 @@ else
   TRONSOFTOS_GIT_COMMIT="$update_commit" \
   TRONSOFTOS_GIT_BRANCH="$update_branch" \
   TRONSOFTOS_BUILD_NUMBER="$update_build" \
+  TRONSOFTOS_FORCE_TRONFIRE_BUILD="${TRONSOFTOS_FORCE_TRONFIRE_BUILD:-true}" \
   TRONSOFTOS_SKIP_WIZARD=true \
   bash "$APP_DIR/install.sh"
 fi
