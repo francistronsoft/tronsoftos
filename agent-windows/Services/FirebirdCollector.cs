@@ -106,6 +106,12 @@ public sealed class FirebirdCollector
             TotalIndexes = health.TotalIndexes,
             ActiveIndexes = health.ActiveIndexes,
             InactiveIndexes = health.InactiveIndexes,
+            TransactionHealth = health.TransactionHealth,
+            OldestTransaction = health.OldestTransaction ?? health.TransactionHealth?.OldestTransaction,
+            OldestActive = health.OldestActive ?? health.TransactionHealth?.OldestActive,
+            OldestSnapshot = health.OldestSnapshot ?? health.TransactionHealth?.OldestSnapshot,
+            NextTransaction = health.NextTransaction ?? health.TransactionHealth?.NextTransaction,
+            SweepInterval = health.SweepInterval ?? health.TransactionHealth?.SweepInterval,
             PreviousInactiveIndexes = previous?.InactiveIndexes,
             InactiveDelta = previous is null ? 0 : health.InactiveIndexes.Value - previous.InactiveIndexes,
             NewInactiveIndexes = added.Take(100).ToArray(),
@@ -191,6 +197,13 @@ public sealed class FirebirdCollector
               COALESCE(CAST(RDB$SYSTEM_FLAG AS VARCHAR(10)), '')
             FROM RDB$INDICES
             WHERE COALESCE(RDB$INDEX_INACTIVE, 0) = 1;
+            SELECT
+              'TRONIDX_TRANSACTIONS|' ||
+              COALESCE(CAST(MON$OLDEST_TRANSACTION AS VARCHAR(20)), '') || '|' ||
+              COALESCE(CAST(MON$OLDEST_ACTIVE AS VARCHAR(20)), '') || '|' ||
+              COALESCE(CAST(MON$OLDEST_SNAPSHOT AS VARCHAR(20)), '') || '|' ||
+              COALESCE(CAST(MON$NEXT_TRANSACTION AS VARCHAR(20)), '')
+            FROM MON$DATABASE;
             COMMIT;
             QUIT;
             """;
@@ -273,6 +286,20 @@ public sealed class FirebirdCollector
             else if (parts[0] == "TRONIDX_INACTIVE" && parts.Length >= 5)
             {
                 inactiveIndexes.Add(new IndexItemHealth(parts[1].Trim(), parts[2].Trim(), Number(parts[3]), Number(parts[4])));
+            }
+            else if (parts[0] == "TRONIDX_TRANSACTIONS" && parts.Length >= 5)
+            {
+                health.TransactionHealth = new FirebirdTransactionHealth
+                {
+                    OldestTransaction = NullableNumber(parts[1]),
+                    OldestActive = NullableNumber(parts[2]),
+                    OldestSnapshot = NullableNumber(parts[3]),
+                    NextTransaction = NullableNumber(parts[4])
+                };
+                health.OldestTransaction = health.TransactionHealth.OldestTransaction;
+                health.OldestActive = health.TransactionHealth.OldestActive;
+                health.OldestSnapshot = health.TransactionHealth.OldestSnapshot;
+                health.NextTransaction = health.TransactionHealth.NextTransaction;
             }
         }
 
@@ -368,6 +395,7 @@ public sealed class FirebirdCollector
     }
 
     private static int Number(string value) => int.TryParse(value.Trim(), out var number) ? number : 0;
+    private static long? NullableNumber(string value) => long.TryParse(value.Trim(), out var number) ? number : null;
 
     private static string Quote(string value) => "\"" + value.Replace("\"", "\\\"") + "\"";
 }
@@ -380,6 +408,12 @@ public sealed class IndexHealth
     public int? UserIndexes { get; set; }
     public int? ActiveUserIndexes { get; set; }
     public int? InactiveUserIndexes { get; set; }
+    public FirebirdTransactionHealth? TransactionHealth { get; set; }
+    public long? OldestTransaction { get; set; }
+    public long? OldestActive { get; set; }
+    public long? OldestSnapshot { get; set; }
+    public long? NextTransaction { get; set; }
+    public long? SweepInterval { get; set; }
     public string Severity { get; set; } = "UNKNOWN";
     public string[] MissingActiveTables { get; set; } = Array.Empty<string>();
     public DateTimeOffset CheckedAt { get; set; }
@@ -398,6 +432,15 @@ public sealed class IndexHealth
 public sealed record IndexTableHealth(string TableName, int Total, int Active, int Inactive);
 public sealed record IndexItemHealth(string TableName, string IndexName, int Unique, int System);
 
+public sealed class FirebirdTransactionHealth
+{
+    public long? OldestTransaction { get; set; }
+    public long? OldestActive { get; set; }
+    public long? OldestSnapshot { get; set; }
+    public long? NextTransaction { get; set; }
+    public long? SweepInterval { get; set; }
+}
+
 public sealed class IndexAudit
 {
     public string Status { get; set; } = "unknown";
@@ -405,6 +448,12 @@ public sealed class IndexAudit
     public int? TotalIndexes { get; set; }
     public int? ActiveIndexes { get; set; }
     public int? InactiveIndexes { get; set; }
+    public FirebirdTransactionHealth? TransactionHealth { get; set; }
+    public long? OldestTransaction { get; set; }
+    public long? OldestActive { get; set; }
+    public long? OldestSnapshot { get; set; }
+    public long? NextTransaction { get; set; }
+    public long? SweepInterval { get; set; }
     public int? PreviousInactiveIndexes { get; set; }
     public int InactiveDelta { get; set; }
     public IReadOnlyList<string> NewInactiveIndexes { get; set; } = Array.Empty<string>();

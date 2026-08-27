@@ -199,6 +199,32 @@ function num(value) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function formatInteger(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed.toLocaleString('pt-BR') : '-';
+}
+
+function transactionHealthPanel(health) {
+  if (!health) return '';
+  const gap = Number.isFinite(Number(health.nextTransaction)) && Number.isFinite(Number(health.oldestTransaction))
+    ? Number(health.nextTransaction) - Number(health.oldestTransaction)
+    : null;
+  return `
+    <div class="col-12">
+      <div class="border rounded p-3">
+        <div class="subheader mb-2">Transacoes Firebird</div>
+        <div class="row g-3">
+          <div class="col-sm-6 col-lg-2"><div class="text-muted small">Oldest transaction</div><div class="h3 mb-0">${formatInteger(health.oldestTransaction)}</div></div>
+          <div class="col-sm-6 col-lg-2"><div class="text-muted small">Oldest active</div><div class="h3 mb-0">${formatInteger(health.oldestActive)}</div></div>
+          <div class="col-sm-6 col-lg-2"><div class="text-muted small">Oldest snapshot</div><div class="h3 mb-0">${formatInteger(health.oldestSnapshot)}</div></div>
+          <div class="col-sm-6 col-lg-2"><div class="text-muted small">Next transaction</div><div class="h3 mb-0">${formatInteger(health.nextTransaction)}</div></div>
+          <div class="col-sm-6 col-lg-2"><div class="text-muted small">Gap OIT/Next</div><div class="h3 mb-0">${formatInteger(gap)}</div></div>
+          <div class="col-sm-6 col-lg-2"><div class="text-muted small">Sweep interval</div><div class="h3 mb-0">${formatInteger(health.sweepInterval)}</div></div>
+        </div>
+      </div>
+    </div>`;
+}
+
 function formatBytes(value) {
   let bytes = num(value);
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -457,6 +483,10 @@ function alertDetailsText(alert) {
   if (details.checkedAt) parts.push(`Verificado: ${new Date(details.checkedAt).toLocaleString()}`);
   if (details.activeIndexes !== undefined && details.totalIndexes !== undefined) parts.push(`Indices ativos: ${details.activeIndexes}/${details.totalIndexes}`);
   if (details.activeUserIndexes !== undefined && details.userIndexes !== undefined) parts.push(`Indices comuns ativos: ${details.activeUserIndexes}/${details.userIndexes}`);
+  const transactionHealth = details.transactionHealth || details;
+  if (transactionHealth.oldestTransaction !== undefined || transactionHealth.nextTransaction !== undefined) {
+    parts.push(`Transacoes: OIT ${formatInteger(transactionHealth.oldestTransaction)}, OAT ${formatInteger(transactionHealth.oldestActive)}, Next ${formatInteger(transactionHealth.nextTransaction)}`);
+  }
   if (details.sizeDropPercent !== null && details.sizeDropPercent !== undefined && Number(details.sizeDropPercent) > 0) {
     parts.push(`Queda: ${details.sizeDropPercent}%`);
   }
@@ -816,6 +846,7 @@ function databaseDetailsPanel(db, diagnostic, haStatus) {
   const status = databaseStatusView(db, diagnostic);
   const diagnosticPath = diagnostic?.path || db.filePath;
   const usingStandbyPath = diagnostic?.pathRole === 'standby_read_only' || diagnosticPath !== db.filePath;
+  const transactionHealth = diagnostic?.transactionHealth || diagnostic?.indexHealth?.transactionHealth || null;
   return `
     <div class="card mb-3" id="databaseDetailsPanel">
       <div class="card-header d-flex align-items-center justify-content-between">
@@ -836,6 +867,7 @@ function databaseDetailsPanel(db, diagnostic, haStatus) {
           ${usingStandbyPath ? `<div class="col-md-6"><div class="subheader">Caminho de producao</div><code>${escapeHtml(db.filePath)}</code></div>` : ''}
           ${db.standbyPath ? `<div class="col-md-6"><div class="subheader">Caminho standby</div><code>${escapeHtml(db.standbyPath)}</code></div>` : ''}
           ${db.standbyStatus ? `<div class="col-md-3"><div class="subheader">Status standby</div><div>${escapeHtml(db.standbyStatus)}</div></div>` : ''}
+          ${transactionHealthPanel(transactionHealth)}
           <div class="col-md-3"><div class="subheader">Operacao</div><div>${operationBadge(db)}</div></div>
           ${db.operationStartedAt ? `<div class="col-md-3"><div class="subheader">Inicio operacao</div><div>${new Date(db.operationStartedAt).toLocaleString()}</div></div>` : ''}
           ${db.operationExpiresAt ? `<div class="col-md-3"><div class="subheader">Expira em</div><div>${new Date(db.operationExpiresAt).toLocaleString()}</div></div>` : ''}
@@ -1025,10 +1057,14 @@ async function databases() {
         const indexLine = health
           ? `\nIndices totais: ${health.activeIndexes}/${health.totalIndexes} ativos, ${health.inactiveIndexes} inativos.\nIndices comuns: ${health.activeUserIndexes ?? '-'}/${health.userIndexes ?? '-'} ativos.`
           : '';
+        const transactionHealth = health?.transactionHealth || health;
+        const transactionLine = transactionHealth
+          ? `\nTransacoes: OIT ${formatInteger(transactionHealth.oldestTransaction)}, OAT ${formatInteger(transactionHealth.oldestActive)}, OST ${formatInteger(transactionHealth.oldestSnapshot)}, Next ${formatInteger(transactionHealth.nextTransaction)}, Sweep ${formatInteger(transactionHealth.sweepInterval)}.`
+          : '';
         const sizeLine = health?.sizeDropPercent
           ? `\nQueda de tamanho: ${health.sizeDropPercent}% em relacao ao maior tamanho recente.`
           : '';
-        await appAlert('Validacao concluida', `gstat -h executado e alerta de indices reavaliado.${indexLine}${sizeLine}`, health?.severity === 'CRITICAL' ? 'warning' : 'success');
+        await appAlert('Validacao concluida', `gstat -h executado e alerta de indices reavaliado.${indexLine}${transactionLine}${sizeLine}`, health?.severity === 'CRITICAL' ? 'warning' : 'success');
         databases();
       } catch (err) {
         await appAlert('Falha na validacao', err.message, 'danger');

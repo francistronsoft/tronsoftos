@@ -614,6 +614,21 @@ function parseIndexHealth(stdout) {
   return { ...totals, userNonConstraint, tables };
 }
 
+function numberFromGstat(stdout, label) {
+  const match = String(stdout || '').match(new RegExp(`^\\s*${label}:?\\s+(\\d+)`, 'mi'));
+  return match ? Number(match[1]) : null;
+}
+
+function parseGstatHeader(stdout) {
+  return {
+    oldestTransaction: numberFromGstat(stdout, 'Oldest transaction'),
+    oldestActive: numberFromGstat(stdout, 'Oldest active'),
+    oldestSnapshot: numberFromGstat(stdout, 'Oldest snapshot'),
+    nextTransaction: numberFromGstat(stdout, 'Next transaction'),
+    sweepInterval: numberFromGstat(stdout, 'Sweep interval')
+  };
+}
+
 function classifyIndexHealth(summary) {
   const activeRatio = summary.total > 0 ? summary.active / summary.total : 0;
   const userActiveRatio = summary.userNonConstraint.total > 0 ? summary.userNonConstraint.active / summary.userNonConstraint.total : 0;
@@ -713,7 +728,12 @@ async function indexHealthForDatabase(db) {
     shQuote(connect)
   ].join(' ');
   const out = await runFirebirdShellScript(cmd, (firebirdQueryTimeoutSeconds + 15) * 1000);
+  const gstat = await runFirebirdShellScript(
+    `${shQuote(`${firebirdBin}/gstat`)} -h ${shQuote(databasePath)}`,
+    120_000
+  );
   const summary = parseIndexHealth(out.stdout);
+  const transactionHealth = parseGstatHeader(gstat.stdout);
   const classification = classifyIndexHealth(summary);
   const sizeTrend = await databaseSizeTrend(db, databaseFileSizeBytes(databasePath));
   const checkedAt = new Date().toISOString();
@@ -728,6 +748,12 @@ async function indexHealthForDatabase(db) {
     userIndexes: summary.userNonConstraint.total,
     activeUserIndexes: summary.userNonConstraint.active,
     inactiveUserIndexes: summary.userNonConstraint.inactive,
+    transactionHealth,
+    oldestTransaction: transactionHealth.oldestTransaction,
+    oldestActive: transactionHealth.oldestActive,
+    oldestSnapshot: transactionHealth.oldestSnapshot,
+    nextTransaction: transactionHealth.nextTransaction,
+    sweepInterval: transactionHealth.sweepInterval,
     total: summary.inactive,
     severity: classification.severity,
     activeRatio: classification.activeRatio,
@@ -761,6 +787,12 @@ function indexAuditFromHealth(health) {
     totalIndexes: health.totalIndexes,
     activeIndexes: health.activeIndexes,
     inactiveIndexes: health.inactiveIndexes,
+    transactionHealth: health.transactionHealth || null,
+    oldestTransaction: health.oldestTransaction ?? health.transactionHealth?.oldestTransaction ?? null,
+    oldestActive: health.oldestActive ?? health.transactionHealth?.oldestActive ?? null,
+    oldestSnapshot: health.oldestSnapshot ?? health.transactionHealth?.oldestSnapshot ?? null,
+    nextTransaction: health.nextTransaction ?? health.transactionHealth?.nextTransaction ?? null,
+    sweepInterval: health.sweepInterval ?? health.transactionHealth?.sweepInterval ?? null,
     previousInactiveIndexes: null,
     inactiveDelta: 0,
     firstSnapshot: false,
@@ -800,6 +832,12 @@ async function refreshInactiveIndexAlert(db) {
       userIndexes: health.userIndexes,
       activeUserIndexes: health.activeUserIndexes,
       inactiveUserIndexes: health.inactiveUserIndexes,
+      transactionHealth: health.transactionHealth || null,
+      oldestTransaction: health.oldestTransaction ?? health.transactionHealth?.oldestTransaction ?? null,
+      oldestActive: health.oldestActive ?? health.transactionHealth?.oldestActive ?? null,
+      oldestSnapshot: health.oldestSnapshot ?? health.transactionHealth?.oldestSnapshot ?? null,
+      nextTransaction: health.nextTransaction ?? health.transactionHealth?.nextTransaction ?? null,
+      sweepInterval: health.sweepInterval ?? health.transactionHealth?.sweepInterval ?? null,
       activeRatio: health.activeRatio,
       userActiveRatio: health.userActiveRatio,
       missingActiveTables: health.missingActiveTables,
@@ -1640,6 +1678,7 @@ app.get('/api/internal/database-version', async (req) => {
       error: database.error || '',
       versionError: database.versionError || '',
       licensedUnitError: database.licensedUnitError || '',
+      transactionHealth: indexHealth?.transactionHealth || database.transactionHealth || null,
       indexHealth,
       indexAudit
     });
@@ -1671,6 +1710,7 @@ app.get('/api/internal/database-version', async (req) => {
     databaseAlias: database?.alias || null,
     fileSizeBytes: database?.fileSizeBytes ?? null,
     sizeMb: database?.fileSizeBytes ? Math.round((Number(database.fileSizeBytes) / 1024 / 1024) * 10) / 10 : null,
+    transactionHealth: indexHealth?.transactionHealth || database?.transactionHealth || null,
     indexHealth,
     indexAudit,
     databases: databasesWithHealth

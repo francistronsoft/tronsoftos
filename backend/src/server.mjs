@@ -5075,6 +5075,7 @@ async function centralDatabaseInfoFromTronFire() {
           fileSizeBytes: db.fileSizeBytes ?? null,
           sizeMb: db.sizeMb ?? null,
           error: db.error || '',
+          transactionHealth: db.transactionHealth || db.indexHealth?.transactionHealth || null,
           indexHealth: db.indexHealth || null,
           indexAudit: db.indexAudit || null
         }))
@@ -5085,11 +5086,12 @@ async function centralDatabaseInfoFromTronFire() {
       databaseAlias: payload.databaseAlias || null,
       fileSizeBytes: payload.fileSizeBytes ?? null,
       sizeMb: payload.sizeMb ?? null,
+      transactionHealth: payload.transactionHealth || payload.indexHealth?.transactionHealth || null,
       indexHealth: payload.indexHealth || null,
       indexAudit: payload.indexAudit || null,
       databases
     };
-    if (value.version || value.fileSizeBytes || value.indexHealth || value.indexAudit || value.databases.length) {
+    if (value.version || value.fileSizeBytes || value.transactionHealth || value.indexHealth || value.indexAudit || value.databases.length) {
       centralDatabaseInfoCache = { checkedAt: Date.now(), value };
     }
     return value;
@@ -5119,6 +5121,7 @@ async function centralDatabasePayload() {
     fileSizeBytes: tronfireDatabase?.fileSizeBytes ?? null,
     databaseName: tronfireDatabase?.databaseName || null,
     databaseAlias: tronfireDatabase?.databaseAlias || null,
+    transactionHealth: tronfireDatabase?.transactionHealth || tronfireDatabase?.indexHealth?.transactionHealth || null,
     indexHealth: tronfireDatabase?.indexHealth || null,
     indexAudit: tronfireDatabase?.indexAudit || null,
     databases: Array.isArray(tronfireDatabase?.databases) ? tronfireDatabase.databases : []

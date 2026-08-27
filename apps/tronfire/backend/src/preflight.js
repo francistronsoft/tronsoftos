@@ -19,6 +19,28 @@ function parseIsqlValue(stdout) {
   return value || null;
 }
 
+function numberFromGstat(stdout, label) {
+  const match = String(stdout || '').match(new RegExp(`^\\s*${label}:?\\s+(\\d+)`, 'mi'));
+  return match ? Number(match[1]) : null;
+}
+
+function parseGstatHeader(stdout) {
+  return {
+    oldestTransaction: numberFromGstat(stdout, 'Oldest transaction'),
+    oldestActive: numberFromGstat(stdout, 'Oldest active'),
+    oldestSnapshot: numberFromGstat(stdout, 'Oldest snapshot'),
+    nextTransaction: numberFromGstat(stdout, 'Next transaction'),
+    sweepInterval: numberFromGstat(stdout, 'Sweep interval')
+  };
+}
+
+async function databaseTransactionHealth(db) {
+  const databasePath = effectiveDatabasePath(db);
+  const cmd = `${shQuote(`${FIREBIRD_BIN}/gstat`)} -h ${shQuote(databasePath)}`;
+  const { stdout } = await firebirdExec(['sh', '-lc', cmd], { timeout: 120000 });
+  return parseGstatHeader(stdout);
+}
+
 function standbyPathForAlias(alias) {
   return `/firebird/standby/${String(alias || '').trim().toLowerCase()}_standby.fdb`;
 }
@@ -63,12 +85,14 @@ export async function databaseDiagnostics() {
       pathRole: effectiveDatabasePath(db) === db.filePath ? 'production' : 'standby_read_only',
       fileSizeBytes: databaseFileSize(db)
     };
-    const [versionResult, licensedUnitResult] = await Promise.allSettled([
+    const [versionResult, licensedUnitResult, transactionResult] = await Promise.allSettled([
       queryDatabaseValue(db, 'select first 1 VERSAO from VERSAO_BANCO;'),
-      queryDatabaseValue(db, 'select first 1 NOME from EMPRESA_SINTEGRA;')
+      queryDatabaseValue(db, 'select first 1 NOME from EMPRESA_SINTEGRA;'),
+      databaseTransactionHealth(db)
     ]);
     const versionError = versionResult.status === 'rejected' ? versionResult.reason : null;
     const licensedUnitError = licensedUnitResult.status === 'rejected' ? licensedUnitResult.reason : null;
+    const transactionError = transactionResult.status === 'rejected' ? transactionResult.reason : null;
     if (versionError && licensedUnitError) {
       diagnostics.push({
         ...base,
@@ -84,8 +108,10 @@ export async function databaseDiagnostics() {
       ok: true,
       version: versionResult.status === 'fulfilled' && versionResult.value ? versionResult.value : 'Nao informado',
       licensedUnit: licensedUnitResult.status === 'fulfilled' && licensedUnitResult.value ? licensedUnitResult.value : 'Nao informado',
+      transactionHealth: transactionResult.status === 'fulfilled' ? transactionResult.value : null,
       versionError: versionError?.message || '',
-      licensedUnitError: licensedUnitError?.message || ''
+      licensedUnitError: licensedUnitError?.message || '',
+      transactionHealthError: transactionError?.message || ''
     });
   }
   return diagnostics;
