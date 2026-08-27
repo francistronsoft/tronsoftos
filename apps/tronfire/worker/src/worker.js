@@ -31,6 +31,7 @@ const DEFAULT_BACKUP_RETENTION_DAYS = normalizePositiveMinutes(process.env.TRONF
 const BACKUP_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_TIMEOUT_MINUTES, 120, 30, 1440);
 const BACKUP_VALIDATION_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_TIMEOUT_MINUTES, 45, 15, 240);
 const BACKUP_RESTORE_VALIDATION_WINDOW = String(process.env.TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW || '03:00-06:00').trim();
+const BACKUP_RESTORE_VALIDATION_WEEKDAY = String(process.env.TRONFIRE_BACKUP_RESTORE_VALIDATION_WEEKDAY || 'monday').trim();
 const ORPHANED_BACKUP_MIN_AGE_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_ORPHANED_MIN_AGE_MINUTES, 5, 1, 60);
 const FIREBIRD_SESSION_RETENTION_DAYS = 30;
 const FIREBIRD_UNRESPONSIVE_FAILURE_THRESHOLD = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_UNRESPONSIVE_FAILURES, 5, 1, 10);
@@ -70,6 +71,38 @@ function parseClockMinutes(value) {
   return hours * 60 + minutes;
 }
 
+function parseValidationWeekdays(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text || ['off', 'false', 'disabled', 'never'].includes(text)) return { disabled: true, weekdays: new Set(), label: value };
+  if (['daily', 'always', 'true', '*', 'all'].includes(text)) return { daily: true, weekdays: new Set(), label: value };
+  const names = new Map([
+    ['0', 0], ['sun', 0], ['sunday', 0], ['domingo', 0],
+    ['1', 1], ['mon', 1], ['monday', 1], ['segunda', 1], ['segunda-feira', 1],
+    ['2', 2], ['tue', 2], ['tuesday', 2], ['terca', 2], ['terça', 2], ['terca-feira', 2], ['terça-feira', 2],
+    ['3', 3], ['wed', 3], ['wednesday', 3], ['quarta', 3], ['quarta-feira', 3],
+    ['4', 4], ['thu', 4], ['thursday', 4], ['quinta', 4], ['quinta-feira', 4],
+    ['5', 5], ['fri', 5], ['friday', 5], ['sexta', 5], ['sexta-feira', 5],
+    ['6', 6], ['sat', 6], ['saturday', 6], ['sabado', 6], ['sábado', 6]
+  ]);
+  const weekdays = new Set();
+  for (const item of text.split(/[,\s]+/).map(part => part.trim()).filter(Boolean)) {
+    if (!names.has(item)) return { invalid: true, weekdays: new Set(), label: value };
+    weekdays.add(names.get(item));
+  }
+  return { weekdays, label: value };
+}
+
+function validationWeekdayStatus(now = new Date()) {
+  const policy = parseValidationWeekdays(BACKUP_RESTORE_VALIDATION_WEEKDAY);
+  if (policy.disabled) return { allowed: false, reason: 'weekday_disabled', weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
+  if (policy.invalid || (!policy.daily && policy.weekdays.size === 0)) {
+    return { allowed: false, reason: 'invalid_weekday', weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
+  }
+  if (policy.daily) return { allowed: true, reason: 'daily', weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
+  const allowed = policy.weekdays.has(now.getDay());
+  return { allowed, reason: allowed ? 'inside_weekday' : 'outside_weekday', weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
+}
+
 function validationWindowStatus(now = new Date()) {
   const value = BACKUP_RESTORE_VALIDATION_WINDOW.toLowerCase();
   if (!value || ['off', 'false', 'disabled', 'never'].includes(value)) return { allowed: false, reason: 'disabled', window: BACKUP_RESTORE_VALIDATION_WINDOW };
@@ -85,19 +118,27 @@ function validationWindowStatus(now = new Date()) {
   return { allowed, reason: allowed ? 'inside_window' : 'outside_window', window: BACKUP_RESTORE_VALIDATION_WINDOW };
 }
 
-function sameLocalDate(left, right = new Date()) {
-  return left.getFullYear() === right.getFullYear()
-    && left.getMonth() === right.getMonth()
-    && left.getDate() === right.getDate();
+function validationPeriodStart(date = new Date()) {
+  const policy = parseValidationWeekdays(BACKUP_RESTORE_VALIDATION_WEEKDAY);
+  const start = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  if (!policy.daily && policy.weekdays.size > 0) {
+    let nearestOffset = 7;
+    for (const weekday of policy.weekdays) {
+      const offset = (start.getDay() - weekday + 7) % 7;
+      if (offset < nearestOffset) nearestOffset = offset;
+    }
+    start.setDate(start.getDate() - nearestOffset);
+  }
+  return start;
 }
 
-async function backupRestoreAlreadyValidatedToday(db, now = new Date()) {
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+async function backupRestoreAlreadyValidatedThisPeriod(db, now = new Date()) {
+  const windowStart = validationPeriodStart(now);
   const jobs = await prisma.backupJob.findMany({
     where: {
       databaseId: db.id,
       status: 'SUCCESS',
-      finishedAt: { gte: todayStart },
+      finishedAt: { gte: windowStart },
       manifestPath: { not: null }
     },
     orderBy: { finishedAt: 'desc' },
@@ -108,9 +149,9 @@ async function backupRestoreAlreadyValidatedToday(db, now = new Date()) {
     try {
       const manifest = JSON.parse(fs.readFileSync(job.manifestPath, 'utf8'));
       const validatedAt = manifest?.validation?.validatedAt ? new Date(manifest.validation.validatedAt) : null;
-      if (manifest?.validation?.ok === true && validatedAt && sameLocalDate(validatedAt, now)) return true;
+      if (manifest?.validation?.ok === true && validatedAt && validatedAt >= windowStart) return true;
     } catch {
-      // Ignore malformed old manifests; they should not block today's validation.
+      // Ignore malformed old manifests; they should not block the next validation window.
     }
   }
   return false;
@@ -118,12 +159,14 @@ async function backupRestoreAlreadyValidatedToday(db, now = new Date()) {
 
 async function shouldValidateBackupRestore(db, reason) {
   if (String(reason || '').toUpperCase() !== 'AUTO') return { allowed: true, reason: 'manual_or_requested', window: BACKUP_RESTORE_VALIDATION_WINDOW };
+  const weekdayStatus = validationWeekdayStatus();
+  if (!weekdayStatus.allowed) return { ...weekdayStatus, window: BACKUP_RESTORE_VALIDATION_WINDOW };
   const windowStatus = validationWindowStatus();
-  if (!windowStatus.allowed) return windowStatus;
-  if (await backupRestoreAlreadyValidatedToday(db)) {
-    return { allowed: false, reason: 'already_validated_today', window: BACKUP_RESTORE_VALIDATION_WINDOW };
+  if (!windowStatus.allowed) return { ...windowStatus, weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
+  if (await backupRestoreAlreadyValidatedThisPeriod(db)) {
+    return { allowed: false, reason: 'already_validated_this_period', window: BACKUP_RESTORE_VALIDATION_WINDOW, weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
   }
-  return windowStatus;
+  return { ...windowStatus, weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
 }
 
 function haSyncActive() {
@@ -1188,9 +1231,10 @@ async function runBackup(db, reason = 'AUTO') {
           skipped: true,
           reason: validationDecision.reason,
           window: validationDecision.window,
-          message: validationDecision.reason === 'already_validated_today'
-            ? `Validacao de restore ja executada hoje para ${db.alias}`
-            : `Validacao de restore fora da janela configurada (${validationDecision.window})`
+          weekday: validationDecision.weekday,
+          message: validationDecision.reason === 'already_validated_this_period'
+            ? `Validacao de restore ja executada no periodo configurado para ${db.alias}`
+            : `Validacao de restore fora da politica configurada (${validationDecision.weekday || '*'} ${validationDecision.window})`
         };
     const manifest = {
       databaseId: db.id,
