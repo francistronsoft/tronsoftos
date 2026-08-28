@@ -5089,6 +5089,8 @@ async function centralDatabaseInfoFromTronFire() {
           sizeMb: db.sizeMb ?? null,
           error: db.error || '',
           transactionHealth: db.transactionHealth || db.indexHealth?.transactionHealth || null,
+          transactionGap: db.transactionGap || db.indexHealth?.transactionGap || null,
+          firebirdSessions: Array.isArray(db.firebirdSessions || db.sessions) ? (db.firebirdSessions || db.sessions).slice(0, 50) : [],
           indexHealth: db.indexHealth || null,
           indexAudit: db.indexAudit || null
         }))
@@ -5100,6 +5102,8 @@ async function centralDatabaseInfoFromTronFire() {
       fileSizeBytes: payload.fileSizeBytes ?? null,
       sizeMb: payload.sizeMb ?? null,
       transactionHealth: payload.transactionHealth || payload.indexHealth?.transactionHealth || null,
+      transactionGap: payload.transactionGap || payload.indexHealth?.transactionGap || null,
+      firebirdSessions: Array.isArray(payload.firebirdSessions || payload.sessions) ? (payload.firebirdSessions || payload.sessions).slice(0, 50) : [],
       indexHealth: payload.indexHealth || null,
       indexAudit: payload.indexAudit || null,
       databases
@@ -5135,6 +5139,8 @@ async function centralDatabasePayload() {
     databaseName: tronfireDatabase?.databaseName || null,
     databaseAlias: tronfireDatabase?.databaseAlias || null,
     transactionHealth: tronfireDatabase?.transactionHealth || tronfireDatabase?.indexHealth?.transactionHealth || null,
+    transactionGap: tronfireDatabase?.transactionGap || tronfireDatabase?.indexHealth?.transactionGap || null,
+    firebirdSessions: Array.isArray(tronfireDatabase?.firebirdSessions) ? tronfireDatabase.firebirdSessions : [],
     indexHealth: tronfireDatabase?.indexHealth || null,
     indexAudit: tronfireDatabase?.indexAudit || null,
     databases: Array.isArray(tronfireDatabase?.databases) ? tronfireDatabase.databases : []

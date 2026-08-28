@@ -976,6 +976,42 @@ function countBy(items, keySelector, emptyLabel) {
     .slice(0, 10);
 }
 
+function serializeFirebirdSession(item) {
+  if (!item) return null;
+  const finishedAt = item.disconnectedAt || item.lastSeenAt || item.firstSeenAt;
+  return {
+    id: item.id,
+    attachmentId: item.attachmentId,
+    user: item.user,
+    remoteAddress: item.remoteAddress,
+    remoteProcess: item.remoteProcess,
+    remotePid: item.remotePid,
+    connectedAt: item.connectedAt,
+    firstSeenAt: item.firstSeenAt,
+    lastSeenAt: item.lastSeenAt,
+    disconnectedAt: item.disconnectedAt,
+    lastState: item.lastState,
+    sourceNode: item.sourceNode,
+    durationSeconds: item.firstSeenAt && finishedAt ? Math.max(0, Math.round((finishedAt - item.firstSeenAt) / 1000)) : null
+  };
+}
+
+async function recentFirebirdSessions(databaseId) {
+  if (!databaseId) return [];
+  const sessions = await prisma.firebirdSession.findMany({
+    where: {
+      databaseId,
+      OR: [
+        { disconnectedAt: null },
+        { lastSeenAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } }
+      ]
+    },
+    orderBy: [{ disconnectedAt: 'asc' }, { lastSeenAt: 'desc' }],
+    take: 50
+  });
+  return sessions.map(serializeFirebirdSession).filter(Boolean);
+}
+
 async function firebirdConnectionHistory(db, query = {}) {
   const period = firebirdHistoryRange(query);
   const remoteAddress = String(query.remoteAddress || '').trim();
@@ -1022,20 +1058,7 @@ async function firebirdConnectionHistory(db, query = {}) {
       totalConnections: item.totalConnections,
       sourceNode: item.sourceNode
     })),
-    sessions: sessions.map(item => ({
-      id: item.id,
-      user: item.user,
-      remoteAddress: item.remoteAddress,
-      remoteProcess: item.remoteProcess,
-      remotePid: item.remotePid,
-      connectedAt: item.connectedAt,
-      firstSeenAt: item.firstSeenAt,
-      lastSeenAt: item.lastSeenAt,
-      disconnectedAt: item.disconnectedAt,
-      lastState: item.lastState,
-      sourceNode: item.sourceNode,
-      durationSeconds: Math.max(0, Math.round(((item.disconnectedAt || item.lastSeenAt) - item.firstSeenAt) / 1000))
-    }))
+    sessions: sessions.map(serializeFirebirdSession).filter(Boolean)
   };
 }
 
@@ -1723,6 +1746,7 @@ app.get('/api/internal/database-version', async (req) => {
       }
     }
     const indexAudit = indexHealth ? indexAuditFromHealth(indexHealth) : null;
+    const firebirdSessions = managedDatabase ? await recentFirebirdSessions(managedDatabase.id) : [];
     databasesWithHealth.push({
       id: database.id || managedDatabase?.id || null,
       name: database.name || managedDatabase?.name || null,
@@ -1741,6 +1765,8 @@ app.get('/api/internal/database-version', async (req) => {
       versionError: database.versionError || '',
       licensedUnitError: database.licensedUnitError || '',
       transactionHealth: indexHealth?.transactionHealth || database.transactionHealth || null,
+      transactionGap: indexHealth?.transactionGap || null,
+      firebirdSessions,
       indexHealth,
       indexAudit
     });
@@ -1773,6 +1799,8 @@ app.get('/api/internal/database-version', async (req) => {
     fileSizeBytes: database?.fileSizeBytes ?? null,
     sizeMb: database?.fileSizeBytes ? Math.round((Number(database.fileSizeBytes) / 1024 / 1024) * 10) / 10 : null,
     transactionHealth: indexHealth?.transactionHealth || database?.transactionHealth || null,
+    transactionGap: indexHealth?.transactionGap || null,
+    firebirdSessions: Array.isArray(database?.firebirdSessions) ? database.firebirdSessions : [],
     indexHealth,
     indexAudit,
     databases: databasesWithHealth
