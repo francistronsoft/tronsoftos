@@ -532,6 +532,36 @@ function dashboardAlertShortcut(alerts) {
   </div></div>`;
 }
 
+function dashboardIndexCards(databases = [], indexHealthItems = []) {
+  const healthById = new Map(indexHealthItems.map(item => [item.databaseId, item]));
+  const healthByAlias = new Map(indexHealthItems.map(item => [item.databaseAlias, item]));
+  const rows = databases.map(db => {
+    const health = healthById.get(db.id) || healthByAlias.get(db.alias) || null;
+    const severity = String(health?.severity || '').toUpperCase();
+    const className = health?.error ? 'danger' : severity === 'CRITICAL' ? 'danger' : severity === 'WARNING' ? 'warning' : health ? 'success' : 'secondary';
+    const active = health ? formatInteger(health.activeIndexes) : '-';
+    const total = health ? formatInteger(health.totalIndexes) : '-';
+    const inactive = health ? formatInteger(health.inactiveIndexes ?? health.total) : '-';
+    const commonActive = health ? `${formatInteger(health.activeUserIndexes)}/${formatInteger(health.userIndexes)}` : '-';
+    const detail = health?.error
+      ? health.error
+      : health
+        ? `${inactive} inativo(s), indices comuns ${commonActive}`
+        : 'Sem leitura de indices ainda';
+    return `<div class="col-sm-6 col-xl-3"><div class="card summary-card h-100"><div class="card-body">
+      <div class="d-flex align-items-start justify-content-between gap-2">
+        <div class="min-w-0">
+          <div class="subheader text-truncate">${escapeHtml(db.alias || db.name)}</div>
+          <div class="h1 mb-0 text-${className === 'danger' ? 'danger' : className === 'warning' ? 'warning' : 'reset'}">${active}/${total}</div>
+        </div>
+        <span class="badge bg-${className}">${escapeHtml(health ? (severity || 'OK') : 'SEM LEITURA')}</span>
+      </div>
+      <div class="text-muted small mt-2">${escapeHtml(detail)}</div>
+    </div></div></div>`;
+  });
+  return `<div class="row row-cards zbx-board mb-3">${rows.length ? rows.join('') : '<div class="col-12"><div class="alert alert-info mb-0">Nenhum banco cadastrado para leitura de indices.</div></div>'}</div>`;
+}
+
 async function dashboard() {
   const params = new URLSearchParams(location.hash.split('?')[1] || '');
   const range = ['day', 'week', 'month'].includes(params.get('range')) ? params.get('range') : 'day';
@@ -558,11 +588,11 @@ async function dashboard() {
   const backupOk = data.backups.filter(b => b.status === 'SUCCESS').length;
   const backupFailed = data.backups.filter(b => b.status === 'FAILED').length;
   const indexHealthItems = data.indexHealth || [];
-  const activeIndexTotal = indexHealthItems.reduce((sum, item) => sum + Number(item.activeIndexes || 0), 0);
   const inactiveIndexTotal = indexHealthItems.reduce((sum, item) => sum + Number((item.inactiveIndexes ?? item.total) || 0), 0);
   const criticalIndexDatabases = indexHealthItems.filter(item => item.severity === 'CRITICAL').length;
   const inactiveIndexErrors = indexHealthItems.filter(item => item.error).length;
   const maxIndexSizeDrop = Math.max(0, ...indexHealthItems.map(item => Number(item.sizeDropPercent || 0)));
+  const okIndexDatabases = indexHealthItems.filter(item => !item.error && item.severity !== 'CRITICAL').length;
   const indexHealthDetail = inactiveIndexErrors
     ? `${inactiveIndexErrors} banco(s) sem leitura`
     : criticalIndexDatabases
@@ -589,9 +619,10 @@ async function dashboard() {
       <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Bancos</div><div class="h1 mb-0">${data.databases.length}</div></div></div></div>
       <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Producao</div><div class="h3 mb-0 text-truncate">${escapeHtml(prod?.name || 'Nao definido')}</div></div></div></div>
       <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Conexoes producao</div><div class="h1 mb-0">${data.productionConnections?.total ?? '-'}</div><div class="text-muted small">${data.productionConnections?.error ? 'Consulta indisponivel' : escapeHtml(data.productionConnections?.databaseAlias || 'Sem banco')}</div></div></div></div>
-      <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Indices ativos</div><div class="h1 mb-0 ${criticalIndexDatabases ? 'text-danger' : ''}">${activeIndexTotal || '-'}</div><div class="text-muted small">${escapeHtml(indexHealthDetail)}</div></div></div></div>
+      <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Saude dos indices</div><div class="h1 mb-0 ${criticalIndexDatabases ? 'text-danger' : ''}">${okIndexDatabases}/${indexHealthItems.length || data.databases.length || '-'}</div><div class="text-muted small">${escapeHtml(indexHealthDetail)}</div></div></div></div>
       <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Uptime Firebird</div><div class="h1 mb-0">${formatDuration(uptime.uptimeSeconds)}</div></div></div></div>
     </div>
+    ${dashboardIndexCards(data.databases, indexHealthItems)}
     <div class="row row-cards">
       ${zabbixMetricCard('Firebird: uso de CPU em %', `${num(firebird.cpuPercent).toFixed(1)}%`, rangeLabel, gaugeChart(firebird.cpuPercent, 'CPU Firebird'))}
       ${zabbixMetricCard('Firebird: memoria usada em %', `${num(firebird.memoryPercent).toFixed(1)}%`, `${formatBytes(firebird.memoryUsageBytes)} de ${formatBytes(firebird.memoryLimitBytes)}`, gaugeChart(firebird.memoryPercent, 'Memoria Firebird'))}
@@ -907,19 +938,20 @@ function databaseDetailsPanel(db, diagnostic, haStatus) {
 }
 
 function firebirdServiceCard(info) {
+  info = info || {};
   const statusClass = ['running', 'active'].includes(info.status) ? 'success' : info.status === 'exited' || info.status === 'dead' || info.status === 'inactive' ? 'danger' : 'warning';
   const label = info.label || (info.mode === 'host' ? 'Servico Firebird no host' : 'Container Firebird geral');
   const name = info.mode === 'host' ? (info.service || 'firebird') : info.container;
   const warning = info.mode === 'host'
     ? 'Estas acoes sao gerais e afetam o servico Firebird 2.5.9 instalado no host Debian.'
     : 'Estas acoes sao gerais e afetam todos os bancos atendidos por este container Firebird.';
-  const actions = currentUser?.role === 'ADMIN'
+  const actions = currentUser?.role !== 'CONSULTA'
     ? `<div class="btn-list">
         <button class="btn btn-outline-success" data-firebird-action="start">Iniciar</button>
         <button class="btn btn-outline-warning" data-firebird-action="restart">Reiniciar</button>
         <button class="btn btn-outline-danger" data-firebird-action="stop">Parar</button>
       </div>`
-    : '<div class="alert alert-info mb-0">Somente administradores podem iniciar, parar ou reiniciar o Firebird.</div>';
+    : '<div class="alert alert-info mb-0">Usuario de consulta nao pode iniciar, parar ou reiniciar o Firebird.</div>';
   return `<div class="card mb-3"><div class="card-body">
     <div class="d-flex flex-wrap align-items-start justify-content-between gap-3">
       <div>
@@ -946,23 +978,43 @@ function bindFirebirdActions(refresh) {
     });
     if (!ok) return;
     btn.disabled = true;
+    const originalText = btn.textContent;
     btn.textContent = 'Executando...';
-    await api(`/api/services/firebird/${action}`, { method: 'POST' });
-    setTimeout(refresh, 900);
+    try {
+      await api(`/api/services/firebird/${action}`, { method: 'POST' });
+      setTimeout(refresh, 900);
+    } catch (err) {
+      await appAlert('Falha na acao do Firebird', err.message, 'danger');
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
   });
 }
 
 async function databases() {
-  const [dbs, diagnosticData, firebirdInfo, haStatus] = await Promise.all([
+  content.innerHTML = '<div class="page-header"><h2 class="page-title">Bancos</h2></div><div class="text-muted">Carregando bancos e status do Firebird...</div>';
+  const [dbsResult, diagnosticResult, firebirdResult, haResult] = await Promise.allSettled([
     api('/api/databases'),
     api('/api/preflight'),
     api('/api/services/firebird'),
-    api('/api/ha/status').catch(() => null)
+    api('/api/ha/status')
   ]);
+  const dbs = dbsResult.status === 'fulfilled' && Array.isArray(dbsResult.value) ? dbsResult.value : [];
+  const diagnosticData = diagnosticResult.status === 'fulfilled' ? diagnosticResult.value : { databases: [], error: diagnosticResult.reason?.message || 'Diagnostico indisponivel' };
+  const firebirdInfo = firebirdResult.status === 'fulfilled'
+    ? firebirdResult.value
+    : { mode: 'host', service: 'firebird', status: 'unknown', details: firebirdResult.reason?.message || 'Status indisponivel', logs: '', label: 'Servico Firebird' };
+  const haStatus = haResult.status === 'fulfilled' ? haResult.value : null;
   const hasProductionDatabase = dbs.some(db => db.isPrimary || db.type === 'PRODUCAO');
   const diagnosticById = new Map((diagnosticData.databases || []).map(db => [db.id, db]));
+  const loadWarnings = [
+    dbsResult.status === 'rejected' ? `Bancos: ${dbsResult.reason?.message || 'falha na API'}` : '',
+    diagnosticResult.status === 'rejected' ? `Diagnostico: ${diagnosticResult.reason?.message || 'falha na API'}` : '',
+    firebirdResult.status === 'rejected' ? `Servico Firebird: ${firebirdResult.reason?.message || 'falha na API'}` : ''
+  ].filter(Boolean);
   content.innerHTML = `
     <div class="page-header"><h2 class="page-title">Bancos</h2></div>
+    ${loadWarnings.length ? `<div class="alert alert-warning mb-3">${escapeHtml(loadWarnings.join(' | '))}</div>` : ''}
     ${firebirdServiceCard(firebirdInfo)}
     <div id="connectionSlot"></div>
     <div id="databaseDetailsSlot"></div>
@@ -1571,13 +1623,13 @@ async function services() {
     ? 'Estas acoes sao gerais e afetam o servico Firebird 2.5.9 instalado no host Debian.'
     : 'Estas acoes sao gerais e afetam todos os bancos atendidos por este container Firebird.';
   const logsTitle = info.mode === 'host' ? 'Logs/status recentes do servico' : 'Logs recentes do container';
-  const actions = currentUser?.role === 'ADMIN'
+  const actions = currentUser?.role !== 'CONSULTA'
     ? `<div class="btn-list">
         <button class="btn btn-outline-success" data-firebird-action="start">Iniciar</button>
         <button class="btn btn-outline-warning" data-firebird-action="restart">Reiniciar</button>
         <button class="btn btn-outline-danger" data-firebird-action="stop">Parar</button>
       </div>`
-    : '<div class="alert alert-info mb-0">Somente administradores podem iniciar, parar ou reiniciar o Firebird.</div>';
+    : '<div class="alert alert-info mb-0">Usuario de consulta nao pode iniciar, parar ou reiniciar o Firebird.</div>';
   content.innerHTML = `<div class="page-header"><h2 class="page-title">Servicos</h2></div>
     <div class="card mb-3"><div class="card-body">
       <div class="d-flex flex-wrap align-items-start justify-content-between gap-3">
@@ -1603,9 +1655,16 @@ async function services() {
     });
     if (!ok) return;
     btn.disabled = true;
+    const originalText = btn.textContent;
     btn.textContent = 'Executando...';
-    await api(`/api/services/firebird/${action}`, { method: 'POST' });
-    setTimeout(() => { services(); }, 900);
+    try {
+      await api(`/api/services/firebird/${action}`, { method: 'POST' });
+      setTimeout(() => { services(); }, 900);
+    } catch (err) {
+      await appAlert('Falha na acao do Firebird', err.message, 'danger');
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
   });
 }
 

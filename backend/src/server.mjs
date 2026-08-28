@@ -1135,6 +1135,7 @@ function repairRcloneConfigPermissions(configPath) {
   if (!canRepairRcloneConfigPath(configPath)) return false;
   try {
     execFileSync('sudo', ['-n', '/usr/local/sbin/tronsoftos-network', 'fix-rclone-permissions', appRoot], {
+      env: serviceAccountEnv(),
       timeout: 15_000,
       stdio: 'ignore'
     });
@@ -1186,7 +1187,7 @@ function writeRcloneSettings(body) {
     try {
       writeRcloneConfigContent(settings, body.configContent);
     } catch (err) {
-      const error = new Error(`Nao foi possivel salvar o rclone.conf em ${settings.config}: ${err.message}. Verifique se a pasta pertence ao usuario tronsoftos.`);
+      const error = new Error(`Nao foi possivel salvar o rclone.conf em ${settings.config}: ${err.message}. Verifique se a pasta pertence ao usuario de servico ${serviceAccountNames().user}.`);
       error.statusCode = 500;
       throw error;
     }
@@ -1813,7 +1814,24 @@ async function diskUsageForPath(targetPath) {
   }
 }
 
+function serviceAccountNames() {
+  const user = String(process.env.TRONSOFTOS_SERVICE_USER || 'tronsoftos').trim() || 'tronsoftos';
+  const group = String(process.env.TRONSOFTOS_SERVICE_GROUP || user).trim() || user;
+  return { user, group };
+}
+
+function serviceAccountEnv() {
+  const account = serviceAccountNames();
+  return {
+    ...process.env,
+    TRONSOFTOS_APP_DIR: appRoot,
+    TRONSOFTOS_SERVICE_USER: account.user,
+    TRONSOFTOS_SERVICE_GROUP: account.group
+  };
+}
+
 function serviceUserIds() {
+  const account = serviceAccountNames();
   const fallback = (() => {
     try {
       const stat = fs.statSync(appRoot);
@@ -1825,10 +1843,10 @@ function serviceUserIds() {
   try {
     const userLine = fs.readFileSync('/etc/passwd', 'utf8')
       .split('\n')
-      .find(line => line.startsWith('tronsoftos:'));
+      .find(line => line.startsWith(`${account.user}:`));
     const groupLine = fs.readFileSync('/etc/group', 'utf8')
       .split('\n')
-      .find(line => line.startsWith('tronsoftos:'));
+      .find(line => line.startsWith(`${account.group}:`));
     const uid = Number(userLine?.split(':')[2]);
     const gid = Number(groupLine?.split(':')[2] ?? userLine?.split(':')[3]);
     if (Number.isInteger(uid) && Number.isInteger(gid)) return { uid, gid };
@@ -2106,6 +2124,15 @@ function writeSambaPasswordFile(password) {
   return { tmpDir, passwordPath };
 }
 
+function privilegedDriveError(err, prefix) {
+  const payload = commandErrorPayload(err);
+  const scriptError = parseJsonLinesBestEffort(`${payload.stdout}\n${payload.stderr}`)
+    .reverse()
+    .find(item => item?.error)?.error;
+  const message = scriptError || payload.stderr || payload.stdout || payload.error || err.message;
+  return Object.assign(new Error(`${prefix}: ${message}`), { statusCode: 400, details: payload });
+}
+
 async function writeDriveSettings(body) {
   const mounts = await driveMounts();
   if (!String(body.mountPath || '').trim()) {
@@ -2136,11 +2163,26 @@ async function writeDriveSettings(body) {
     throw Object.assign(new Error('Diretorio do Drive precisa ficar dentro do disco selecionado.'), { statusCode: 400 });
   }
 
-  fs.mkdirSync(drivePath, { recursive: true, mode: 0o770 });
+  let localDirectoryReady = false;
   try {
+    fs.mkdirSync(drivePath, { recursive: true, mode: 0o770 });
     fs.chmodSync(drivePath, 0o770);
-  } catch {
-    // Some filesystems do not support chmod; the directory still remains usable.
+    localDirectoryReady = true;
+  } catch (err) {
+    if (!['EACCES', 'EPERM', 'ENOENT'].includes(err.code)) {
+      throw Object.assign(new Error(`Falha ao preparar pasta do Drive: ${err.message}`), { statusCode: 400 });
+    }
+  }
+  if (!localDirectoryReady) {
+    try {
+      await privilegedRun('/usr/local/sbin/tronsoftos-network', ['drive-prepare', drivePath], {
+        env: serviceAccountEnv(),
+        timeout: 60_000,
+        maxBuffer: 1024 * 1024
+      });
+    } catch (err) {
+      throw privilegedDriveError(err, 'Falha ao preparar pasta do Drive');
+    }
   }
 
   const settings = {
@@ -2168,10 +2210,13 @@ async function writeDriveSettings(body) {
         sambaUsername,
         secret?.passwordPath || ''
       ], {
+        env: serviceAccountEnv(),
         timeout: 120_000,
         maxBuffer: 1024 * 1024 * 2
       });
       samba = parseJsonLinesBestEffort(out.stdout).at(-1) || { ok: true };
+    } catch (err) {
+      throw privilegedDriveError(err, 'Falha ao configurar Samba');
     } finally {
       if (secret) fs.rmSync(secret.tmpDir, { recursive: true, force: true });
     }

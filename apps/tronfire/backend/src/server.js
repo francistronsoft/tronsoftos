@@ -1516,6 +1516,20 @@ function quarantineInvalidBackup(backupPath, manifestPath = null) {
   return moved;
 }
 
+async function withSoftTimeout(promise, ms, fallback) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise(resolve => {
+        timer = setTimeout(() => resolve(typeof fallback === 'function' ? fallback() : fallback), ms);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 app.get('/health', async () => ({ ok: true, app: 'TronFire', version: '0.1.0', deploymentMode, nodeRole }));
 
 app.post('/api/internal/auth/verify', async (req, reply) => {
@@ -1669,13 +1683,34 @@ app.get('/api/settings/google-drive/oauth/callback', async (req, reply) => {
 app.get('/api/preflight', { preHandler: requireAuth }, async () => runPreflight());
 
 app.get('/api/dashboard', { preHandler: requireAuth }, async (req) => {
-  const [dbs, backups, metrics] = await Promise.all([
+  const [dbsResult, backupsResult, metricsResult] = await Promise.allSettled([
     prisma.managedDatabase.findMany({ orderBy: [{ isPrimary: 'desc' }, { name: 'asc' }] }),
     prisma.backupJob.findMany({ orderBy: { createdAt: 'desc' }, take: 5, include: { database: true } }),
     loadDashboardMetrics(reqQueryRange(req))
   ]);
-  const indexHealth = await refreshInactiveIndexAlertsForActiveDatabases();
-  const activeAlerts = await prisma.alert.findMany({ where: { resolved: false }, orderBy: { createdAt: 'desc' }, take: 5 });
+  const dbs = dbsResult.status === 'fulfilled' ? dbsResult.value : [];
+  const backups = backupsResult.status === 'fulfilled' ? backupsResult.value : [];
+  const metrics = metricsResult.status === 'fulfilled' ? metricsResult.value : { latest: [], series: [], error: shellErrorText(metricsResult.reason) };
+  const indexHealth = await withSoftTimeout(
+    refreshInactiveIndexAlertsForActiveDatabases(),
+    8000,
+    () => dbs.map(db => ({
+      databaseId: db.id,
+      databaseName: db.name,
+      databaseAlias: db.alias,
+      total: null,
+      checkedAt: new Date().toISOString(),
+      error: 'Leitura de indices demorou demais; abra Bancos > Detalhes > Validar para consultar este banco.'
+    }))
+  ).catch(err => dbs.map(db => ({
+    databaseId: db.id,
+    databaseName: db.name,
+    databaseAlias: db.alias,
+    total: null,
+    checkedAt: new Date().toISOString(),
+    error: shellErrorText(err)
+  })));
+  const activeAlerts = await prisma.alert.findMany({ where: { resolved: false }, orderBy: { createdAt: 'desc' }, take: 5 }).catch(() => []);
   const productionDatabase = dbs.find(db => db.isPrimary) || dbs.find(db => db.type === 'PRODUCAO') || null;
   let productionConnections = null;
   if (productionDatabase) {
@@ -1863,7 +1898,7 @@ app.get('/api/services/firebird', { preHandler: requireOperator }, async () => {
   return { mode: 'container', container: firebirdContainer, status, details, logs, label: 'Container Firebird geral' };
 });
 
-app.post('/api/services/firebird/:action', { preHandler: requireAdmin }, async (req, reply) => {
+app.post('/api/services/firebird/:action', { preHandler: requireOperator }, async (req, reply) => {
   const action = String(req.params.action || '').toLowerCase();
   if (!['start', 'stop', 'restart'].includes(action)) return reply.code(400).send({ error: 'Acao invalida' });
   if (firebirdExecMode !== 'container') {
