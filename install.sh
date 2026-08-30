@@ -16,6 +16,8 @@ fi
 APP_DIR="${TRONSOFTOS_APP_DIR:-$SCRIPT_DIR}"
 USER_NAME="${TRONSOFTOS_USER:-tronsoftos}"
 GROUP_NAME="${TRONSOFTOS_GROUP:-tronsoftos}"
+TECHNICIAN_USER="${TRONSOFTOS_TECHNICIAN_USER:-tronsoft}"
+ENABLE_TECHNICIAN_SUDO="${TRONSOFTOS_ENABLE_TECHNICIAN_SUDO:-true}"
 
 prepare_frontend() {
   if [ ! -f "$APP_DIR/frontend/package.json" ]; then
@@ -231,6 +233,21 @@ ensure_ha_sync_ssh_user() {
   fi
 }
 
+ensure_technician_sudo() {
+  [ "$ENABLE_TECHNICIAN_SUDO" = "true" ] || return 0
+  [ -n "$TECHNICIAN_USER" ] || return 0
+  if ! id "$TECHNICIAN_USER" >/dev/null 2>&1; then
+    echo "Aviso: usuario tecnico '$TECHNICIAN_USER' nao existe neste host; sudo tecnico nao foi configurado." >&2
+    return 0
+  fi
+  usermod -aG sudo "$TECHNICIAN_USER" 2>/dev/null || true
+  cat > /etc/sudoers.d/90-tronsystem-technician <<EOF
+$TECHNICIAN_USER ALL=(ALL) NOPASSWD:ALL
+EOF
+  chmod 0440 /etc/sudoers.d/90-tronsystem-technician
+  visudo -cf /etc/sudoers.d/90-tronsystem-technician
+}
+
 run_with_retry() {
   local label="$1"
   shift
@@ -295,6 +312,7 @@ if ! id "$USER_NAME" >/dev/null 2>&1; then
 fi
 usermod -aG docker "$USER_NAME" || true
 usermod --home "$APP_DIR" --shell /bin/bash "$USER_NAME" || true
+ensure_technician_sudo
 
 mkdir -p "$APP_DIR" "$ENV_DIR" "$APP_DIR/state" "$APP_DIR/config" "$APP_DIR/logs" /opt/tronfire-storage
 mkdir -p \
