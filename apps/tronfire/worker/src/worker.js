@@ -37,6 +37,10 @@ const BACKUP_VALIDATION_MAX_AGE_HOURS = normalizePositiveMinutes(process.env.TRO
 const BACKUP_VALIDATION_FAILURE_COOLDOWN_HOURS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_FAILURE_COOLDOWN_HOURS, 12, 1, 72);
 const BACKUP_RESTORE_VALIDATION_WINDOW = String(process.env.TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW || '03:00-06:00').trim();
 const BACKUP_RESTORE_VALIDATION_WEEKDAY = String(process.env.TRONFIRE_BACKUP_RESTORE_VALIDATION_WEEKDAY || 'monday').trim();
+const FIREBIRD_SWEEP_ENABLED = !['0', 'false', 'off', 'disabled', 'never'].includes(String(process.env.TRONFIRE_FIREBIRD_SWEEP_ENABLED || 'true').toLowerCase());
+const FIREBIRD_SWEEP_CRON = String(process.env.TRONFIRE_FIREBIRD_SWEEP_CRON || '0 6 * * 2').trim();
+const FIREBIRD_SWEEP_TIMEZONE = String(process.env.TRONFIRE_FIREBIRD_SWEEP_TIMEZONE || process.env.TZ || 'America/Sao_Paulo').trim();
+const FIREBIRD_SWEEP_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_SWEEP_TIMEOUT_MINUTES, 180, 30, 720);
 const FIREBIRD_QUERY_TIMEOUT_SECONDS = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_QUERY_TIMEOUT_SECONDS, 20, 5, 600);
 const FIREBIRD_HEALTH_COOLDOWN_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_HEALTH_COOLDOWN_MINUTES, 10, 1, 120);
 const ORPHANED_BACKUP_MIN_AGE_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_ORPHANED_MIN_AGE_MINUTES, 5, 1, 60);
@@ -50,6 +54,7 @@ const RUNNING_BACKUP_TTL_MINUTES = Number.isFinite(CONFIGURED_RUNNING_BACKUP_TTL
 const RUNNING_BACKUP_TTL_MS = RUNNING_BACKUP_TTL_MINUTES * 60 * 1000;
 const BACKUP_TIMEOUT_MS = BACKUP_TIMEOUT_MINUTES * 60 * 1000;
 const BACKUP_VALIDATION_TIMEOUT_MS = BACKUP_VALIDATION_TIMEOUT_MINUTES * 60 * 1000;
+const FIREBIRD_SWEEP_TIMEOUT_MS = FIREBIRD_SWEEP_TIMEOUT_MINUTES * 60 * 1000;
 const ORPHANED_BACKUP_MIN_AGE_MS = ORPHANED_BACKUP_MIN_AGE_MINUTES * 60 * 1000;
 const FIREBIRD_PROCESS_NAMES = new Set(['fbguard', 'fbserver', 'fb_inet_server', 'fb_smp_server', 'firebird']);
 const METRIC_CONTAINERS = [
@@ -1636,6 +1641,88 @@ async function runAutomaticBackups() {
   }
 }
 
+async function runFirebirdSweep(db) {
+  if (!isPrimaryNode()) {
+    console.log(`[worker] sweep ignorado no no ${TRONFIRE_NODE_ROLE}: ${db.alias}`);
+    return;
+  }
+  if (haSyncActive()) {
+    console.log(`[worker] sweep adiado: HA sync em execucao para ${db.alias}`);
+    return;
+  }
+  if (backupRunning) {
+    console.log(`[worker] sweep adiado: backup em execucao para ${db.alias}`);
+    return;
+  }
+  const currentDb = await clearExpiredDatabaseOperation(db);
+  if (databaseOperationActive(currentDb)) {
+    console.log(`[worker] sweep ignorado: operacao ${currentDb.operationKind || 'desconhecida'} em andamento para ${db.alias}`);
+    return;
+  }
+  if (databaseInPostRestoreGrace(currentDb)) {
+    console.log(`[worker] sweep ignorado: ${db.alias} em periodo de estabilizacao apos restore`);
+    return;
+  }
+  if (databaseRoutineActive(db)) {
+    console.log(`[worker] sweep ignorado: rotina Firebird ja em andamento para ${db.alias}`);
+    return;
+  }
+  if (firebirdCircuitOpen(db)) {
+    console.log(`[worker] sweep adiado: Firebird degradado para ${db.alias}`);
+    return;
+  }
+
+  const stamp = backupStamp();
+  const logPath = `/firebird/logs/sweep_${db.alias}_${stamp}.log`;
+  const cmd = [
+    'set -e',
+    `db_file=${shQuote(db.filePath)}`,
+    `db=${shQuote(firebirdDbConnect(db.filePath))}`,
+    `log=${shQuote(logPath)}`,
+    'test -f "$db_file"',
+    `run_with_timeout() { ${firebirdTimeoutCommand(FIREBIRD_SWEEP_TIMEOUT_MINUTES)}; }`,
+    `echo "[sweep] inicio $(date -Iseconds)" > "$log"`,
+    `run_with_timeout ${shQuote(`${FIREBIRD_BIN}/gfix`)} -sweep -user SYSDBA -password ${shQuote(FIREBIRD_PASSWORD)} "$db" >> "$log" 2>&1`,
+    `run_with_timeout ${shQuote(`${FIREBIRD_BIN}/gstat`)} -h "$db_file" >> "$log" 2>&1`,
+    `echo "[sweep] fim $(date -Iseconds)" >> "$log"`
+  ].join('; ');
+
+  try {
+    const result = await withDatabaseRoutineLock(db, 'weekly-sweep', () => dockerExec(['sh', '-lc', cmd], FIREBIRD_SWEEP_TIMEOUT_MS + 60_000));
+    if (!result) return;
+    await resolveActiveAlertsByType(`FIREBIRD_SWEEP_FAILED_${db.alias}`);
+    console.log(`[worker] sweep OK: ${db.alias}`);
+  } catch (err) {
+    await createAlertOnce(`FIREBIRD_SWEEP_FAILED_${db.alias}`, 'WARNING', `Sweep Firebird falhou para ${db.name}: ${err.message}`);
+    console.error(`[worker] sweep erro: ${db.alias}`, err.message);
+  }
+}
+
+async function runScheduledSweeps() {
+  if (!FIREBIRD_SWEEP_ENABLED) return;
+  if (!isPrimaryNode()) return;
+  if (backupRunning) return;
+  if (haSyncActive()) {
+    console.log('[worker] sweep semanal adiado: HA sync em execucao');
+    return;
+  }
+  const dbs = await prisma.managedDatabase.findMany({
+    where: { type: { not: 'ARQUIVADO' } },
+    orderBy: [{ isPrimary: 'desc' }, { updatedAt: 'asc' }]
+  });
+  for (const db of dbs) {
+    if (haSyncActive()) {
+      console.log('[worker] sweep semanal interrompido antes de iniciar novo banco: HA sync em execucao');
+      break;
+    }
+    await markOrphanedRunningBackupsFailed(db.id, 'before-weekly-sweep');
+    await markStaleRunningBackupsFailed(db.id, 'before-weekly-sweep');
+    const runningBackup = await prisma.backupJob.count({ where: { databaseId: db.id, status: 'RUNNING' } });
+    if (runningBackup > 0) continue;
+    await runFirebirdSweep(db);
+  }
+}
+
 async function checkDisk() {
   try {
     const { stdout } = await dockerExec(['sh','-lc',"df -P /firebird/data | awk 'NR==2 {print $5}' | tr -d '%'"]);
@@ -1710,6 +1797,17 @@ cron.schedule('* * * * *', async () => {
 cron.schedule('* * * * *', async () => {
   await collectFirebirdSessionHistory();
 });
+
+if (FIREBIRD_SWEEP_ENABLED) {
+  if (cron.validate(FIREBIRD_SWEEP_CRON)) {
+    cron.schedule(FIREBIRD_SWEEP_CRON, async () => {
+      console.log(`[worker] rotina de sweep Firebird semanal (${FIREBIRD_SWEEP_CRON}, ${FIREBIRD_SWEEP_TIMEZONE})`);
+      await runScheduledSweeps();
+    }, { timezone: FIREBIRD_SWEEP_TIMEZONE });
+  } else {
+    console.error(`[worker] cron de sweep Firebird invalido: ${FIREBIRD_SWEEP_CRON}`);
+  }
+}
 
 console.log('[worker] TronFire worker iniciado');
 setTimeout(() => {
