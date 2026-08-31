@@ -162,20 +162,30 @@ env_value() {
   grep "^$key=" "$file" | tail -n1 | cut -d= -f2-
 }
 
+running_service_env_value() {
+  local key="$1"
+  local pid=""
+  pid="$(systemctl show -p MainPID --value tronsoftos 2>/dev/null || true)"
+  [ -n "$pid" ] && [ "$pid" != "0" ] && [ -r "/proc/$pid/environ" ] || return 0
+  tr '\0' '\n' < "/proc/$pid/environ" | grep "^$key=" | tail -n1 | cut -d= -f2-
+}
+
 reconcile_internal_token_files() {
   local tronfire_env="$APP_DIR/apps/tronfire/.env"
   local cluster_secrets="$APP_DIR/state/cluster-secrets.env"
   local effective_token=""
   local process_token=""
+  local service_token=""
   local env_token=""
   local tronfire_token=""
   local cluster_token=""
 
   process_token="${TRONSOFTOS_INTERNAL_TOKEN:-}"
+  service_token="$(running_service_env_value "TRONSOFTOS_INTERNAL_TOKEN")"
   env_token="$(env_value "$ENV_FILE" "TRONSOFTOS_INTERNAL_TOKEN")"
   tronfire_token="$(env_value "$tronfire_env" "TRONSOFTOS_INTERNAL_TOKEN")"
   cluster_token="$(env_value "$cluster_secrets" "TRONSOFTOS_INTERNAL_TOKEN")"
-  effective_token="${env_token:-${process_token:-${tronfire_token:-$cluster_token}}}"
+  effective_token="${env_token:-${process_token:-${service_token:-${tronfire_token:-$cluster_token}}}}"
   [ -n "$effective_token" ] || return 0
   export TRONSOFTOS_INTERNAL_TOKEN="$effective_token"
 
