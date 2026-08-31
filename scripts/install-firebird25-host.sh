@@ -264,8 +264,10 @@ force_firebird_installer_masterkey() {
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
+firebird_was_ready=false
 
 if firebird_host_ready; then
+  firebird_was_ready=true
   echo "Firebird host ja instalado em /usr/local/firebird; conferindo configuracao."
 else
   stop_existing_firebird
@@ -327,6 +329,10 @@ systemctl daemon-reload
 systemctl enable --now firebird.service
 tune_firebird_host
 configure_sysdba_password
-systemctl restart firebird.service
+if [ "$firebird_was_ready" = "true" ] && [ "${TRONSOFTOS_RESTART_FIREBIRD_ON_UPDATE:-false}" != "true" ]; then
+  echo "Firebird host ja estava ativo; restart preservado durante a atualizacao."
+else
+  systemctl restart firebird.service
+fi
 
 echo "Firebird 2.5.9 instalado no host em /usr/local/firebird"
