@@ -137,6 +137,22 @@ ask_secret() {
   fi
 }
 
+env_value() {
+  local file="$1"
+  local key="$2"
+  [ -f "$file" ] || return 0
+  grep "^$key=" "$file" | tail -n1 | cut -d= -f2-
+}
+
+existing_secret_value() {
+  local key="$1"
+  local value=""
+  value="$(env_value "$TRONSOFTOS_ENV" "$key")"
+  value="${value:-$(env_value "$TRONFIRE_ENV" "$key")}"
+  value="${value:-$(env_value "$CLUSTER_SECRETS" "$key")}"
+  printf '%s' "$value"
+}
+
 yes_no() {
   local label="$1"
   local default="${2:-n}"
@@ -335,8 +351,8 @@ CLUSTER_ID="$(ask "ID do cluster/cliente" "$(echo "$NODE_NAME" | tr '[:upper:]' 
 NODE_ID="$(new_uuid)"
 INSTALL_ID="$(new_uuid)"
 
-SESSION_SECRET=""
-INTERNAL_TOKEN=""
+SESSION_SECRET="$(existing_secret_value "SESSION_SECRET")"
+INTERNAL_TOKEN="$(existing_secret_value "TRONSOFTOS_INTERNAL_TOKEN")"
 
 DEFAULT_IFACE="$(detect_default_iface)"
 DEFAULT_IPV4_CIDR="$(detect_default_ipv4_cidr "$DEFAULT_IFACE")"

@@ -166,15 +166,18 @@ reconcile_internal_token_files() {
   local tronfire_env="$APP_DIR/apps/tronfire/.env"
   local cluster_secrets="$APP_DIR/state/cluster-secrets.env"
   local effective_token=""
+  local process_token=""
   local env_token=""
   local tronfire_token=""
   local cluster_token=""
 
+  process_token="${TRONSOFTOS_INTERNAL_TOKEN:-}"
   env_token="$(env_value "$ENV_FILE" "TRONSOFTOS_INTERNAL_TOKEN")"
   tronfire_token="$(env_value "$tronfire_env" "TRONSOFTOS_INTERNAL_TOKEN")"
   cluster_token="$(env_value "$cluster_secrets" "TRONSOFTOS_INTERNAL_TOKEN")"
-  effective_token="${cluster_token:-${tronfire_token:-$env_token}}"
+  effective_token="${env_token:-${process_token:-${tronfire_token:-$cluster_token}}}"
   [ -n "$effective_token" ] || return 0
+  export TRONSOFTOS_INTERNAL_TOKEN="$effective_token"
 
   if [ ! -f "$cluster_secrets" ]; then
     install -d -m 0700 -o "$USER_NAME" -g "$GROUP_NAME" "$APP_DIR/state"
