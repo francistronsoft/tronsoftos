@@ -158,16 +158,22 @@ set_env_value() {
 env_value() {
   local file="$1"
   local key="$2"
+  local line=""
   [ -f "$file" ] || return 0
-  grep "^$key=" "$file" | tail -n1 | cut -d= -f2-
+  line="$(grep "^$key=" "$file" | tail -n1 || true)"
+  [ -n "$line" ] || return 0
+  printf '%s\n' "${line#*=}"
 }
 
 running_service_env_value() {
   local key="$1"
   local pid=""
+  local line=""
   pid="$(systemctl show -p MainPID --value tronsoftos 2>/dev/null || true)"
   [ -n "$pid" ] && [ "$pid" != "0" ] && [ -r "/proc/$pid/environ" ] || return 0
-  tr '\0' '\n' < "/proc/$pid/environ" | grep "^$key=" | tail -n1 | cut -d= -f2-
+  line="$(tr '\0' '\n' < "/proc/$pid/environ" | grep "^$key=" | tail -n1 || true)"
+  [ -n "$line" ] || return 0
+  printf '%s\n' "${line#*=}"
 }
 
 reconcile_internal_token_files() {
