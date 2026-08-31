@@ -339,7 +339,7 @@ async function queryFirebirdSessions(db) {
     'QUIT;'
   ].join('\n');
   const cmd = [
-    `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; }`,
+    `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; };`,
     `printf %s ${shQuote(`${sql}\n`)}`,
     '|',
     'run_with_timeout',
@@ -1402,7 +1402,7 @@ async function validateBackupRestore(db, backupPath, logPath, stamp) {
     'cleanup_validation() { rm -f "$restore"; if [ "${restore_src:-$backup}" != "$backup" ]; then rm -f "$restore_src" || true; fi; }',
     'trap cleanup_validation EXIT',
     'case "$backup" in *.gz) restore_src="$(mktemp /tmp/tronfire_backup_validate_XXXXXX.gbk)" || fail 81 "Falha ao criar arquivo temporario para validacao"; gzip -dc "$backup" > "$restore_src" || { rm -f "$restore_src"; fail 81 "Falha ao descompactar backup para validacao"; } ;; esac',
-    `run_with_timeout() { ${firebirdTimeoutCommand(BACKUP_VALIDATION_TIMEOUT_MINUTES)}; }`,
+    `run_with_timeout() { ${firebirdTimeoutCommand(BACKUP_VALIDATION_TIMEOUT_MINUTES)}; };`,
     `run_with_timeout ${shQuote(`${FIREBIRD_BIN}/gbak`)} -c -user SYSDBA -password ${shQuote(FIREBIRD_PASSWORD)} "$restore_src" ${shQuote(firebirdCreateTarget(tempRestorePath))} >> "$log" 2>&1 || fail 82 "Falha ao restaurar backup para validacao"`,
     'if [ "$restore_src" != "$backup" ]; then rm -f "$restore_src" || true; fi',
     'test -f "$restore" || fail 83 "Restore de validacao terminou sem arquivo restaurado"',
@@ -1486,7 +1486,7 @@ async function runBackup(db, reason = 'AUTO') {
       data: { databaseId: db.id, status: 'RUNNING', startedAt: attemptStartedAt, backupPath, manifestPath, logPath }
     });
     const cmd = [
-      `run_with_timeout() { ${firebirdTimeoutCommand(BACKUP_TIMEOUT_MINUTES)}; }`,
+      `run_with_timeout() { ${firebirdTimeoutCommand(BACKUP_TIMEOUT_MINUTES)}; };`,
       'run_with_timeout',
       `${shQuote(`${FIREBIRD_BIN}/gbak`)}`,
       '-b -v',
@@ -1680,12 +1680,12 @@ async function runFirebirdSweep(db) {
     `db=${shQuote(firebirdDbConnect(db.filePath))}`,
     `log=${shQuote(logPath)}`,
     'test -f "$db_file"',
-    `run_with_timeout() { ${firebirdTimeoutCommand(FIREBIRD_SWEEP_TIMEOUT_MINUTES)}; }`,
+    `run_with_timeout() { ${firebirdTimeoutCommand(FIREBIRD_SWEEP_TIMEOUT_MINUTES)}; };`,
     `echo "[sweep] inicio $(date -Iseconds)" > "$log"`,
     `run_with_timeout ${shQuote(`${FIREBIRD_BIN}/gfix`)} -sweep -user SYSDBA -password ${shQuote(FIREBIRD_PASSWORD)} "$db" >> "$log" 2>&1`,
     `run_with_timeout ${shQuote(`${FIREBIRD_BIN}/gstat`)} -h "$db_file" >> "$log" 2>&1`,
     `echo "[sweep] fim $(date -Iseconds)" >> "$log"`
-  ].join('; ');
+  ].join('\n');
 
   try {
     const result = await withDatabaseRoutineLock(db, 'weekly-sweep', () => dockerExec(['sh', '-lc', cmd], FIREBIRD_SWEEP_TIMEOUT_MS + 60_000));
@@ -1753,10 +1753,10 @@ async function checkDatabases() {
         `db=${shQuote(firebirdDbConnect(db.filePath))}`,
         `log=${shQuote(logPath)}`,
         'test -f "$db_file"',
-        `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; }`,
+        `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; };`,
         `printf 'select 1 from rdb$database;\\nquit;\\n' | run_with_timeout ${shQuote(`${FIREBIRD_BIN}/isql`)} -user SYSDBA -password ${shQuote(FIREBIRD_PASSWORD)} "$db" > "$log" 2>&1`,
         `run_with_timeout ${shQuote(`${FIREBIRD_BIN}/gstat`)} -h "$db_file" >> "$log" 2>&1`
-      ].join('; ');
+      ].join('\n');
       const checkResult = await withDatabaseRoutineLock(db, 'database-check', () => dockerExec(['sh','-lc', cmd], (FIREBIRD_QUERY_TIMEOUT_SECONDS * 2 + 20) * 1000));
       if (!checkResult) continue;
       await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ONLINE', lastCheckAt: new Date() } });
