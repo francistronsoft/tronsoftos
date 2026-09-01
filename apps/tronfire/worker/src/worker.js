@@ -562,17 +562,22 @@ function readHostCpuSample() {
 }
 
 function readHostTemperatureCelsius() {
-  const values = [];
+  const candidates = [];
+  const addCandidate = (value, preferred = false) => {
+    if (!Number.isFinite(value)) return;
+    const celsius = value > 1000 ? value / 1000 : value;
+    if (celsius >= 0 && celsius <= 115) candidates.push({ value: celsius, preferred });
+  };
   try {
     const thermalRoot = `${HOST_SYS_ROOT}/class/thermal`;
     for (const item of fs.readdirSync(thermalRoot, { withFileTypes: true })) {
       if (!item.isDirectory() || !item.name.startsWith('thermal_zone')) continue;
       const tempPath = `${thermalRoot}/${item.name}/temp`;
       if (!fs.existsSync(tempPath)) continue;
+      const typePath = `${thermalRoot}/${item.name}/type`;
+      const type = fs.existsSync(typePath) ? fs.readFileSync(typePath, 'utf8').trim().toLowerCase() : '';
       const raw = Number(fs.readFileSync(tempPath, 'utf8').trim());
-      if (!Number.isFinite(raw)) continue;
-      const celsius = raw > 1000 ? raw / 1000 : raw;
-      if (celsius >= 0 && celsius <= 130) values.push(celsius);
+      addCandidate(raw, /cpu|core|pkg|package|x86|acpi/.test(type));
     }
   } catch {
     // Some VMs and hosts do not expose thermal sensors to containers.
@@ -584,15 +589,20 @@ function readHostTemperatureCelsius() {
       const deviceRoot = `${hwmonRoot}/${item.name}`;
       for (const fileName of fs.readdirSync(deviceRoot)) {
         if (!/^temp\d+_input$/.test(fileName)) continue;
+        const sensorName = fileName.replace(/_input$/, '');
+        const labelPath = `${deviceRoot}/${sensorName}_label`;
+        const label = fs.existsSync(labelPath) ? fs.readFileSync(labelPath, 'utf8').trim().toLowerCase() : '';
+        const namePath = `${deviceRoot}/name`;
+        const name = fs.existsSync(namePath) ? fs.readFileSync(namePath, 'utf8').trim().toLowerCase() : '';
         const raw = Number(fs.readFileSync(`${deviceRoot}/${fileName}`, 'utf8').trim());
-        if (!Number.isFinite(raw)) continue;
-        const celsius = raw > 1000 ? raw / 1000 : raw;
-        if (celsius >= 0 && celsius <= 130) values.push(celsius);
+        addCandidate(raw, /cpu|core|pkg|package|x86|k10temp|coretemp|acpi/.test(`${label} ${name}`));
       }
     }
   } catch {
     // hwmon is optional and commonly absent inside virtual machines.
   }
+  const preferred = candidates.filter(candidate => candidate.preferred).map(candidate => candidate.value);
+  const values = preferred.length ? preferred : candidates.map(candidate => candidate.value);
   return values.length ? Math.round(Math.max(...values) * 10) / 10 : null;
 }
 
@@ -602,7 +612,7 @@ async function readSensorsTemperatureCelsius() {
     const values = [];
     for (const match of stdout.matchAll(/temp\d+_input:\s*([+-]?\d+(?:\.\d+)?)/g)) {
       const celsius = Number(match[1]);
-      if (Number.isFinite(celsius) && celsius >= 0 && celsius <= 130) values.push(celsius);
+      if (Number.isFinite(celsius) && celsius >= 0 && celsius <= 115) values.push(celsius);
     }
     return values.length ? Math.round(Math.max(...values) * 10) / 10 : null;
   } catch {
