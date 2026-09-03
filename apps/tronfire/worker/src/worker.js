@@ -1088,7 +1088,11 @@ async function collectHostHardwareMetrics() {
     if (temperatureCelsius !== null && temperatureCelsius >= 85) {
       await createAlertOnce('HOST_TEMPERATURE_CRITICAL', 'CRITICAL', `Host com temperatura critica: ${temperatureCelsius.toFixed(1)} C`);
     } else if (temperatureCelsius !== null && temperatureCelsius >= 70) {
+      await resolveActiveAlertsByType('HOST_TEMPERATURE_CRITICAL');
       await createAlertOnce('HOST_TEMPERATURE_WARNING', 'WARNING', `Host com temperatura em atencao: ${temperatureCelsius.toFixed(1)} C`);
+    } else if (temperatureCelsius !== null) {
+      await resolveActiveAlertsByType('HOST_TEMPERATURE_CRITICAL');
+      await resolveActiveAlertsByType('HOST_TEMPERATURE_WARNING');
     }
   } catch (err) {
     console.error('[worker] host hardware metrics error', err.message);
