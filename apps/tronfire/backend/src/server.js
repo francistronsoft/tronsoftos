@@ -2900,24 +2900,33 @@ app.post('/api/ha/standby/promote', async (req, reply) => {
     const cmd = [
       'set -e',
       `prod=${shQuote(db.filePath)}`,
-      `prod_conn=${shQuote(firebirdDbConnect(db.filePath))}`,
       `standby=${shQuote(db.standbyPath)}`,
       `backup_current=${shQuote(backupCurrent)}`,
       `log=${shQuote(logPath)}`,
+      'fail() { code="$1"; shift; echo "$*" | tee -a "$log"; exit "$code"; }',
       'mkdir -p /firebird/data /firebird/restore-work /firebird/logs',
-      'test -f "$standby"',
+      'test -f "$standby" || fail 70 "Banco standby nao encontrado para promocao: $standby"',
+      'firebird_was_active=0',
+      'if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet firebird.service; then firebird_was_active=1; systemctl stop firebird.service || fail 71 "Nao foi possivel parar Firebird local antes da promocao"; fi',
+      'cleanup() { if [ "$firebird_was_active" = "1" ]; then systemctl start firebird.service >/dev/null 2>&1 || true; fi; }',
+      'trap cleanup EXIT',
       'if [ -f "$prod" ]; then mv "$prod" "$backup_current"; fi',
-      'mv "$standby" "$prod"',
-      'chmod 0666 "$prod"',
-      `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gfix`)} -mode read_write -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} "$prod_conn" >> "$log" 2>&1 || true`,
-      `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$prod" >> "$log" 2>&1`
+      'mv "$standby" "$prod" || fail 72 "Nao foi possivel mover banco standby para producao: $standby -> $prod"',
+      'chmod 0666 "$prod" || fail 73 "Nao foi possivel ajustar permissao do banco promovido"',
+      `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gfix`)} -mode read_write -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} "$prod" >> "$log" 2>&1 || fail 74 "Falha ao colocar banco promovido em read_write"`,
+      `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$prod" >> "$log" 2>&1 || fail 75 "Falha ao validar banco promovido com gstat"`,
+      `attrs="$(${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$prod" | awk '/Attributes/ {print; exit}')"`,
+      'echo "$attrs" >> "$log"',
+      'echo "$attrs" | grep -qi "read only" && fail 76 "Banco promovido ainda esta read_only; VIP/producao nao deve ser liberado"',
+      'cleanup',
+      'trap - EXIT'
     ].join('; ');
     await runFirebirdShellScript(cmd, 1000 * 60 * 20);
     await prisma.managedDatabase.update({
       where: { id: db.id },
       data: { standbyStatus: 'PROMOTED', status: 'ONLINE', lastCheckAt: new Date(), accessMode: 'READ_WRITE' }
     });
-    promoted.push({ alias: db.alias, productionPath: db.filePath, previousProductionBackup: backupCurrent, logPath });
+    promoted.push({ alias: db.alias, productionPath: db.filePath, previousProductionBackup: backupCurrent, accessMode: 'READ_WRITE', logPath });
   }
   await syncFirebirdAliases();
   await audit(req, 'HA_STANDBY_PROMOTED', { entityType: 'cluster', entityId: lock.cluster || 'cluster', details: { lock, promoted } });

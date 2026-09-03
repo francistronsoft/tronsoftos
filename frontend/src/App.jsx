@@ -800,7 +800,7 @@ function ClusterView({ dashboard }) {
     vipCidr: cluster.vipCidr || (cluster.vip ? `${cluster.vip}/24` : ''),
     routerId: Number(cluster.keepalived?.routerId || 51),
     authPass: '',
-    nodeState: cluster.keepalived?.nodeState || (values.nodeRole === 'primary' ? 'MASTER' : 'BACKUP'),
+    nodeState: cluster.keepalived?.nodeState || 'BACKUP',
     priority: Number(cluster.keepalived?.priority || (values.nodeRole === 'primary' ? 150 : 100))
   };
   const saveMutation = useMutation({
@@ -1300,7 +1300,7 @@ function ClusterView({ dashboard }) {
                       vipCidr: pairingImportMutation.data.keepalived.vipCidr,
                       routerId: pairingImportMutation.data.keepalived.routerId,
                       authPass: '',
-                      nodeState: values.nodeRole === 'primary' ? 'MASTER' : 'BACKUP',
+                      nodeState: 'BACKUP',
                       priority: values.nodeRole === 'primary' ? 150 : 100
                     })}
                     className="inline-flex items-center justify-center gap-2 rounded-md bg-green-700 px-3 py-2 text-sm font-medium text-white hover:bg-green-800 disabled:opacity-50"

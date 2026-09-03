@@ -293,6 +293,7 @@ apply_vip() {
   [[ "$auth_pass" =~ ^[A-Za-z0-9_.:-]{6,32}$ ]] || fail "Senha VRRP invalida; use 6 a 32 caracteres simples"
 
   local vip="${vip_cidr%%/*}"
+  local vrrp_state="BACKUP"
   local tronsoftos_env="/etc/tronsoftos/tronsoftos.env"
   local check_source="$app_dir/infra/keepalived/check-tronsoftos.sh"
   local check_target="/etc/keepalived/check-tronsoftos.sh"
@@ -313,10 +314,11 @@ vrrp_script chk_tronsoftos {
 }
 
 vrrp_instance TRONSOFTOS_VIP {
-    state $node_state
+    state $vrrp_state
     interface $iface
     virtual_router_id $router_id
     priority $priority
+    nopreempt
     advert_int 1
 
     authentication {
@@ -340,7 +342,7 @@ EOF
   set_env_value "$tronsoftos_env" "HA_VIP_CIDR" "$vip_cidr"
   set_env_value "$tronsoftos_env" "HA_ROUTER_ID" "$router_id"
   set_env_value "$tronsoftos_env" "HA_AUTH_PASS" "$auth_pass"
-  set_env_value "$tronsoftos_env" "HA_NODE_ROLE" "$node_state"
+  set_env_value "$tronsoftos_env" "HA_NODE_ROLE" "$vrrp_state"
   set_env_value "$tronsoftos_env" "HA_PRIORITY" "$priority"
 
   sync_service_vip_envs "$app_dir" "$vip"
@@ -348,8 +350,8 @@ EOF
   systemctl enable keepalived.service >/dev/null 2>&1 || true
   systemctl restart keepalived.service
 
-  printf '{"ok":true,"interface":"%s","vip":"%s","vipCidr":"%s","routerId":%s,"nodeState":"%s","priority":%s,"config":"%s"}\n' \
-    "$(json_escape "$iface")" "$(json_escape "$vip")" "$(json_escape "$vip_cidr")" "$router_id" "$(json_escape "$node_state")" "$priority" "$(json_escape "$conf_target")"
+  printf '{"ok":true,"interface":"%s","vip":"%s","vipCidr":"%s","routerId":%s,"nodeState":"%s","requestedNodeState":"%s","priority":%s,"preempt":false,"config":"%s"}\n' \
+    "$(json_escape "$iface")" "$(json_escape "$vip")" "$(json_escape "$vip_cidr")" "$router_id" "$(json_escape "$vrrp_state")" "$(json_escape "$node_state")" "$priority" "$(json_escape "$conf_target")"
 }
 
 apply_static() {
@@ -456,7 +458,7 @@ set_node_role() {
   set_env_value "$tronfire_env" "TRONFIRE_NODE_ROLE" "$role"
 
   if [ "$role" = "primary" ]; then
-    set_env_value "$tronsoftos_env" "HA_NODE_ROLE" "MASTER"
+    set_env_value "$tronsoftos_env" "HA_NODE_ROLE" "BACKUP"
     set_env_value "$tronsoftos_env" "HA_PRIORITY" "150"
   elif [ "$role" = "standby" ]; then
     set_env_value "$tronsoftos_env" "HA_NODE_ROLE" "BACKUP"
