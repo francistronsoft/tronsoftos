@@ -984,6 +984,13 @@ function ClusterView({ dashboard }) {
     { id: 'identity', label: 'Identidade', icon: ShieldCheck }
   ];
   const activeClusterTab = clusterTabs.some(item => item.id === clusterTab) ? clusterTab : 'overview';
+  const localActivationIsPrimary = values.nodeRole === 'primary';
+  const localActivationLabel = localActivationIsPrimary ? 'Confirmar primary ativo neste servidor' : 'Promover standby para primary';
+  const localActivationReason = lockValues.reason || (localActivationIsPrimary ? 'confirmacao manual do primary local pelo TronSoftOS' : 'promocao manual confirmada no TronSoftOS');
+  const localActivationHelp = localActivationIsPrimary
+    ? 'Use apos boot, atualizacao ou failback para confirmar que este servidor continua sendo o primary e pode manter o VIP/producao.'
+    : 'Use somente quando o primary estiver indisponivel e este standby estiver validado para assumir o VIP/producao.';
+  const localActivationSuccess = localActivationIsPrimary ? 'Primary local confirmado.' : 'Promocao/ativacao registrada.';
   const identityForm = (
     <Card title="Identidade do no" icon={ShieldCheck}>
       <form
@@ -1498,16 +1505,17 @@ function ClusterView({ dashboard }) {
         </div>
         {guard.returnedFormerPrimary ? <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">Este nó parece ser um antigo principal retornando. Ele fica bloqueado para VIP/producao ate ressincronizar.</div> : null}
         <div className="mt-4 flex flex-wrap items-center gap-3">
-          <button type="button" disabled={activateMutation.isPending || (!guard.canPromote && values.deploymentMode === 'ha' && values.nodeRole === 'standby')} onClick={() => activateMutation.mutate(lockValues.reason || 'ativacao manual confirmada no TronSoftOS')} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
+          <button type="button" disabled={activateMutation.isPending || (!guard.canPromote && values.deploymentMode === 'ha' && values.nodeRole === 'standby')} onClick={() => activateMutation.mutate(localActivationReason)} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
             <ShieldCheck className="h-4 w-4" />
-            Promover/ativar este no
+            {localActivationLabel}
           </button>
           <button type="button" disabled={recoveryMutation.isPending} onClick={() => recoveryMutation.mutate(lockValues.reason || 'nó retornou e sera ressincronizado antes de voltar ao cluster')} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
             <XCircle className="h-4 w-4" />
             Colocar em recuperacao
           </button>
         </div>
-        {activateMutation.isSuccess || recoveryMutation.isSuccess ? <div className="mt-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Protecao atualizada.</div> : null}
+        <div className="mt-2 text-xs text-slate-500">{localActivationHelp}</div>
+        {activateMutation.isSuccess || recoveryMutation.isSuccess ? <div className="mt-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">{activateMutation.isSuccess ? localActivationSuccess : 'No local colocado em recuperacao.'}</div> : null}
         {activateMutation.isError || recoveryMutation.isError ? <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{activateMutation.error?.message || recoveryMutation.error?.message}</div> : null}
       </Card>
         </div>
