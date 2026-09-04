@@ -408,7 +408,7 @@ function clusterActivation() {
   return readJson(clusterActivationPath, null);
 }
 
-function writeClusterActivation(identity, lock, reason = '') {
+function writeClusterActivation(identity, lock, reason = '', details = {}) {
   ensureStateDir();
   const activation = {
     cluster: identity.clusterId,
@@ -417,6 +417,7 @@ function writeClusterActivation(identity, lock, reason = '') {
     activeNode: lock.active_node || identity.nodeName,
     bootId: currentBootId(),
     reason: String(reason || lock.reason || '').trim(),
+    ...details,
     updatedAt: new Date().toISOString()
   };
   fs.writeFileSync(clusterActivationPath, `${JSON.stringify(activation, null, 2)}\n`, { mode: 0o600 });
@@ -518,6 +519,7 @@ async function activateLocalNode(body = {}) {
   const identity = nodeIdentity();
   const lock = clusterLock();
   const reason = String(body.reason || lock.reason || '').trim();
+  const promotedFromStandby = identity.deploymentMode === 'ha' && identity.nodeRole === 'standby';
   const activeNode = String(lock.active_node || '').trim();
   if (identity.deploymentMode === 'ha') {
     if (identity.nodeRole === 'recovery') throw new Error('nó em recuperação não pode ser ativado sem trocar o papel primeiro');
@@ -548,7 +550,7 @@ async function activateLocalNode(body = {}) {
     reason
   });
   const activation = nextIdentity.deploymentMode === 'ha' && nextIdentity.nodeRole === 'primary'
-    ? writeClusterActivation(nextIdentity, nextLock, reason)
+    ? writeClusterActivation(nextIdentity, nextLock, reason, { promotedFromStandby })
     : null;
   appendEvent('CLUSTER_LOCAL_NODE_ACTIVATED', {
     cluster: nextIdentity.clusterId,
@@ -4475,6 +4477,14 @@ async function peerClusterGuard(host) {
 async function maybeDemoteReturnedPrimary() {
   const identity = nodeIdentity();
   if (identity.deploymentMode !== 'ha' || identity.nodeRole !== 'primary') return false;
+
+  const activation = clusterActivation();
+  if (activation?.promotedFromStandby === true || /failover|promov/i.test(String(activation?.reason || ''))) {
+    return false;
+  }
+
+  const localVip = await localVipPresence(process.env.HA_VIP || '');
+  if (localVip.present === true) return false;
 
   const settings = publicHaSyncSettings();
   if (!settings.standbyHost) return false;
