@@ -451,6 +451,10 @@ function localActivationValid(identity, activeNode) {
   return { valid, activation, bootId };
 }
 
+function normalizeNodeName(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
 function blockClusterPromotion(reason = '') {
   return writeClusterLock({ ...clusterLock(), allow_promotion: false, reason: String(reason || 'promocao bloqueada').trim() });
 }
@@ -557,12 +561,14 @@ async function activateLocalNode(body = {}) {
   return { identity: nextIdentity, lock: nextLock, activation, guard: clusterGuard(), tronfirePromotion, roleEnv, tronfireRestart };
 }
 
-function putLocalNodeInRecovery(body = {}) {
+async function putLocalNodeInRecovery(body = {}) {
+  const roleEnv = await setNodeRoleEnv('recovery');
   const identity = writeNodeIdentity({ ...nodeIdentity(), nodeRole: 'recovery' });
   clearClusterActivation(String(body.reason || 'no colocado em recovery').trim());
   const lock = blockClusterPromotion(String(body.reason || 'nó colocado em recuperação para evitar duplo primary').trim());
-  appendEvent('CLUSTER_NODE_RECOVERY_MODE', { cluster: identity.clusterId, nodeName: identity.nodeName, reason: lock.reason });
-  return { identity, lock, guard: clusterGuard() };
+  const tronfireRestart = await restartTronfireBackend();
+  appendEvent('CLUSTER_NODE_RECOVERY_MODE', { cluster: identity.clusterId, nodeName: identity.nodeName, reason: lock.reason, tronfireRestart });
+  return { identity, lock, guard: clusterGuard(), roleEnv, tronfireRestart };
 }
 
 function ipv4ToInt(ip) {
@@ -4435,8 +4441,63 @@ async function primaryHealthOk(url) {
   }
 }
 
+function haPeerBaseUrl(host) {
+  const value = String(host || '').trim().replace(/\/+$/, '');
+  if (!value) return '';
+  return /^https?:\/\//i.test(value) ? value : `http://${value}:${port}`;
+}
+
+async function peerClusterGuard(host) {
+  const baseUrl = haPeerBaseUrl(host);
+  if (!baseUrl) return null;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2500);
+    const response = await fetch(new URL('/api/cluster/guard', baseUrl), { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!response.ok) return null;
+    return response.json();
+  } catch {
+    return null;
+  }
+}
+
+async function maybeDemoteReturnedPrimary() {
+  const identity = nodeIdentity();
+  if (identity.deploymentMode !== 'ha' || identity.nodeRole !== 'primary') return false;
+
+  const settings = publicHaSyncSettings();
+  if (!settings.standbyHost) return false;
+
+  const peerGuard = await peerClusterGuard(settings.standbyHost);
+  const peerActiveNode = normalizeNodeName(peerGuard?.activeNode);
+  const thisNode = normalizeNodeName(identity.nodeName);
+  const sameCluster = !peerGuard?.cluster || !identity.clusterId || peerGuard.cluster === identity.clusterId;
+  const peerServingAnotherNode = sameCluster
+    && peerGuard?.canServeProduction === true
+    && peerActiveNode
+    && peerActiveNode !== thisNode;
+
+  if (!peerServingAnotherNode) return false;
+
+  appendEvent('HA_RETURNED_PRIMARY_DETECTED_ACTIVE_PEER', {
+    peerHost: settings.standbyHost,
+    peerActiveNode: peerGuard.activeNode,
+    peerStatus: peerGuard.status
+  });
+  await putLocalNodeInRecovery({
+    reason: `primary anterior voltou, mas o ativo atual e ${peerGuard.activeNode}`
+  });
+  return true;
+}
+
 async function maybeAutoFailover() {
   const identity = nodeIdentity();
+  if (await maybeDemoteReturnedPrimary()) {
+    primaryDownSince = 0;
+    return;
+  }
+
   const settings = publicHaFailoverSettings();
   if (identity.deploymentMode !== 'ha' || identity.nodeRole !== 'standby' || !settings.primaryHealthUrl) {
     primaryDownSince = 0;
@@ -4503,6 +4564,7 @@ function startHaFailoverWatchdog() {
     maybeAutoFailover().catch(err => appendEvent('HA_FAILOVER_WATCHDOG_ERROR', { error: err.message }));
   }, Math.max(publicHaFailoverSettings().checkIntervalSeconds, 2) * 1000);
   if (typeof haFailoverWatchdogTimer.unref === 'function') haFailoverWatchdogTimer.unref();
+  maybeAutoFailover().catch(err => appendEvent('HA_FAILOVER_WATCHDOG_ERROR', { error: err.message }));
 }
 
 function restartHaFailoverWatchdog() {
@@ -5944,7 +6006,7 @@ async function handleApi(req, reply, url) {
   if (req.method === 'PATCH' && url.pathname === '/api/cluster/lock') return json(reply, 200, writeClusterLock(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/cluster/promotion/block') return json(reply, 200, blockClusterPromotion((await readBody(req).catch(() => ({}))).reason));
   if (req.method === 'POST' && url.pathname === '/api/cluster/activate-local') return json(reply, 200, await activateLocalNode(await readBody(req).catch(() => ({}))));
-  if (req.method === 'POST' && url.pathname === '/api/cluster/recovery-local') return json(reply, 200, putLocalNodeInRecovery(await readBody(req).catch(() => ({}))));
+  if (req.method === 'POST' && url.pathname === '/api/cluster/recovery-local') return json(reply, 200, await putLocalNodeInRecovery(await readBody(req).catch(() => ({}))));
   if (req.method === 'GET' && url.pathname === '/api/cluster/network-impact') return json(reply, 200, await clusterNetworkImpact(url.searchParams.get('proposed') || ''));
   if (req.method === 'GET' && url.pathname === '/api/cluster/sync') return json(reply, 200, publicHaSyncSettings());
   if (req.method === 'GET' && url.pathname === '/api/cluster/sync/logs') return json(reply, 200, haSyncLogs(url.searchParams.get('file') || ''));
