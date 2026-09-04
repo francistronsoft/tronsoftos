@@ -310,7 +310,6 @@ vrrp_script chk_tronsoftos {
     timeout 2
     fall 3
     rise 2
-    weight -50
 }
 
 vrrp_instance TRONSOFTOS_VIP {
