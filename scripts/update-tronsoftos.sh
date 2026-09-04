@@ -129,7 +129,7 @@ path_total_bytes() {
 allows_file_count_decrease() {
   local target="$1"
   case "$target" in
-    "$STORAGE_ROOT/firebird/backups"|"$STORAGE_ROOT/config-backups"|"$STORAGE_ROOT/update-backups")
+    "$STORAGE_ROOT/firebird/backups"|"$STORAGE_ROOT/postgres"|"$STORAGE_ROOT/redis"|"$STORAGE_ROOT/config-backups"|"$STORAGE_ROOT/update-backups")
       return 0
       ;;
   esac
