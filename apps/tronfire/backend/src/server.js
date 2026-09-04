@@ -156,13 +156,17 @@ function isPrimaryNode() {
   return nodeRole === 'primary';
 }
 
+function normalizeNodeName(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
 function isServingProductionNode() {
   if (!isPrimaryNode()) return false;
   if (!isHaMode()) return true;
   try {
     const lock = JSON.parse(fs.readFileSync(clusterLockPath, 'utf8'));
     const currentNode = String(process.env.TRONSOFTOS_NODE_NAME || '').trim();
-    return !lock.active_node || !currentNode || lock.active_node === currentNode;
+    return !lock.active_node || !currentNode || normalizeNodeName(lock.active_node) === normalizeNodeName(currentNode);
   } catch {
     return true;
   }
@@ -2879,7 +2883,7 @@ app.post('/api/ha/standby/promote', async (req, reply) => {
   }
   const lock = readClusterLock();
   if (!lock.allow_promotion) return reply.code(409).send({ error: 'cluster-lock nao permite promocao' });
-  if (lock.this_node && process.env.TRONSOFTOS_NODE_NAME && lock.this_node !== process.env.TRONSOFTOS_NODE_NAME) {
+  if (lock.this_node && process.env.TRONSOFTOS_NODE_NAME && normalizeNodeName(lock.this_node) !== normalizeNodeName(process.env.TRONSOFTOS_NODE_NAME)) {
     return reply.code(409).send({ error: 'cluster-lock pertence a outro no', lock });
   }
 
