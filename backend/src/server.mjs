@@ -4483,9 +4483,6 @@ async function maybeDemoteReturnedPrimary() {
     return false;
   }
 
-  const localVip = await localVipPresence(process.env.HA_VIP || '');
-  if (localVip.present === true) return false;
-
   const settings = publicHaSyncSettings();
   if (!settings.standbyHost) return false;
 
