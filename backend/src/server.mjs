@@ -3791,9 +3791,11 @@ async function dashboard() {
   const identity = cluster.identity || nodeIdentity();
   if (haMode && cluster.sync?.standbyHost) {
     cluster.standbyHealth = await remoteTronsoftosHealth(cluster.sync.standbyHost);
-    if (identity.nodeRole === 'primary') {
-      cluster.standbyDashboard = await remoteTronsoftosDashboard(cluster.sync.standbyHost);
-    }
+    const peerDashboard = await remoteTronsoftosDashboard(cluster.sync.standbyHost);
+    cluster.peerDashboard = peerDashboard;
+    const peerRole = String(peerDashboard?.cluster?.nodeRole || '').toLowerCase();
+    if (peerRole === 'primary') cluster.primaryDashboard = peerDashboard;
+    if (['standby', 'recovery'].includes(peerRole)) cluster.standbyDashboard = peerDashboard;
   }
   const tronfireHa = haMode && identity.nodeRole === 'primary' && cluster.sync?.standbyHost
     ? await remoteTronfireHaStatus(cluster.sync.standbyHost)
