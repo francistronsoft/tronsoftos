@@ -65,9 +65,9 @@ const navItems = [
 const fallbackDashboard = {
   generatedAt: new Date().toISOString(),
   cluster: {
-    mode: 'simple',
+    mode: 'loading',
     nodeName: 'local',
-    nodeRole: 'primary',
+    nodeRole: 'loading',
     vip: 'nao configurado',
     lock: null,
     keepalived: { enabled: false, interface: null, routerId: null },
@@ -461,11 +461,13 @@ function DashboardView({ dashboard }) {
       ? `${formatBytes(driveQuota.free)} livre de ${formatBytes(driveQuota.total)} (${driveQuota.percentUsed}% usado)`
       : 'aguardando Google Drive';
   const driveUsageTone = driveQuota?.ok === false ? 'amber' : driveQuota ? 'green' : 'slate';
-  const currentMode = String(dashboard.cluster.mode || 'simple').toUpperCase();
-  const currentModeTone = currentMode === 'HA' ? 'sky' : 'green';
+  const currentMode = String(dashboard.cluster.mode || 'loading').toUpperCase();
+  const currentModeTone = currentMode === 'HA' ? 'sky' : currentMode === 'SIMPLE' ? 'green' : 'slate';
   const currentModeCardClass = currentMode === 'HA'
     ? 'border-sky-700 bg-sky-600'
-    : 'border-green-700 bg-green-600';
+    : currentMode === 'SIMPLE'
+      ? 'border-green-700 bg-green-600'
+      : 'border-slate-700 bg-slate-600';
   return (
     <div className="space-y-5">
       <div className="grid gap-4 lg:grid-cols-6">
@@ -481,7 +483,7 @@ function DashboardView({ dashboard }) {
           detailClassName="text-white/80"
         />
         <Stat label="Tempo ligado" value={formatDurationSeconds(dashboard.hostUptimeSeconds)} detail="uptime do servidor" icon={FileClock} tone="green" />
-        <Stat label="Papel" value={dashboard.cluster.nodeRole} detail={dashboard.cluster.vip || 'Não possui H.A.'} icon={ShieldCheck} tone="green" />
+        <Stat label="Papel" value={dashboard.cluster.nodeRole === 'loading' ? 'aguardando' : dashboard.cluster.nodeRole} detail={dashboard.cluster.vip || 'Não possui H.A.'} icon={ShieldCheck} tone={dashboard.cluster.nodeRole === 'loading' ? 'slate' : 'green'} />
         <Stat label="Containers online" value={`${onlineContainers}/${troncomandaContainers.length}`} detail="TronComanda" icon={Boxes} tone="slate" />
         <Stat label="Alertas" value={alerts.length} detail={alerts[0]?.message || 'sem alertas ativos'} icon={AlertTriangle} tone={alerts.length ? 'amber' : 'green'} />
         <Stat label="Hora servidor" value={formatDateTime(dashboard.generatedAt)} detail="gerado pelo backend" icon={FileClock} tone="slate" />
@@ -2124,9 +2126,7 @@ function CloudflareView({ dashboard }) {
   const [form, setForm] = useState(null);
   const values = form || {
     enabled: cloudflare.enabled || false,
-    tunnelToken: '',
-    maintenanceSshEnabled: cloudflare.maintenanceSshEnabled || false,
-    maintenanceSshHostname: cloudflare.maintenanceSshHostname || ''
+    tunnelToken: ''
   };
   const saveMutation = useMutation({
     mutationFn: payload => fetch('/api/cloudflare', {
@@ -2172,16 +2172,6 @@ function CloudflareView({ dashboard }) {
           <div className="md:col-span-2">
             <Field label="Token do Tunnel" type="password" value={values.tunnelToken} onChange={value => setValue('tunnelToken', value)} placeholder={cloudflare.tokenConfigured ? 'token ja configurado' : 'cole o token do tunnel'} autoComplete="off" />
           </div>
-          <div className="md:col-span-2">
-            <Checkbox label="Habilitar SSH de manutencao pelo tunnel" checked={values.maintenanceSshEnabled} onChange={value => setValue('maintenanceSshEnabled', value)} />
-          </div>
-          <Field label="Hostname SSH de manutencao" value={values.maintenanceSshHostname || ''} onChange={value => setValue('maintenanceSshHostname', value)} placeholder="ssh-cliente.tronsoft.app.br" />
-          <Field label="Servico Cloudflare" value={cloudflare.maintenanceSshService || 'ssh://host.docker.internal:22'} readOnly />
-          {values.maintenanceSshEnabled ? (
-            <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800 md:col-span-2">
-              Crie esse Public Hostname no painel da Cloudflare apontando para o servico SSH acima. O hostname principal do painel continua separado.
-            </div>
-          ) : null}
           <div className="flex flex-wrap items-center gap-3 md:col-span-2">
             <button disabled={busy} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
               <Save className="h-4 w-4" />
@@ -2894,6 +2884,77 @@ function CentralSettings() {
   );
 }
 
+function MaintenanceSshTunnelSettings() {
+  const queryClient = useQueryClient();
+  const cloudflareQuery = useQuery({ queryKey: ['cloudflare-settings'], queryFn: () => api('/api/cloudflare') });
+  const cloudflare = cloudflareQuery.data || {};
+  const [form, setForm] = useState(null);
+  const values = form || {
+    maintenanceSshEnabled: cloudflare.maintenanceSshEnabled || false,
+    maintenanceSshHostname: cloudflare.maintenanceSshHostname || ''
+  };
+  const mutation = useMutation({
+    mutationFn: payload => fetch('/api/cloudflare', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        enabled: cloudflare.enabled === true,
+        tunnelToken: '',
+        maintenanceSshEnabled: payload.maintenanceSshEnabled === true,
+        maintenanceSshHostname: payload.maintenanceSshHostname || ''
+      })
+    }).then(async response => {
+      if (!response.ok) throw new Error((await response.json()).error || `HTTP ${response.status}`);
+      return response.json();
+    }),
+    onSuccess: data => {
+      setForm({
+        maintenanceSshEnabled: data.maintenanceSshEnabled || false,
+        maintenanceSshHostname: data.maintenanceSshHostname || ''
+      });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['cloudflare-settings'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    }
+  });
+  const setValue = (key, value) => setForm(previous => ({ ...(previous || values), [key]: value }));
+  const busy = cloudflareQuery.isFetching || mutation.isPending;
+
+  return (
+    <Card title="SSH de manutencao pelo Cloudflare" icon={Terminal} action={<StatusPill value={values.maintenanceSshEnabled ? 'online' : 'disabled'} />}>
+      <form
+        className="grid gap-3 md:grid-cols-2"
+        onSubmit={event => {
+          event.preventDefault();
+          mutation.mutate(values);
+        }}
+      >
+        <div className="md:col-span-2">
+          <Checkbox label="Habilitar SSH de manutencao pelo tunnel" checked={values.maintenanceSshEnabled} onChange={value => setValue('maintenanceSshEnabled', value)} />
+        </div>
+        <Field label="Hostname SSH de manutencao" value={values.maintenanceSshHostname || ''} onChange={value => setValue('maintenanceSshHostname', value)} placeholder="ssh-cliente.tronsoft.app.br" />
+        <Field label="Servico Cloudflare" value={cloudflare.maintenanceSshService || 'ssh://host.docker.internal:22'} readOnly />
+        <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800 md:col-span-2">
+          Crie o Public Hostname no painel da Cloudflare apontando para o servico SSH acima. O token do tunnel continua na guia Cloudflare.
+        </div>
+        {!cloudflare.tokenConfigured ? (
+          <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 md:col-span-2">
+            Configure o token do Cloudflare Tunnel antes de publicar o SSH de manutencao.
+          </div>
+        ) : null}
+        <div className="flex items-center gap-3 md:col-span-2">
+          <button disabled={busy} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
+            <Save className="h-4 w-4" />
+            Salvar SSH
+          </button>
+          {mutation.isSuccess ? <StatusPill value="online" /> : null}
+          {mutation.isError ? <span className="text-sm text-red-700">{mutation.error.message}</span> : null}
+        </div>
+      </form>
+    </Card>
+  );
+}
+
 function TroncomandaSettings() {
   const queryClient = useQueryClient();
   const settingsQuery = useQuery({ queryKey: ['troncomanda-settings'], queryFn: () => api('/api/troncomanda/settings') });
@@ -3031,6 +3092,7 @@ function SettingsView({ dashboard }) {
   return (
     <div className="space-y-5">
       <CentralSettings />
+      <MaintenanceSshTunnelSettings />
       <NetworkSettings />
     </div>
   );

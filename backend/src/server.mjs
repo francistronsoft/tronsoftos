@@ -3276,7 +3276,9 @@ function normalizeCloudflareSettings(body) {
     enabled: body.enabled === true,
     tokenCleared: providedToken ? false : current.tokenCleared === true,
     tunnelToken: providedToken || current.tunnelToken || '',
-    maintenanceSshEnabled: body.maintenanceSshEnabled === true,
+    maintenanceSshEnabled: body.maintenanceSshEnabled === undefined
+      ? current.maintenanceSshEnabled === true
+      : body.maintenanceSshEnabled === true,
     maintenanceSshHostname,
     maintenanceSshService: 'ssh://host.docker.internal:22'
   };
