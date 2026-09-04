@@ -562,10 +562,20 @@ async function activateLocalNode(body = {}) {
 }
 
 async function putLocalNodeInRecovery(body = {}) {
+  const currentLock = clusterLock();
+  const activeNode = String(body.activeNode || currentLock.active_node || '').trim();
+  const reason = String(body.reason || 'nó colocado em recuperação para evitar duplo primary').trim();
   const roleEnv = await setNodeRoleEnv('recovery');
   const identity = writeNodeIdentity({ ...nodeIdentity(), nodeRole: 'recovery' });
-  clearClusterActivation(String(body.reason || 'no colocado em recovery').trim());
-  const lock = blockClusterPromotion(String(body.reason || 'nó colocado em recuperação para evitar duplo primary').trim());
+  clearClusterActivation(reason);
+  const lock = writeClusterLock({
+    ...currentLock,
+    cluster: identity.clusterId,
+    active_node: activeNode,
+    this_node: identity.nodeName,
+    allow_promotion: false,
+    reason
+  });
   const tronfireRestart = await restartTronfireBackend();
   appendEvent('CLUSTER_NODE_RECOVERY_MODE', { cluster: identity.clusterId, nodeName: identity.nodeName, reason: lock.reason, tronfireRestart });
   return { identity, lock, guard: clusterGuard(), roleEnv, tronfireRestart };
@@ -4486,6 +4496,7 @@ async function maybeDemoteReturnedPrimary() {
     peerStatus: peerGuard.status
   });
   await putLocalNodeInRecovery({
+    activeNode: peerGuard.activeNode,
     reason: `primary anterior voltou, mas o ativo atual e ${peerGuard.activeNode}`
   });
   return true;
