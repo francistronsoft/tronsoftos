@@ -2934,6 +2934,71 @@ async function remoteTronsoftosHealth(host) {
   }
 }
 
+function summarizeRemoteDashboard(payload = {}, url = '') {
+  const cluster = payload.cluster && typeof payload.cluster === 'object' ? payload.cluster : {};
+  const build = payload.build && typeof payload.build === 'object' ? payload.build : {};
+  return {
+    ok: true,
+    url,
+    status: payload.status || null,
+    collectedAt: new Date().toISOString(),
+    build: {
+      version: build.version || payload.version || '',
+      buildNumber: build.buildNumber || payload.buildNumber || null,
+      commit: build.commit || payload.commit || '',
+      branch: build.branch || payload.branch || ''
+    },
+    host: payload.host || {},
+    database: payload.database || {},
+    metrics: {
+      systemMetrics: centralSystemMetricsPayload(payload),
+      firebird: centralFirebirdMetricsPayload(payload),
+      network: payload.network || payload.metrics?.network || null,
+      hostUptimeSeconds: payload.hostUptimeSeconds ?? payload.metrics?.hostUptimeSeconds ?? null
+    },
+    backups: payload.backups || {},
+    services: Array.isArray(payload.apps) || payload.services
+      ? {
+          platform: payload.services?.platform || 'linux-docker',
+          collectedAt: payload.services?.collectedAt || new Date().toISOString(),
+          apps: Array.isArray(payload.apps) ? payload.apps : payload.services?.apps || [],
+          containers: payload.services?.containers || []
+        }
+      : {},
+    cluster: {
+      mode: cluster.mode || '',
+      nodeName: cluster.nodeName || cluster.identity?.nodeName || '',
+      nodeRole: cluster.nodeRole || cluster.identity?.nodeRole || '',
+      activeNode: cluster.lock?.active_node || cluster.guard?.activeNode || '',
+      guard: cluster.guard || null,
+      vip: cluster.vip || null,
+      vipStatus: cluster.vipStatus || null,
+      recovery: cluster.nodeRole === 'recovery' || cluster.identity?.nodeRole === 'recovery'
+    }
+  };
+}
+
+async function remoteTronsoftosDashboard(host) {
+  const targetHost = String(host || '').trim();
+  if (!targetHost) return null;
+  const base = /^https?:\/\//i.test(targetHost) ? targetHost : `http://${targetHost}:${port}`;
+  try {
+    const token = internalTokenValue();
+    if (!token) return { ok: false, url: base, error: 'token interno nao configurado' };
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6500);
+    const response = await fetch(new URL('/api/dashboard', base), {
+      signal: controller.signal,
+      headers: { 'x-tronsoftos-token': token }
+    });
+    clearTimeout(timeout);
+    if (!response.ok) return { ok: false, url: base, status: response.status };
+    return summarizeRemoteDashboard(await response.json(), base);
+  } catch (err) {
+    return { ok: false, url: base, error: err.message };
+  }
+}
+
 function buildsDiffer(left, right) {
   if (!left || !right) return false;
   return Boolean(
@@ -3724,6 +3789,9 @@ async function dashboard() {
   const identity = cluster.identity || nodeIdentity();
   if (haMode && cluster.sync?.standbyHost) {
     cluster.standbyHealth = await remoteTronsoftosHealth(cluster.sync.standbyHost);
+    if (identity.nodeRole === 'primary') {
+      cluster.standbyDashboard = await remoteTronsoftosDashboard(cluster.sync.standbyHost);
+    }
   }
   const tronfireHa = haMode && identity.nodeRole === 'primary' && cluster.sync?.standbyHost
     ? await remoteTronfireHaStatus(cluster.sync.standbyHost)
@@ -5726,6 +5794,19 @@ async function centralServicesPayload(payload = {}) {
   };
 }
 
+function centralClusterPayload(payload = {}) {
+  const cluster = payload.cluster && typeof payload.cluster === 'object' ? payload.cluster : {};
+  return {
+    ...cluster,
+    mode: cluster.mode || '',
+    nodeName: cluster.nodeName || cluster.identity?.nodeName || '',
+    nodeRole: cluster.nodeRole || cluster.identity?.nodeRole || '',
+    activeNode: cluster.lock?.active_node || cluster.guard?.activeNode || cluster.vipStatus?.holder?.nodeName || '',
+    recoveryActive: cluster.nodeRole === 'recovery' || cluster.identity?.nodeRole === 'recovery',
+    vip: cluster.vip || null
+  };
+}
+
 async function centralHeartbeat(token, payload) {
   const networkMetrics = await centralNetworkMetricsPayload();
   return centralRequest('/api/tronsoftos/heartbeat', {
@@ -5740,12 +5821,7 @@ async function centralHeartbeat(token, payload) {
       },
       database: await centralDatabasePayload(),
       host: centralHostPayload(),
-      cluster: {
-        mode: payload.cluster?.mode || '',
-        nodeName: payload.cluster?.nodeName || '',
-        nodeRole: payload.cluster?.nodeRole || '',
-        vip: payload.cluster?.vip || null
-      },
+      cluster: centralClusterPayload(payload),
       backups: payload.backups || {},
       services: await centralServicesPayload(payload),
       metrics: {
