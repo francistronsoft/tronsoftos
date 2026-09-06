@@ -5242,9 +5242,41 @@ function centralResellerPayload() {
   };
 }
 
+function interfacePrimaryIpv4(interfaces, interfaceName) {
+  if (!interfaceName) return '';
+  return (interfaces[interfaceName] || [])
+    .find(item => item.family === 'IPv4' && !item.internal)?.address || '';
+}
+
 function primaryHostIp() {
+  const configuredAddress = parseIpv4Cidr(
+    process.env.TRONSOFTOS_CENTRAL_HOST_IP
+      || process.env.HOST_STATIC_IP_ADDRESS_CIDR
+      || process.env.TRONFIRE_LAN_HOST
+  );
+  if (configuredAddress?.address) return configuredAddress.address;
+
   const interfaces = os.networkInterfaces();
-  for (const items of Object.values(interfaces)) {
+  const staticInterface = String(process.env.HOST_STATIC_IP_INTERFACE || '').trim();
+  const syncInterface = String(process.env.HOST_SYNC_IP_INTERFACE || '').trim();
+  if (staticInterface) {
+    const staticAddress = interfacePrimaryIpv4(interfaces, staticInterface);
+    if (staticAddress) return staticAddress;
+  }
+
+  try {
+    const stdout = execFileSync('ip', ['route', 'show', 'default'], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] });
+    const defaultInterface = stdout.match(/\bdev\s+(\S+)/)?.[1] || '';
+    if (defaultInterface && defaultInterface !== syncInterface) {
+      const defaultAddress = interfacePrimaryIpv4(interfaces, defaultInterface);
+      if (defaultAddress) return defaultAddress;
+    }
+  } catch {
+    // Sistemas antigos podem nao ter o comando ip disponivel no PATH do servico.
+  }
+
+  for (const [name, items] of Object.entries(interfaces)) {
+    if (syncInterface && name === syncInterface) continue;
     for (const item of items || []) {
       if (item.family === 'IPv4' && !item.internal) return item.address;
     }
