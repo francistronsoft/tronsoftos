@@ -242,7 +242,21 @@ Não exponha a porta 3050 na internet.
 
 ## Backup externo
 
-O TronFire gera e valida os backups locais em `/firebird/backups`. O envio para Google Drive/rclone e centralizado no TronSoftOS para manter uma unica configuracao por servidor.
+O TronFire gera os backups locais em `/firebird/backups`. Por padrao, a validacao pesada por restore/gstat roda uma vez por dia, na janela de 04:00 a 06:00, para reduzir impacto em clientes com banco grande e evitar horarios de pico de madrugada. Os backups feitos fora da janela ficam marcados como "backup simples" e continuam disponiveis para download/upload.
+
+No HA em modo `backup_restore`, apenas manifestos com validacao aprovada sao sincronizados para restore no standby. O HA fisico padrao nao depende dessa validacao do GBK.
+
+Variaveis principais:
+
+```env
+TRONFIRE_BACKUP_VALIDATION_MODE=daily
+TRONFIRE_BACKUP_VALIDATION_HOUR=4
+TRONFIRE_BACKUP_VALIDATION_WINDOW_MINUTES=120
+TRONFIRE_BACKUP_VALIDATION_MAX_AGE_HOURS=30
+TRONFIRE_BACKUP_VALIDATION_FAILURE_COOLDOWN_HOURS=12
+```
+
+Use `always` somente quando cada backup precisar ser restaurado e validado imediatamente. Se a validacao falhar com erro interno do Firebird, o TronFire abre alerta critico, evita novas validacoes na mesma janela diaria e pausa rotinas pesadas temporariamente. O envio para Google Drive/rclone e centralizado no TronSoftOS para manter uma unica configuracao por servidor.
 
 ### URL publica com Cloudflare Tunnel
 

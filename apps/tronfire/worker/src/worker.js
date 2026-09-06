@@ -30,8 +30,19 @@ const DEFAULT_BACKUP_FREQUENCY_MINUTES = normalizePositiveMinutes(process.env.TR
 const DEFAULT_BACKUP_RETENTION_DAYS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_RETENTION_DAYS, 30);
 const BACKUP_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_TIMEOUT_MINUTES, 120, 30, 1440);
 const BACKUP_VALIDATION_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_TIMEOUT_MINUTES, 45, 15, 240);
+const BACKUP_VALIDATION_MODE = String(process.env.TRONFIRE_BACKUP_VALIDATION_MODE || 'daily').toLowerCase();
+const BACKUP_VALIDATION_HOUR = normalizeHour(process.env.TRONFIRE_BACKUP_VALIDATION_HOUR, 4);
+const BACKUP_VALIDATION_WINDOW_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_WINDOW_MINUTES, 120, 30, 720);
+const BACKUP_VALIDATION_MAX_AGE_HOURS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_MAX_AGE_HOURS, 30, 6, 168);
+const BACKUP_VALIDATION_FAILURE_COOLDOWN_HOURS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_FAILURE_COOLDOWN_HOURS, 12, 1, 72);
 const BACKUP_RESTORE_VALIDATION_WINDOW = String(process.env.TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW || '03:00-06:00').trim();
 const BACKUP_RESTORE_VALIDATION_WEEKDAY = String(process.env.TRONFIRE_BACKUP_RESTORE_VALIDATION_WEEKDAY || 'monday').trim();
+const FIREBIRD_SWEEP_ENABLED = !['0', 'false', 'off', 'disabled', 'never'].includes(String(process.env.TRONFIRE_FIREBIRD_SWEEP_ENABLED || 'true').toLowerCase());
+const FIREBIRD_SWEEP_CRON = String(process.env.TRONFIRE_FIREBIRD_SWEEP_CRON || '0 6 * * 2,6').trim();
+const FIREBIRD_SWEEP_TIMEZONE = String(process.env.TRONFIRE_FIREBIRD_SWEEP_TIMEZONE || process.env.TZ || 'America/Sao_Paulo').trim();
+const FIREBIRD_SWEEP_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_SWEEP_TIMEOUT_MINUTES, 180, 30, 720);
+const FIREBIRD_QUERY_TIMEOUT_SECONDS = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_QUERY_TIMEOUT_SECONDS, 20, 5, 600);
+const FIREBIRD_HEALTH_COOLDOWN_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_HEALTH_COOLDOWN_MINUTES, 10, 1, 120);
 const ORPHANED_BACKUP_MIN_AGE_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_ORPHANED_MIN_AGE_MINUTES, 5, 1, 60);
 const FIREBIRD_SESSION_RETENTION_DAYS = 30;
 const FIREBIRD_UNRESPONSIVE_FAILURE_THRESHOLD = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_UNRESPONSIVE_FAILURES, 5, 1, 10);
@@ -43,6 +54,7 @@ const RUNNING_BACKUP_TTL_MINUTES = Number.isFinite(CONFIGURED_RUNNING_BACKUP_TTL
 const RUNNING_BACKUP_TTL_MS = RUNNING_BACKUP_TTL_MINUTES * 60 * 1000;
 const BACKUP_TIMEOUT_MS = BACKUP_TIMEOUT_MINUTES * 60 * 1000;
 const BACKUP_VALIDATION_TIMEOUT_MS = BACKUP_VALIDATION_TIMEOUT_MINUTES * 60 * 1000;
+const FIREBIRD_SWEEP_TIMEOUT_MS = FIREBIRD_SWEEP_TIMEOUT_MINUTES * 60 * 1000;
 const ORPHANED_BACKUP_MIN_AGE_MS = ORPHANED_BACKUP_MIN_AGE_MINUTES * 60 * 1000;
 const FIREBIRD_PROCESS_NAMES = new Set(['fbguard', 'fbserver', 'fb_inet_server', 'fb_smp_server', 'firebird']);
 const METRIC_CONTAINERS = [
@@ -52,9 +64,12 @@ const METRIC_CONTAINERS = [
   'tronfire_backend',
   'tronfire_worker'
 ].filter(name => FIREBIRD_EXEC_MODE === 'container' || name !== FIREBIRD_CONTAINER);
+const FIREBIRD_ROUTINE_LOCK_KEY = '__firebird_global__';
 let backupRunning = false;
 let sessionCollectionRunning = false;
 const firebirdSessionFailureCounts = new Map();
+const databaseRoutineLocks = new Map();
+const firebirdCircuitBreakers = new Map();
 
 function normalizePositiveMinutes(value, fallback, min = 1, max = 10080) {
   const number = Number(value);
@@ -62,111 +77,10 @@ function normalizePositiveMinutes(value, fallback, min = 1, max = 10080) {
   return Math.max(min, Math.min(max, Math.round(number)));
 }
 
-function parseClockMinutes(value) {
-  const match = String(value || '').trim().match(/^(\d{1,2}):(\d{2})$/);
-  if (!match) return null;
-  const hours = Number(match[1]);
-  const minutes = Number(match[2]);
-  if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
-  return hours * 60 + minutes;
-}
-
-function parseValidationWeekdays(value) {
-  const text = String(value || '').trim().toLowerCase();
-  if (!text || ['off', 'false', 'disabled', 'never'].includes(text)) return { disabled: true, weekdays: new Set(), label: value };
-  if (['daily', 'always', 'true', '*', 'all'].includes(text)) return { daily: true, weekdays: new Set(), label: value };
-  const names = new Map([
-    ['0', 0], ['sun', 0], ['sunday', 0], ['domingo', 0],
-    ['1', 1], ['mon', 1], ['monday', 1], ['segunda', 1], ['segunda-feira', 1],
-    ['2', 2], ['tue', 2], ['tuesday', 2], ['terca', 2], ['terça', 2], ['terca-feira', 2], ['terça-feira', 2],
-    ['3', 3], ['wed', 3], ['wednesday', 3], ['quarta', 3], ['quarta-feira', 3],
-    ['4', 4], ['thu', 4], ['thursday', 4], ['quinta', 4], ['quinta-feira', 4],
-    ['5', 5], ['fri', 5], ['friday', 5], ['sexta', 5], ['sexta-feira', 5],
-    ['6', 6], ['sat', 6], ['saturday', 6], ['sabado', 6], ['sábado', 6]
-  ]);
-  const weekdays = new Set();
-  for (const item of text.split(/[,\s]+/).map(part => part.trim()).filter(Boolean)) {
-    if (!names.has(item)) return { invalid: true, weekdays: new Set(), label: value };
-    weekdays.add(names.get(item));
-  }
-  return { weekdays, label: value };
-}
-
-function validationWeekdayStatus(now = new Date()) {
-  const policy = parseValidationWeekdays(BACKUP_RESTORE_VALIDATION_WEEKDAY);
-  if (policy.disabled) return { allowed: false, reason: 'weekday_disabled', weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
-  if (policy.invalid || (!policy.daily && policy.weekdays.size === 0)) {
-    return { allowed: false, reason: 'invalid_weekday', weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
-  }
-  if (policy.daily) return { allowed: true, reason: 'daily', weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
-  const allowed = policy.weekdays.has(now.getDay());
-  return { allowed, reason: allowed ? 'inside_weekday' : 'outside_weekday', weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
-}
-
-function validationWindowStatus(now = new Date()) {
-  const value = BACKUP_RESTORE_VALIDATION_WINDOW.toLowerCase();
-  if (!value || ['off', 'false', 'disabled', 'never'].includes(value)) return { allowed: false, reason: 'disabled', window: BACKUP_RESTORE_VALIDATION_WINDOW };
-  if (['always', 'true', '*'].includes(value)) return { allowed: true, reason: 'always', window: BACKUP_RESTORE_VALIDATION_WINDOW };
-  const [startText, endText] = BACKUP_RESTORE_VALIDATION_WINDOW.split('-', 2).map(item => item?.trim());
-  const start = parseClockMinutes(startText);
-  const end = parseClockMinutes(endText);
-  if (start === null || end === null) return { allowed: false, reason: 'invalid_window', window: BACKUP_RESTORE_VALIDATION_WINDOW };
-  const current = now.getHours() * 60 + now.getMinutes();
-  const allowed = start <= end
-    ? current >= start && current < end
-    : current >= start || current < end;
-  return { allowed, reason: allowed ? 'inside_window' : 'outside_window', window: BACKUP_RESTORE_VALIDATION_WINDOW };
-}
-
-function validationPeriodStart(date = new Date()) {
-  const policy = parseValidationWeekdays(BACKUP_RESTORE_VALIDATION_WEEKDAY);
-  const start = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-  if (!policy.daily && policy.weekdays.size > 0) {
-    let nearestOffset = 7;
-    for (const weekday of policy.weekdays) {
-      const offset = (start.getDay() - weekday + 7) % 7;
-      if (offset < nearestOffset) nearestOffset = offset;
-    }
-    start.setDate(start.getDate() - nearestOffset);
-  }
-  return start;
-}
-
-async function backupRestoreAlreadyValidatedThisPeriod(db, now = new Date()) {
-  const windowStart = validationPeriodStart(now);
-  const jobs = await prisma.backupJob.findMany({
-    where: {
-      databaseId: db.id,
-      status: 'SUCCESS',
-      finishedAt: { gte: windowStart },
-      manifestPath: { not: null }
-    },
-    orderBy: { finishedAt: 'desc' },
-    take: 20
-  });
-  for (const job of jobs) {
-    if (!job.manifestPath || !fs.existsSync(job.manifestPath)) continue;
-    try {
-      const manifest = JSON.parse(fs.readFileSync(job.manifestPath, 'utf8'));
-      const validatedAt = manifest?.validation?.validatedAt ? new Date(manifest.validation.validatedAt) : null;
-      if (manifest?.validation?.ok === true && validatedAt && validatedAt >= windowStart) return true;
-    } catch {
-      // Ignore malformed old manifests; they should not block the next validation window.
-    }
-  }
-  return false;
-}
-
-async function shouldValidateBackupRestore(db, reason) {
-  if (String(reason || '').toUpperCase() !== 'AUTO') return { allowed: true, reason: 'manual_or_requested', window: BACKUP_RESTORE_VALIDATION_WINDOW };
-  const weekdayStatus = validationWeekdayStatus();
-  if (!weekdayStatus.allowed) return { ...weekdayStatus, window: BACKUP_RESTORE_VALIDATION_WINDOW };
-  const windowStatus = validationWindowStatus();
-  if (!windowStatus.allowed) return { ...windowStatus, weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
-  if (await backupRestoreAlreadyValidatedThisPeriod(db)) {
-    return { allowed: false, reason: 'already_validated_this_period', window: BACKUP_RESTORE_VALIDATION_WINDOW, weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
-  }
-  return { ...windowStatus, weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
+function normalizeHour(value, fallback = 4) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.max(0, Math.min(23, Math.round(number)));
 }
 
 function haSyncActive() {
@@ -425,7 +339,7 @@ async function queryFirebirdSessions(db) {
     'QUIT;'
   ].join('\n');
   const cmd = [
-    `run_with_timeout() { ${firebirdTimeoutCommand(2)}; };`,
+    `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; };`,
     `printf %s ${shQuote(`${sql}\n`)}`,
     '|',
     'run_with_timeout',
@@ -435,7 +349,7 @@ async function queryFirebirdSessions(db) {
     `-password ${shQuote(FIREBIRD_PASSWORD)}`,
     shQuote(firebirdDbConnect(db.filePath))
   ].join(' ');
-  const { stdout } = await dockerExec(['sh', '-lc', cmd], 60_000);
+  const { stdout } = await dockerExec(['sh', '-lc', cmd], (FIREBIRD_QUERY_TIMEOUT_SECONDS + 15) * 1000);
   return parseFirebirdSessions(stdout);
 }
 
@@ -455,9 +369,12 @@ async function collectFirebirdSessionHistory() {
     db = await clearExpiredDatabaseOperation(db);
     if (databaseOperationActive(db) || databaseInPostRestoreGrace(db)) {
       firebirdSessionFailureCounts.delete(db.id);
+      firebirdCircuitBreakers.delete(circuitKey(db));
       return;
     }
-    const sessions = await queryFirebirdSessions(db);
+    if (databaseRoutineActive(db) || firebirdCircuitOpen(db)) return;
+    const sessions = await withDatabaseRoutineLock(db, 'session-history', () => queryFirebirdSessions(db));
+    if (!sessions) return;
     const now = new Date();
     const sourceNode = process.env.TRONSOFTOS_NODE_NAME || null;
     const sessionKeys = [];
@@ -522,7 +439,7 @@ async function collectFirebirdSessionHistory() {
     if (db?.id && db?.alias) {
       const failures = (firebirdSessionFailureCounts.get(db.id) || 0) + 1;
       firebirdSessionFailureCounts.set(db.id, failures);
-      if (failures >= FIREBIRD_UNRESPONSIVE_FAILURE_THRESHOLD) {
+      if (isFirebirdConnectivityError(err) && failures >= FIREBIRD_UNRESPONSIVE_FAILURE_THRESHOLD) {
         await createAlertOnce(
           `FIREBIRD_UNRESPONSIVE_${db.alias}`,
           'CRITICAL',
@@ -645,15 +562,11 @@ function readHostCpuSample() {
 }
 
 function readHostTemperatureCelsius() {
-  const values = [];
-  const pushSensorValue = (raw, label = '') => {
-    if (!Number.isFinite(raw)) return;
-    const celsius = raw > 1000 ? raw / 1000 : raw;
-    if (celsius < 0 || celsius > 130) return;
-    const normalizedLabel = String(label || '').toLowerCase();
-    const cpuLike = /\b(cpu|core|package|x86_pkg_temp|k10temp|zenpower|tctl|tdie)\b/.test(normalizedLabel);
-    if (!cpuLike && celsius > 115) return;
-    values.push({ celsius, cpuLike });
+  const candidates = [];
+  const addCandidate = (value, preferred = false) => {
+    if (!Number.isFinite(value)) return;
+    const celsius = value > 1000 ? value / 1000 : value;
+    if (celsius >= 0 && celsius <= 115) candidates.push({ value: celsius, preferred });
   };
   try {
     const thermalRoot = `${HOST_SYS_ROOT}/class/thermal`;
@@ -662,9 +575,9 @@ function readHostTemperatureCelsius() {
       const tempPath = `${thermalRoot}/${item.name}/temp`;
       if (!fs.existsSync(tempPath)) continue;
       const typePath = `${thermalRoot}/${item.name}/type`;
-      const label = fs.existsSync(typePath) ? fs.readFileSync(typePath, 'utf8').trim() : item.name;
+      const type = fs.existsSync(typePath) ? fs.readFileSync(typePath, 'utf8').trim().toLowerCase() : '';
       const raw = Number(fs.readFileSync(tempPath, 'utf8').trim());
-      pushSensorValue(raw, label);
+      addCandidate(raw, /cpu|core|pkg|package|x86|acpi/.test(type));
     }
   } catch {
     // Some VMs and hosts do not expose thermal sensors to containers.
@@ -674,22 +587,23 @@ function readHostTemperatureCelsius() {
     for (const item of fs.readdirSync(hwmonRoot, { withFileTypes: true })) {
       if (!item.isDirectory() && !item.isSymbolicLink()) continue;
       const deviceRoot = `${hwmonRoot}/${item.name}`;
-      const deviceName = fs.existsSync(`${deviceRoot}/name`) ? fs.readFileSync(`${deviceRoot}/name`, 'utf8').trim() : item.name;
       for (const fileName of fs.readdirSync(deviceRoot)) {
         if (!/^temp\d+_input$/.test(fileName)) continue;
-        const sensorPrefix = fileName.replace(/_input$/, '');
-        const labelPath = `${deviceRoot}/${sensorPrefix}_label`;
-        const sensorLabel = fs.existsSync(labelPath) ? fs.readFileSync(labelPath, 'utf8').trim() : sensorPrefix;
+        const sensorName = fileName.replace(/_input$/, '');
+        const labelPath = `${deviceRoot}/${sensorName}_label`;
+        const label = fs.existsSync(labelPath) ? fs.readFileSync(labelPath, 'utf8').trim().toLowerCase() : '';
+        const namePath = `${deviceRoot}/name`;
+        const name = fs.existsSync(namePath) ? fs.readFileSync(namePath, 'utf8').trim().toLowerCase() : '';
         const raw = Number(fs.readFileSync(`${deviceRoot}/${fileName}`, 'utf8').trim());
-        pushSensorValue(raw, `${deviceName} ${sensorLabel}`);
+        addCandidate(raw, /cpu|core|pkg|package|x86|k10temp|coretemp|acpi/.test(`${label} ${name}`));
       }
     }
   } catch {
     // hwmon is optional and commonly absent inside virtual machines.
   }
-  const cpuValues = values.filter(value => value.cpuLike);
-  const selected = cpuValues.length ? cpuValues : values;
-  return selected.length ? Math.round(Math.max(...selected.map(value => value.celsius)) * 10) / 10 : null;
+  const preferred = candidates.filter(candidate => candidate.preferred).map(candidate => candidate.value);
+  const values = preferred.length ? preferred : candidates.map(candidate => candidate.value);
+  return values.length ? Math.round(Math.max(...values) * 10) / 10 : null;
 }
 
 async function readSensorsTemperatureCelsius() {
@@ -739,10 +653,152 @@ async function resolveActiveAlertsByType(type) {
 
 function firebirdConnectionFailureMessage(err) {
   const message = String(err?.message || err || '').toLowerCase();
+  if (message.includes('internal error')) return 'erro interno do Firebird';
+  if (message.includes('socket hang up')) return 'conexao interrompida';
   if (message.includes('timeout') || message.includes('errno = 110') || message.includes('timed out')) return 'timeout de conexao';
   if (message.includes('connection refused') || message.includes('errno = 111')) return 'conexao recusada';
   if (message.includes('unavailable') || message.includes('unable to complete network request')) return 'falha de conexao';
   return 'consulta de monitoramento falhou';
+}
+
+function circuitKey(db) {
+  return db?.id || db?.alias || String(db?.filePath || 'unknown');
+}
+
+function firebirdCircuit(db) {
+  return firebirdCircuitBreakers.get(circuitKey(db)) || { failures: 0, degradedUntil: 0, reason: '' };
+}
+
+function firebirdCircuitOpen(db) {
+  const state = firebirdCircuit(db);
+  if (!state.degradedUntil || Date.now() >= state.degradedUntil) return false;
+  return state;
+}
+
+function isFirebirdTimeoutError(err) {
+  const message = String(err?.message || err || '').toLowerCase();
+  return err?.killed || err?.signal || err?.code === 'ETIMEDOUT' || message.includes('timeout') || message.includes('tempo limite');
+}
+
+function isFirebirdConnectivityError(err) {
+  const message = String(err?.message || err || '').toLowerCase();
+  return isFirebirdTimeoutError(err)
+    || message.includes('internal error')
+    || message.includes('socket hang up')
+    || message.includes('errno = 110')
+    || message.includes('errno = 111')
+    || message.includes('connection refused')
+    || message.includes('unable to complete network request')
+    || message.includes('unavailable');
+}
+
+async function markFirebirdSuccess(db) {
+  firebirdCircuitBreakers.delete(circuitKey(db));
+  if (db?.alias) {
+    await resolveActiveAlertsByType(`FIREBIRD_DEGRADED_${db.alias}`);
+  }
+}
+
+async function markFirebirdFailure(db, err, context) {
+  if (!db?.id) return;
+  if (databaseInPostRestoreGrace(db)) return;
+  const key = circuitKey(db);
+  const current = firebirdCircuit(db);
+  const failures = current.failures + 1;
+  const reason = firebirdConnectionFailureMessage(err);
+  const data = { failures, reason, degradedUntil: current.degradedUntil || 0 };
+  if (isFirebirdConnectivityError(err) && (failures >= FIREBIRD_UNRESPONSIVE_FAILURE_THRESHOLD || isFirebirdTimeoutError(err))) {
+    data.degradedUntil = Date.now() + FIREBIRD_HEALTH_COOLDOWN_MINUTES * 60 * 1000;
+    await prisma.managedDatabase.update({
+      where: { id: db.id },
+      data: { status: 'DEGRADED', lastCheckAt: new Date() }
+    }).catch(() => {});
+    await createAlertOnce(
+      `FIREBIRD_DEGRADED_${db.alias}`,
+      'CRITICAL',
+      `Firebird degradado em ${db.name}: ${reason}. Rotinas automaticas pausadas por ${FIREBIRD_HEALTH_COOLDOWN_MINUTES} min. Origem: ${context}`
+    );
+  }
+  firebirdCircuitBreakers.set(key, data);
+}
+
+async function markValidationFailureCircuit(db, err, windowKey) {
+  if (!db?.id) return;
+  const reason = firebirdConnectionFailureMessage(err);
+  const degradedUntil = Date.now() + BACKUP_VALIDATION_FAILURE_COOLDOWN_HOURS * 60 * 60 * 1000;
+  firebirdCircuitBreakers.set(circuitKey(db), {
+    failures: FIREBIRD_UNRESPONSIVE_FAILURE_THRESHOLD,
+    reason: `falha na validacao: ${reason}`,
+    degradedUntil
+  });
+  await prisma.managedDatabase.update({
+    where: { id: db.id },
+    data: { status: 'DEGRADED', lastCheckAt: new Date() }
+  }).catch(() => {});
+  await createAlertOnce(
+    `BACKUP_VALIDATION_FAILED_${db.alias}`,
+    'CRITICAL',
+    `Validacao do backup falhou para ${db.name}: ${reason}. Backup colocado em quarentena; novas validacoes serao evitadas ate a proxima janela semanal.`
+  );
+  await createAlertOnce(
+    `FIREBIRD_DEGRADED_${db.alias}`,
+    'CRITICAL',
+    `Firebird em protecao apos falha de validacao em ${db.name}: ${reason}. Coletas e rotinas pesadas serao pausadas temporariamente.`
+  );
+  if (windowKey) {
+    console.warn(`[worker] validacao bloqueada para ${db.alias} na janela ${windowKey}: ${reason}`);
+  }
+}
+
+function activeRoutineLock(key) {
+  const active = databaseRoutineLocks.get(key);
+  if (!active) return false;
+  if (Date.now() - active.startedAt < 60 * 60 * 1000) return active;
+  databaseRoutineLocks.delete(key);
+  return false;
+}
+
+function databaseRoutineActive(db) {
+  return activeRoutineLock(FIREBIRD_ROUTINE_LOCK_KEY) || activeRoutineLock(circuitKey(db));
+}
+
+function setDatabaseRoutineLock(db, routine) {
+  const lock = { routine, databaseAlias: db?.alias || null, startedAt: Date.now() };
+  databaseRoutineLocks.set(FIREBIRD_ROUTINE_LOCK_KEY, lock);
+  databaseRoutineLocks.set(circuitKey(db), lock);
+}
+
+function clearDatabaseRoutineLock(db, routine) {
+  for (const key of [FIREBIRD_ROUTINE_LOCK_KEY, circuitKey(db)]) {
+    const current = databaseRoutineLocks.get(key);
+    if (current?.routine === routine) databaseRoutineLocks.delete(key);
+  }
+}
+
+async function withDatabaseRoutineLock(db, routine, fn) {
+  const key = circuitKey(db);
+  const active = activeRoutineLock(FIREBIRD_ROUTINE_LOCK_KEY) || activeRoutineLock(key);
+  if (active) {
+    console.log(`[worker] ${routine} ignorado: Firebird ja possui rotina ${active.routine} em andamento${active.databaseAlias ? ` para ${active.databaseAlias}` : ''}`);
+    return null;
+  }
+  const circuit = firebirdCircuitOpen(db);
+  if (circuit) {
+    const remainingMinutes = Math.ceil((circuit.degradedUntil - Date.now()) / 60000);
+    console.log(`[worker] ${routine} adiado: ${db.alias} em estado degradado por mais ${remainingMinutes} min (${circuit.reason})`);
+    return null;
+  }
+  setDatabaseRoutineLock(db, routine);
+  try {
+    const result = await fn();
+    await markFirebirdSuccess(db);
+    return result;
+  } catch (err) {
+    await markFirebirdFailure(db, err, routine);
+    throw err;
+  } finally {
+    clearDatabaseRoutineLock(db, routine);
+  }
 }
 
 async function backupToolProcesses() {
@@ -790,6 +846,11 @@ function commandTimeoutMessage(err, phase, timeoutMinutes) {
 function firebirdTimeoutCommand(minutes) {
   const timeout = Math.max(1, Math.round(Number(minutes) || BACKUP_TIMEOUT_MINUTES));
   return `if command -v timeout >/dev/null 2>&1; then timeout -k 30s ${timeout}m "$@"; else "$@"; fi`;
+}
+
+function firebirdTimeoutSecondsCommand(seconds = FIREBIRD_QUERY_TIMEOUT_SECONDS) {
+  const timeout = Math.max(5, Math.round(Number(seconds) || FIREBIRD_QUERY_TIMEOUT_SECONDS));
+  return `if command -v timeout >/dev/null 2>&1; then timeout -k 5s ${timeout}s "$@"; else "$@"; fi`;
 }
 
 async function markStaleRunningBackupsFailed(databaseId = null, reason = 'stale-running-backup-cleanup') {
@@ -1027,7 +1088,11 @@ async function collectHostHardwareMetrics() {
     if (temperatureCelsius !== null && temperatureCelsius >= 85) {
       await createAlertOnce('HOST_TEMPERATURE_CRITICAL', 'CRITICAL', `Host com temperatura critica: ${temperatureCelsius.toFixed(1)} C`);
     } else if (temperatureCelsius !== null && temperatureCelsius >= 70) {
+      await resolveActiveAlertsByType('HOST_TEMPERATURE_CRITICAL');
       await createAlertOnce('HOST_TEMPERATURE_WARNING', 'WARNING', `Host com temperatura em atencao: ${temperatureCelsius.toFixed(1)} C`);
+    } else if (temperatureCelsius !== null) {
+      await resolveActiveAlertsByType('HOST_TEMPERATURE_CRITICAL');
+      await resolveActiveAlertsByType('HOST_TEMPERATURE_WARNING');
     }
   } catch (err) {
     console.error('[worker] host hardware metrics error', err.message);
@@ -1119,6 +1184,222 @@ async function uploadBackupJobToExternal(db, jobId, backupPath) {
   console.log(`[worker] upload externo gerenciado pelo TronSoftOS: ${db.alias} ${backupPath}`);
 }
 
+function localDateKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function validationWindowInfo(now = new Date()) {
+  const windowText = BACKUP_RESTORE_VALIDATION_WINDOW.toLowerCase();
+  if (!windowText || ['off', 'false', 'disabled', 'never'].includes(windowText)) {
+    return { inWindow: false, reason: 'validation_window_disabled', windowKey: localDateKey(now), window: BACKUP_RESTORE_VALIDATION_WINDOW };
+  }
+  if (['always', 'true', '*'].includes(windowText)) {
+    return { inWindow: true, reason: 'validation_window_always', windowKey: validationPeriodKey(now), window: BACKUP_RESTORE_VALIDATION_WINDOW };
+  }
+  const [startText, endText] = BACKUP_RESTORE_VALIDATION_WINDOW.split('-', 2).map(item => item?.trim());
+  const startMinute = parseClockMinutes(startText);
+  const endMinute = parseClockMinutes(endText);
+  if (startMinute === null || endMinute === null) {
+    return { inWindow: false, reason: 'invalid_validation_window', windowKey: localDateKey(now), window: BACKUP_RESTORE_VALIDATION_WINDOW };
+  }
+  const currentMinute = now.getHours() * 60 + now.getMinutes();
+  const wraps = startMinute > endMinute;
+  const inWindow = wraps
+    ? currentMinute >= startMinute || currentMinute < endMinute
+    : currentMinute >= startMinute && currentMinute < endMinute;
+  const anchor = new Date(now);
+  if (wraps && currentMinute < endMinute) {
+    anchor.setDate(anchor.getDate() - 1);
+  }
+  return {
+    inWindow,
+    reason: inWindow ? 'inside_window' : 'outside_window',
+    windowKey: validationPeriodKey(anchor),
+    window: BACKUP_RESTORE_VALIDATION_WINDOW,
+    weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY,
+    startHour: Math.floor(startMinute / 60),
+    windowMinutes: wraps ? (24 * 60 - startMinute) + endMinute : endMinute - startMinute
+  };
+}
+
+function parseClockMinutes(value) {
+  const match = String(value || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
+  return hours * 60 + minutes;
+}
+
+function parseValidationWeekdays(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text || ['off', 'false', 'disabled', 'never'].includes(text)) return { disabled: true, weekdays: new Set(), label: value };
+  if (['daily', 'always', 'true', '*', 'all'].includes(text)) return { daily: true, weekdays: new Set(), label: value };
+  const names = new Map([
+    ['0', 0], ['sun', 0], ['sunday', 0], ['domingo', 0],
+    ['1', 1], ['mon', 1], ['monday', 1], ['segunda', 1], ['segunda-feira', 1],
+    ['2', 2], ['tue', 2], ['tuesday', 2], ['terca', 2], ['terça', 2], ['terca-feira', 2], ['terça-feira', 2],
+    ['3', 3], ['wed', 3], ['wednesday', 3], ['quarta', 3], ['quarta-feira', 3],
+    ['4', 4], ['thu', 4], ['thursday', 4], ['quinta', 4], ['quinta-feira', 4],
+    ['5', 5], ['fri', 5], ['friday', 5], ['sexta', 5], ['sexta-feira', 5],
+    ['6', 6], ['sat', 6], ['saturday', 6], ['sabado', 6], ['sábado', 6]
+  ]);
+  const weekdays = new Set();
+  for (const item of text.split(/[,\s]+/).map(part => part.trim()).filter(Boolean)) {
+    if (!names.has(item)) return { invalid: true, weekdays: new Set(), label: value };
+    weekdays.add(names.get(item));
+  }
+  return { weekdays, label: value };
+}
+
+function validationWeekdayStatus(now = new Date()) {
+  const policy = parseValidationWeekdays(BACKUP_RESTORE_VALIDATION_WEEKDAY);
+  if (policy.disabled) return { allowed: false, reason: 'weekday_disabled', weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
+  if (policy.invalid || (!policy.daily && policy.weekdays.size === 0)) {
+    return { allowed: false, reason: 'invalid_weekday', weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
+  }
+  if (policy.daily) return { allowed: true, reason: 'daily', weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
+  const allowed = policy.weekdays.has(now.getDay());
+  return { allowed, reason: allowed ? 'inside_weekday' : 'outside_weekday', weekday: BACKUP_RESTORE_VALIDATION_WEEKDAY };
+}
+
+function validationPeriodStart(date = new Date()) {
+  const policy = parseValidationWeekdays(BACKUP_RESTORE_VALIDATION_WEEKDAY);
+  const start = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  if (!policy.daily && policy.weekdays.size > 0) {
+    let nearestOffset = 7;
+    for (const weekday of policy.weekdays) {
+      const offset = (start.getDay() - weekday + 7) % 7;
+      if (offset < nearestOffset) nearestOffset = offset;
+    }
+    start.setDate(start.getDate() - nearestOffset);
+  }
+  return start;
+}
+
+function validationPeriodKey(date = new Date()) {
+  return localDateKey(validationPeriodStart(date));
+}
+
+function validationMatchesPeriod(validation, now = new Date()) {
+  if (!validation?.ok || !validation.validatedAt) return false;
+  return new Date(validation.validatedAt) >= validationPeriodStart(now);
+}
+
+function readBackupValidation(job) {
+  try {
+    if (!job?.manifestPath || !fs.existsSync(job.manifestPath)) return null;
+    return JSON.parse(fs.readFileSync(job.manifestPath, 'utf8')).validation || null;
+  } catch {
+    return null;
+  }
+}
+
+function validationMatchesWindow(validation, windowKey) {
+  if (!validation?.ok) return false;
+  if (validation.windowKey && validation.windowKey === windowKey) return true;
+  if (!validation.validatedAt) return false;
+  return localDateKey(new Date(validation.validatedAt)) === windowKey;
+}
+
+function localDateStart(windowKey) {
+  const [year, month, day] = String(windowKey || localDateKey()).split('-').map(Number);
+  return new Date(year || new Date().getFullYear(), (month || 1) - 1, day || new Date().getDate());
+}
+
+async function latestValidatedBackup(db, take = 80) {
+  const jobs = await prisma.backupJob.findMany({
+    where: { databaseId: db.id, status: 'SUCCESS', manifestPath: { not: null } },
+    orderBy: { createdAt: 'desc' },
+    take
+  });
+  for (const job of jobs) {
+    const validation = readBackupValidation(job);
+    if (validation?.ok) return { job, validation };
+  }
+  return null;
+}
+
+async function maybeAlertValidationOverdue(db, latest) {
+  const alertType = `BACKUP_VALIDATION_OVERDUE_${db.alias}`;
+  const validatedAt = latest?.validation?.validatedAt ? new Date(latest.validation.validatedAt).getTime() : 0;
+  const maxAgeMs = BACKUP_VALIDATION_MAX_AGE_HOURS * 60 * 60 * 1000;
+  if (validatedAt && Date.now() - validatedAt <= maxAgeMs) {
+    await resolveActiveAlertsByType(alertType);
+    return;
+  }
+  const ageText = validatedAt
+    ? `${Math.round((Date.now() - validatedAt) / 3600000)}h sem backup validado por restore`
+    : 'sem backup validado por restore';
+  await createAlertOnce(
+    alertType,
+    'WARNING',
+    `Validacao diaria de backup pendente para ${db.name}: ${ageText}`
+  );
+}
+
+async function latestValidationFailureForWindow(db, windowKey) {
+  const since = localDateStart(windowKey);
+  const failedJobs = await prisma.backupJob.findMany({
+    where: {
+      databaseId: db.id,
+      status: 'FAILED',
+      createdAt: { gte: since }
+    },
+    orderBy: { createdAt: 'desc' },
+    take: 10
+  });
+  return failedJobs.find(job => /validacao|validation|internal error|quarentena/i.test(String(job.errorMessage || ''))) || null;
+}
+
+async function backupValidationPlan(db, now = new Date()) {
+  if (BACKUP_VALIDATION_MODE === 'always') {
+    return { shouldValidate: true, reason: 'validation_mode_always', windowKey: validationPeriodKey(now), mode: 'always' };
+  }
+  if (['never', 'off', 'disabled', 'false'].includes(BACKUP_VALIDATION_MODE)) {
+    return { shouldValidate: false, reason: 'validation_mode_never', windowKey: validationPeriodKey(now), mode: 'never' };
+  }
+  const weekday = validationWeekdayStatus(now);
+  const window = validationWindowInfo(now);
+  const latest = await latestValidatedBackup(db);
+  if (!weekday.allowed) {
+    return {
+      shouldValidate: false,
+      reason: weekday.reason,
+      windowKey: window.windowKey,
+      latest,
+      weekday: weekday.weekday,
+      window: window.window
+    };
+  }
+  if (window.inWindow) {
+    if (latest && validationMatchesPeriod(latest.validation, now)) {
+      await resolveActiveAlertsByType(`BACKUP_VALIDATION_OVERDUE_${db.alias}`);
+      await resolveActiveAlertsByType(`BACKUP_VALIDATION_FAILED_${db.alias}`);
+      return { shouldValidate: false, reason: 'already_validated_this_period', windowKey: window.windowKey, latest, weekday: weekday.weekday, window: window.window };
+    }
+    const failed = await latestValidationFailureForWindow(db, window.windowKey);
+    if (failed) {
+      await markValidationFailureCircuit(db, new Error(failed.errorMessage || 'validacao falhou nesta janela'), window.windowKey);
+      return { shouldValidate: false, reason: 'validation_failed_in_window', windowKey: window.windowKey, latest, failedJobId: failed.id, weekday: weekday.weekday, window: window.window };
+    }
+    return { shouldValidate: true, reason: 'weekly_validation_window', windowKey: window.windowKey, latest, weekday: weekday.weekday, window: window.window };
+  }
+  return {
+    shouldValidate: false,
+    reason: window.reason || 'outside_validation_window',
+    windowKey: window.windowKey,
+    latest,
+    weekday: weekday.weekday,
+    window: window.window,
+    nextWindowHour: window.startHour,
+    windowMinutes: window.windowMinutes
+  };
+}
+
 async function validateBackupRestore(db, backupPath, logPath, stamp) {
   const tempRestorePath = `/firebird/restore-work/${db.alias}_backup_validate_${stamp}.fdb`;
   const cmd = [
@@ -1135,11 +1416,11 @@ async function validateBackupRestore(db, backupPath, logPath, stamp) {
     'cleanup_validation() { rm -f "$restore"; if [ "${restore_src:-$backup}" != "$backup" ]; then rm -f "$restore_src" || true; fi; }',
     'trap cleanup_validation EXIT',
     'case "$backup" in *.gz) restore_src="$(mktemp /tmp/tronfire_backup_validate_XXXXXX.gbk)" || fail 81 "Falha ao criar arquivo temporario para validacao"; gzip -dc "$backup" > "$restore_src" || { rm -f "$restore_src"; fail 81 "Falha ao descompactar backup para validacao"; } ;; esac',
-    `run_with_timeout() { ${firebirdTimeoutCommand(BACKUP_VALIDATION_TIMEOUT_MINUTES)}; }`,
+    `run_with_timeout() { ${firebirdTimeoutCommand(BACKUP_VALIDATION_TIMEOUT_MINUTES)}; };`,
     `run_with_timeout ${shQuote(`${FIREBIRD_BIN}/gbak`)} -c -user SYSDBA -password ${shQuote(FIREBIRD_PASSWORD)} "$restore_src" ${shQuote(firebirdCreateTarget(tempRestorePath))} >> "$log" 2>&1 || fail 82 "Falha ao restaurar backup para validacao"`,
     'if [ "$restore_src" != "$backup" ]; then rm -f "$restore_src" || true; fi',
     'test -f "$restore" || fail 83 "Restore de validacao terminou sem arquivo restaurado"',
-    `${shQuote(`${FIREBIRD_BIN}/gstat`)} -h "$restore" >> "$log" 2>&1 || fail 84 "Falha no gstat do backup restaurado"`,
+    `run_with_timeout ${shQuote(`${FIREBIRD_BIN}/gstat`)} -h "$restore" >> "$log" 2>&1 || fail 84 "Falha no gstat do backup restaurado"`,
     'rm -f "$restore"',
     'echo "[validacao] backup aprovado" >> "$log"'
   ].join('; ');
@@ -1152,12 +1433,17 @@ async function validateBackupRestore(db, backupPath, logPath, stamp) {
     } catch {
       // The original validation error is the one that matters.
     }
-    throw new Error(message);
+    const validationError = new Error(`Falha na validacao do backup Firebird: ${message}`);
+    validationError.phase = 'backup-validation';
+    validationError.validationFailure = true;
+    validationError.originalMessage = message;
+    throw validationError;
   }
   return {
     ok: true,
     method: 'gbak-restore-gstat',
     validatedAt: new Date().toISOString(),
+    windowKey: validationWindowInfo(new Date()).windowKey,
     logPath
   };
 }
@@ -1188,21 +1474,31 @@ async function runBackup(db, reason = 'AUTO') {
     console.log(`[worker] backup ${reason} ignorado: operacao ${currentDb.operationKind || 'desconhecida'} em andamento para ${db.alias}`);
     return;
   }
+  if (databaseRoutineActive(db)) {
+    console.log(`[worker] backup ${reason} ignorado: rotina Firebird ja em andamento para ${db.alias}`);
+    return;
+  }
+  if (firebirdCircuitOpen(db)) {
+    console.log(`[worker] backup ${reason} adiado: Firebird degradado para ${db.alias}`);
+    return;
+  }
   const stamp = backupStamp();
   const rawBackupPath = `/firebird/backups/${db.alias}_${stamp}.gbk`;
   const backupPath = `${rawBackupPath}.gz`;
   const manifestPath = `${backupPath}.manifest.json`;
   const logPath = `/firebird/logs/backup_${db.alias}_${stamp}.log`;
   const attemptStartedAt = new Date();
-  await prisma.managedDatabase.update({
-    where: { id: db.id },
-    data: { lastBackupAttemptAt: attemptStartedAt }
-  });
-  const job = await prisma.backupJob.create({
-    data: { databaseId: db.id, status: 'RUNNING', startedAt: attemptStartedAt, backupPath, manifestPath, logPath }
-  });
+  let job = null;
 
+  setDatabaseRoutineLock(db, `backup-${reason}`);
   try {
+    await prisma.managedDatabase.update({
+      where: { id: db.id },
+      data: { lastBackupAttemptAt: attemptStartedAt }
+    });
+    job = await prisma.backupJob.create({
+      data: { databaseId: db.id, status: 'RUNNING', startedAt: attemptStartedAt, backupPath, manifestPath, logPath }
+    });
     const cmd = [
       `run_with_timeout() { ${firebirdTimeoutCommand(BACKUP_TIMEOUT_MINUTES)}; };`,
       'run_with_timeout',
@@ -1216,25 +1512,26 @@ async function runBackup(db, reason = 'AUTO') {
       `&& gzip -f ${shQuote(rawBackupPath)}`
     ].join(' ');
     try {
-      await dockerExec(['sh', '-lc', cmd], BACKUP_TIMEOUT_MS);
+      await dockerExec(['sh', '-lc', cmd], BACKUP_TIMEOUT_MS + 60_000);
     } catch (err) {
       throw new Error(commandTimeoutMessage(err, 'geracao do backup Firebird', BACKUP_TIMEOUT_MINUTES));
     }
     const { stdout: sizeOut } = await dockerExec(['stat','-c','%s', backupPath]);
     const { stdout: shaOut } = await dockerExec(['sha256sum', backupPath]);
     const sha = shaOut.trim().split(/\s+/)[0];
-    const validationDecision = await shouldValidateBackupRestore(db, reason);
-    const validation = validationDecision.allowed
+    const validationPlan = await backupValidationPlan(db);
+    const validation = validationPlan.shouldValidate
       ? await validateBackupRestore(db, backupPath, logPath, stamp)
       : {
-          ok: false,
           skipped: true,
-          reason: validationDecision.reason,
-          window: validationDecision.window,
-          weekday: validationDecision.weekday,
-          message: validationDecision.reason === 'already_validated_this_period'
-            ? `Validacao de restore ja executada no periodo configurado para ${db.alias}`
-            : `Validacao de restore fora da politica configurada (${validationDecision.weekday || '*'} ${validationDecision.window})`
+          reason: validationPlan.reason,
+          mode: 'weekly_window',
+          weekday: validationPlan.weekday || BACKUP_RESTORE_VALIDATION_WEEKDAY,
+          window: validationPlan.window || BACKUP_RESTORE_VALIDATION_WINDOW,
+          windowKey: validationPlan.windowKey,
+          nextWindowHour: validationPlan.nextWindowHour ?? null,
+          windowMinutes: validationPlan.windowMinutes ?? null,
+          lastValidatedAt: validationPlan.latest?.validation?.validatedAt || null
         };
     const manifest = {
       databaseId: db.id,
@@ -1256,18 +1553,42 @@ async function runBackup(db, reason = 'AUTO') {
       data: { status: 'SUCCESS', finishedAt: new Date(), backupSize: BigInt(sizeOut.trim()), sha256: sha }
     });
     await resolveActiveAlertsByType('BACKUP_FAILED');
+    if (validation?.ok) {
+      await resolveActiveAlertsByType(`BACKUP_VALIDATION_FAILED_${db.alias}`);
+      await resolveActiveAlertsByType(`FIREBIRD_DEGRADED_${db.alias}`);
+      await resolveActiveAlertsByType(`FIREBIRD_UNRESPONSIVE_${db.alias}`);
+      await markFirebirdSuccess(db);
+    }
     await resolveActiveAlertsByType(`BACKUP_RUNNING_ORPHANED_${db.alias}`);
     await resolveActiveAlertsByType('BACKUP_RUNNING_STALE_WITH_PROCESS');
+    if (validation?.ok) await resolveActiveAlertsByType(`BACKUP_VALIDATION_OVERDUE_${db.alias}`);
     await uploadBackupJobToExternal(db, job.id, backupPath);
-    console.log(`[worker] backup ${reason} OK: ${db.alias}`);
+    console.log(`[worker] backup ${reason} OK: ${db.alias}${validation?.ok ? ' (validado)' : ' (validacao diaria adiada)'}`);
   } catch (err) {
+    if (err.validationFailure) {
+      await markValidationFailureCircuit(db, err, validationWindowInfo(new Date()).windowKey);
+    } else {
+      await markFirebirdFailure(db, err, `backup-${reason}`);
+    }
     const quarantined = quarantineInvalidBackup(backupPath, manifestPath);
-    await prisma.backupJob.update({
-      where: { id: job.id },
-      data: { status: 'FAILED', finishedAt: new Date(), errorMessage: `${err.message}${quarantined.length ? ` | quarentena: ${quarantined.join(', ')}` : ''}` }
-    });
-    await prisma.alert.create({ data: { type: 'BACKUP_FAILED', severity: 'CRITICAL', message: `Backup falhou: ${db.name}` } });
+    if (job) {
+      await prisma.backupJob.update({
+        where: { id: job.id },
+        data: { status: 'FAILED', finishedAt: new Date(), errorMessage: `${err.message}${quarantined.length ? ` | quarentena: ${quarantined.join(', ')}` : ''}` }
+      });
+    }
+    if (err.validationFailure) {
+      await createAlertOnce(
+        `BACKUP_VALIDATION_FAILED_${db.alias}`,
+        'CRITICAL',
+        `Backup gerado, mas a validacao por restore falhou: ${db.name}. Arquivo enviado para quarentena.`
+      );
+    } else {
+      await prisma.alert.create({ data: { type: 'BACKUP_FAILED', severity: 'CRITICAL', message: `Backup falhou: ${db.name}` } });
+    }
     console.error(`[worker] backup ${reason} erro: ${db.alias}`, err.message);
+  } finally {
+    clearDatabaseRoutineLock(db, `backup-${reason}`);
   }
 }
 
@@ -1334,6 +1655,88 @@ async function runAutomaticBackups() {
   }
 }
 
+async function runFirebirdSweep(db) {
+  if (!isPrimaryNode()) {
+    console.log(`[worker] sweep ignorado no no ${TRONFIRE_NODE_ROLE}: ${db.alias}`);
+    return;
+  }
+  if (haSyncActive()) {
+    console.log(`[worker] sweep adiado: HA sync em execucao para ${db.alias}`);
+    return;
+  }
+  if (backupRunning) {
+    console.log(`[worker] sweep adiado: backup em execucao para ${db.alias}`);
+    return;
+  }
+  const currentDb = await clearExpiredDatabaseOperation(db);
+  if (databaseOperationActive(currentDb)) {
+    console.log(`[worker] sweep ignorado: operacao ${currentDb.operationKind || 'desconhecida'} em andamento para ${db.alias}`);
+    return;
+  }
+  if (databaseInPostRestoreGrace(currentDb)) {
+    console.log(`[worker] sweep ignorado: ${db.alias} em periodo de estabilizacao apos restore`);
+    return;
+  }
+  if (databaseRoutineActive(db)) {
+    console.log(`[worker] sweep ignorado: rotina Firebird ja em andamento para ${db.alias}`);
+    return;
+  }
+  if (firebirdCircuitOpen(db)) {
+    console.log(`[worker] sweep adiado: Firebird degradado para ${db.alias}`);
+    return;
+  }
+
+  const stamp = backupStamp();
+  const logPath = `/firebird/logs/sweep_${db.alias}_${stamp}.log`;
+  const cmd = [
+    'set -e',
+    `db_file=${shQuote(db.filePath)}`,
+    `db=${shQuote(firebirdDbConnect(db.filePath))}`,
+    `log=${shQuote(logPath)}`,
+    'test -f "$db_file"',
+    `run_with_timeout() { ${firebirdTimeoutCommand(FIREBIRD_SWEEP_TIMEOUT_MINUTES)}; };`,
+    `echo "[sweep] inicio $(date -Iseconds)" > "$log"`,
+    `run_with_timeout ${shQuote(`${FIREBIRD_BIN}/gfix`)} -sweep -user SYSDBA -password ${shQuote(FIREBIRD_PASSWORD)} "$db" >> "$log" 2>&1`,
+    `run_with_timeout ${shQuote(`${FIREBIRD_BIN}/gstat`)} -h "$db_file" >> "$log" 2>&1`,
+    `echo "[sweep] fim $(date -Iseconds)" >> "$log"`
+  ].join('\n');
+
+  try {
+    const result = await withDatabaseRoutineLock(db, 'weekly-sweep', () => dockerExec(['sh', '-lc', cmd], FIREBIRD_SWEEP_TIMEOUT_MS + 60_000));
+    if (!result) return;
+    await resolveActiveAlertsByType(`FIREBIRD_SWEEP_FAILED_${db.alias}`);
+    console.log(`[worker] sweep OK: ${db.alias}`);
+  } catch (err) {
+    await createAlertOnce(`FIREBIRD_SWEEP_FAILED_${db.alias}`, 'WARNING', `Sweep Firebird falhou para ${db.name}: ${err.message}`);
+    console.error(`[worker] sweep erro: ${db.alias}`, err.message);
+  }
+}
+
+async function runScheduledSweeps() {
+  if (!FIREBIRD_SWEEP_ENABLED) return;
+  if (!isPrimaryNode()) return;
+  if (backupRunning) return;
+  if (haSyncActive()) {
+    console.log('[worker] sweep semanal adiado: HA sync em execucao');
+    return;
+  }
+  const dbs = await prisma.managedDatabase.findMany({
+    where: { type: { not: 'ARQUIVADO' } },
+    orderBy: [{ isPrimary: 'desc' }, { updatedAt: 'asc' }]
+  });
+  for (const db of dbs) {
+    if (haSyncActive()) {
+      console.log('[worker] sweep semanal interrompido antes de iniciar novo banco: HA sync em execucao');
+      break;
+    }
+    await markOrphanedRunningBackupsFailed(db.id, 'before-weekly-sweep');
+    await markStaleRunningBackupsFailed(db.id, 'before-weekly-sweep');
+    const runningBackup = await prisma.backupJob.count({ where: { databaseId: db.id, status: 'RUNNING' } });
+    if (runningBackup > 0) continue;
+    await runFirebirdSweep(db);
+  }
+}
+
 async function checkDisk() {
   try {
     const { stdout } = await dockerExec(['sh','-lc',"df -P /firebird/data | awk 'NR==2 {print $5}' | tr -d '%'"]);
@@ -1356,6 +1759,7 @@ async function checkDatabases() {
       await markStaleRunningBackupsFailed(db.id, 'before-database-check');
       const runningBackup = await prisma.backupJob.count({ where: { databaseId: db.id, status: 'RUNNING' } });
       if (runningBackup > 0) continue;
+      if (databaseRoutineActive(db) || firebirdCircuitOpen(db)) continue;
       const logPath = `/firebird/logs/check_${db.alias}.log`;
       const cmd = [
         'set -e',
@@ -1363,11 +1767,12 @@ async function checkDatabases() {
         `db=${shQuote(firebirdDbConnect(db.filePath))}`,
         `log=${shQuote(logPath)}`,
         'test -f "$db_file"',
-        `run_with_timeout() { ${firebirdTimeoutCommand(2)}; }`,
+        `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; };`,
         `printf 'select 1 from rdb$database;\\nquit;\\n' | run_with_timeout ${shQuote(`${FIREBIRD_BIN}/isql`)} -user SYSDBA -password ${shQuote(FIREBIRD_PASSWORD)} "$db" > "$log" 2>&1`,
         `run_with_timeout ${shQuote(`${FIREBIRD_BIN}/gstat`)} -h "$db_file" >> "$log" 2>&1`
-      ].join('; ');
-      await dockerExec(['sh','-lc', cmd], 120_000);
+      ].join('\n');
+      const checkResult = await withDatabaseRoutineLock(db, 'database-check', () => dockerExec(['sh','-lc', cmd], (FIREBIRD_QUERY_TIMEOUT_SECONDS * 2 + 20) * 1000));
+      if (!checkResult) continue;
       await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ONLINE', lastCheckAt: new Date() } });
       await prisma.alert.updateMany({ where: { type: `DATABASE_INTEGRITY_ERROR_${db.alias}`, resolved: false }, data: { resolved: true } });
       await prisma.alert.updateMany({ where: { type: `DATABASE_HEALTH_ERROR_${db.alias}`, resolved: false }, data: { resolved: true } });
@@ -1406,6 +1811,17 @@ cron.schedule('* * * * *', async () => {
 cron.schedule('* * * * *', async () => {
   await collectFirebirdSessionHistory();
 });
+
+if (FIREBIRD_SWEEP_ENABLED) {
+  if (cron.validate(FIREBIRD_SWEEP_CRON)) {
+    cron.schedule(FIREBIRD_SWEEP_CRON, async () => {
+      console.log(`[worker] rotina de sweep Firebird semanal (${FIREBIRD_SWEEP_CRON}, ${FIREBIRD_SWEEP_TIMEZONE})`);
+      await runScheduledSweeps();
+    }, { timezone: FIREBIRD_SWEEP_TIMEZONE });
+  } else {
+    console.error(`[worker] cron de sweep Firebird invalido: ${FIREBIRD_SWEEP_CRON}`);
+  }
+}
 
 console.log('[worker] TronFire worker iniciado');
 setTimeout(() => {

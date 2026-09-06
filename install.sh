@@ -6,20 +6,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_DIR="/etc/tronsoftos"
 ENV_FILE="${ENV_DIR}/tronsoftos.env"
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+fi
 
-env_value() {
-  local file="$1"
-  local key="$2"
-  [ -f "$file" ] || return 0
-  grep "^$key=" "$file" | tail -n1 | cut -d= -f2- || true
-}
-
-APP_DIR="${TRONSOFTOS_APP_DIR:-$(env_value "$ENV_FILE" "TRONSOFTOS_APP_DIR")}"
-APP_DIR="${APP_DIR:-$SCRIPT_DIR}"
-USER_NAME="${TRONSOFTOS_USER:-$(env_value "$ENV_FILE" "TRONSOFTOS_USER")}"
-USER_NAME="${USER_NAME:-tronsoftos}"
-GROUP_NAME="${TRONSOFTOS_GROUP:-$(env_value "$ENV_FILE" "TRONSOFTOS_GROUP")}"
-GROUP_NAME="${GROUP_NAME:-tronsoftos}"
+APP_DIR="${TRONSOFTOS_APP_DIR:-$SCRIPT_DIR}"
+USER_NAME="${TRONSOFTOS_USER:-tronsoftos}"
+GROUP_NAME="${TRONSOFTOS_GROUP:-tronsoftos}"
+TECHNICIAN_USER="${TRONSOFTOS_TECHNICIAN_USER:-tronsoft}"
+ENABLE_TECHNICIAN_SUDO="${TRONSOFTOS_ENABLE_TECHNICIAN_SUDO:-true}"
 
 prepare_frontend() {
   if [ ! -f "$APP_DIR/frontend/package.json" ]; then
@@ -111,45 +109,6 @@ install_docker() {
   docker compose version >/dev/null
 }
 
-load_docker_image_bundle() {
-  local bundle="${TRONSYSTEM_DOCKER_IMAGE_BUNDLE:-/usr/local/share/tronsystem-docker-images.tar}"
-  [ -f "$bundle" ] || return 0
-  echo "Carregando imagens Docker embutidas: $bundle"
-  docker load -i "$bundle"
-}
-
-tronfire_images_available() {
-  docker image inspect tronfire-backend:latest tronfire-worker:latest postgres:16-alpine redis:7-alpine >/dev/null 2>&1
-}
-
-tronfire_images_compatible() {
-  if docker run --rm --entrypoint sh tronfire-worker:latest -lc "grep -F '}; };\`,' /app/src/worker.js >/dev/null 2>&1"; then
-    echo "Imagem tronfire-worker local contem gerador de script antigo; rebuild sera executado."
-    return 1
-  fi
-  if docker run --rm --entrypoint sh tronfire-backend:latest -lc "grep -F '}; };\`,' /app/src/server.js >/dev/null 2>&1"; then
-    echo "Imagem tronfire-backend local contem gerador de script antigo; rebuild sera executado."
-    return 1
-  fi
-  return 0
-}
-
-tronfire_compose_up() {
-  local label="$1"
-  shift
-  if [ "${TRONSOFTOS_FORCE_TRONFIRE_BUILD:-false}" = "true" ]; then
-    run_with_retry "$label" docker compose "$@" up -d --build
-    return
-  fi
-  if tronfire_images_available && tronfire_images_compatible; then
-    echo "Imagens TronFire encontradas localmente; subindo sem rebuild."
-    run_with_retry "$label" docker compose "$@" up -d
-    return
-  fi
-  echo "Imagens TronFire nao encontradas; build local sera executado."
-  run_with_retry "$label" docker compose "$@" up -d --build
-}
-
 apt_get() {
   local attempt
   local max_attempts="${APT_LOCK_RETRY_ATTEMPTS:-36}"
@@ -199,23 +158,42 @@ set_env_value() {
 env_value() {
   local file="$1"
   local key="$2"
+  local line=""
   [ -f "$file" ] || return 0
-  grep "^$key=" "$file" | tail -n1 | cut -d= -f2- || true
+  line="$(grep "^$key=" "$file" | tail -n1 || true)"
+  [ -n "$line" ] || return 0
+  printf '%s\n' "${line#*=}"
+}
+
+running_service_env_value() {
+  local key="$1"
+  local pid=""
+  local line=""
+  pid="$(systemctl show -p MainPID --value tronsoftos 2>/dev/null || true)"
+  [ -n "$pid" ] && [ "$pid" != "0" ] && [ -r "/proc/$pid/environ" ] || return 0
+  line="$(tr '\0' '\n' < "/proc/$pid/environ" | grep "^$key=" | tail -n1 || true)"
+  [ -n "$line" ] || return 0
+  printf '%s\n' "${line#*=}"
 }
 
 reconcile_internal_token_files() {
   local tronfire_env="$APP_DIR/apps/tronfire/.env"
   local cluster_secrets="$APP_DIR/state/cluster-secrets.env"
   local effective_token=""
+  local process_token=""
+  local service_token=""
   local env_token=""
   local tronfire_token=""
   local cluster_token=""
 
+  process_token="${TRONSOFTOS_INTERNAL_TOKEN:-}"
+  service_token="$(running_service_env_value "TRONSOFTOS_INTERNAL_TOKEN")"
   env_token="$(env_value "$ENV_FILE" "TRONSOFTOS_INTERNAL_TOKEN")"
   tronfire_token="$(env_value "$tronfire_env" "TRONSOFTOS_INTERNAL_TOKEN")"
   cluster_token="$(env_value "$cluster_secrets" "TRONSOFTOS_INTERNAL_TOKEN")"
-  effective_token="${cluster_token:-${tronfire_token:-$env_token}}"
+  effective_token="${env_token:-${process_token:-${service_token:-${tronfire_token:-$cluster_token}}}}"
   [ -n "$effective_token" ] || return 0
+  export TRONSOFTOS_INTERNAL_TOKEN="$effective_token"
 
   if [ ! -f "$cluster_secrets" ]; then
     install -d -m 0700 -o "$USER_NAME" -g "$GROUP_NAME" "$APP_DIR/state"
@@ -274,6 +252,21 @@ ensure_ha_sync_ssh_user() {
   fi
 }
 
+ensure_technician_sudo() {
+  [ "$ENABLE_TECHNICIAN_SUDO" = "true" ] || return 0
+  [ -n "$TECHNICIAN_USER" ] || return 0
+  if ! id "$TECHNICIAN_USER" >/dev/null 2>&1; then
+    echo "Aviso: usuario tecnico '$TECHNICIAN_USER' nao existe neste host; sudo tecnico nao foi configurado." >&2
+    return 0
+  fi
+  usermod -aG sudo "$TECHNICIAN_USER" 2>/dev/null || true
+  cat > /etc/sudoers.d/90-tronsystem-technician <<EOF
+$TECHNICIAN_USER ALL=(ALL) NOPASSWD:ALL
+EOF
+  chmod 0440 /etc/sudoers.d/90-tronsystem-technician
+  visudo -cf /etc/sudoers.d/90-tronsystem-technician
+}
+
 run_with_retry() {
   local label="$1"
   shift
@@ -327,7 +320,6 @@ apt_get update
 apt_get install -y ca-certificates curl git gnupg openssl rsync openssh-client openssh-server keepalived rclone nodejs npm sudo
 apt_get install -y samba samba-common-bin || echo "Aviso: samba nao foi instalado; compartilhamento via rede ficara indisponivel ate instalar o pacote samba." >&2
 install_docker
-load_docker_image_bundle
 configure_time_sync
 
 echo "Criando usuario e diretorios..."
@@ -339,6 +331,7 @@ if ! id "$USER_NAME" >/dev/null 2>&1; then
 fi
 usermod -aG docker "$USER_NAME" || true
 usermod --home "$APP_DIR" --shell /bin/bash "$USER_NAME" || true
+ensure_technician_sudo
 
 mkdir -p "$APP_DIR" "$ENV_DIR" "$APP_DIR/state" "$APP_DIR/config" "$APP_DIR/logs" /opt/tronfire-storage
 mkdir -p \
@@ -417,37 +410,26 @@ prepare_frontend
 
 echo "Preparando TronFire..."
 if [ ! -f "$APP_DIR/apps/tronfire/.env" ]; then
-  echo "Preparando TronFire: criando .env inicial."
   cp "$APP_DIR/apps/tronfire/.env.example" "$APP_DIR/apps/tronfire/.env"
 fi
-echo "Preparando TronFire: ajustando variaveis."
 set_env_value "$APP_DIR/apps/tronfire/.env" "APP_ROOT" "$APP_DIR/apps/tronfire"
 set_env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_STATE_DIR" "$APP_DIR/state"
 set_env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_CLUSTER_LOCK" "$APP_DIR/state/cluster-lock.json"
 set_env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_CLUSTER_SECRETS" "$APP_DIR/state/cluster-secrets.env"
-set_env_value "$APP_DIR/apps/tronfire/.env" "TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW" "$(env_value "$APP_DIR/apps/tronfire/.env" "TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW" || true)"
-if [ -z "$(env_value "$APP_DIR/apps/tronfire/.env" "TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW")" ]; then
-  set_env_value "$APP_DIR/apps/tronfire/.env" "TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW" "03:00-06:00"
-fi
 if [ -f "$APP_DIR/state/cluster-secrets.env" ] && [ -z "$(env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_INTERNAL_TOKEN")" ]; then
   set_env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_INTERNAL_TOKEN" "$(env_value "$APP_DIR/state/cluster-secrets.env" "TRONSOFTOS_INTERNAL_TOKEN")"
 fi
-echo "Preparando TronFire: sincronizando segredos."
 reconcile_internal_token_files
 cd "$APP_DIR/apps/tronfire"
-echo "Preparando TronFire: instalando assets Firebird."
 bash scripts/install-assets.sh
 if [ -f "$APP_DIR/apps/tronfire/docker/firebird25/FirebirdCS-2.5.9.27139-0.amd64.tar.gz" ]; then
-  echo "Preparando TronFire: validando pacote Firebird."
   if ! tar -tzf "$APP_DIR/apps/tronfire/docker/firebird25/FirebirdCS-2.5.9.27139-0.amd64.tar.gz" >/dev/null; then
     echo "Pacote Firebird baixado esta invalido. Verifique FIREBIRD_PACKAGE_URL em $APP_DIR/apps/tronfire/.env" >&2
     exit 68
   fi
 fi
-echo "Preparando TronFire: criando storage."
 STORAGE_ROOT=/opt/tronfire-storage bash "$APP_DIR/apps/tronfire/scripts/init-storage.sh"
 if [ -f "$APP_DIR/apps/tronfire/docker/firebird25/template.fdb" ]; then
-  echo "Preparando TronFire: copiando template Firebird."
   cp "$APP_DIR/apps/tronfire/docker/firebird25/template.fdb" /opt/tronfire-storage/firebird/templates/template.fdb
 fi
 
@@ -511,11 +493,11 @@ systemctl enable --now tronsoftos-rclone-backup.timer
 echo "Subindo TronFire e aplicando migrations..."
 cd "$APP_DIR/apps/tronfire"
 if [ "$tronfire_firebird_exec_mode" = "host" ]; then
-  tronfire_compose_up "Subindo TronFire" -f docker-compose.yml -f docker-compose.host-firebird.yml
+  run_with_retry "Subindo TronFire" docker compose -f docker-compose.yml -f docker-compose.host-firebird.yml up -d --build
   docker compose -f docker-compose.yml -f docker-compose.host-firebird.yml exec -T backend npx prisma migrate deploy
   docker compose -f docker-compose.yml -f docker-compose.host-firebird.yml exec -T backend node prisma/seed.js
 else
-  tronfire_compose_up "Subindo TronFire"
+  run_with_retry "Subindo TronFire" docker compose up -d --build
   docker compose exec -T backend npx prisma migrate deploy
   docker compose exec -T backend node prisma/seed.js
 fi

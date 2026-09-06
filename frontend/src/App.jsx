@@ -65,9 +65,9 @@ const navItems = [
 const fallbackDashboard = {
   generatedAt: new Date().toISOString(),
   cluster: {
-    mode: 'simple',
+    mode: 'loading',
     nodeName: 'local',
-    nodeRole: 'primary',
+    nodeRole: 'loading',
     vip: 'nao configurado',
     lock: null,
     keepalived: { enabled: false, interface: null, routerId: null },
@@ -461,11 +461,13 @@ function DashboardView({ dashboard }) {
       ? `${formatBytes(driveQuota.free)} livre de ${formatBytes(driveQuota.total)} (${driveQuota.percentUsed}% usado)`
       : 'aguardando Google Drive';
   const driveUsageTone = driveQuota?.ok === false ? 'amber' : driveQuota ? 'green' : 'slate';
-  const currentMode = String(dashboard.cluster.mode || 'simple').toUpperCase();
-  const currentModeTone = currentMode === 'HA' ? 'sky' : 'green';
+  const currentMode = String(dashboard.cluster.mode || 'loading').toUpperCase();
+  const currentModeTone = currentMode === 'HA' ? 'sky' : currentMode === 'SIMPLE' ? 'green' : 'slate';
   const currentModeCardClass = currentMode === 'HA'
     ? 'border-sky-700 bg-sky-600'
-    : 'border-green-700 bg-green-600';
+    : currentMode === 'SIMPLE'
+      ? 'border-green-700 bg-green-600'
+      : 'border-slate-700 bg-slate-600';
   return (
     <div className="space-y-5">
       <div className="grid gap-4 lg:grid-cols-6">
@@ -481,7 +483,7 @@ function DashboardView({ dashboard }) {
           detailClassName="text-white/80"
         />
         <Stat label="Tempo ligado" value={formatDurationSeconds(dashboard.hostUptimeSeconds)} detail="uptime do servidor" icon={FileClock} tone="green" />
-        <Stat label="Papel" value={dashboard.cluster.nodeRole} detail={dashboard.cluster.vip || 'Não possui H.A.'} icon={ShieldCheck} tone="green" />
+        <Stat label="Papel" value={dashboard.cluster.nodeRole === 'loading' ? 'aguardando' : dashboard.cluster.nodeRole} detail={dashboard.cluster.vip || 'Não possui H.A.'} icon={ShieldCheck} tone={dashboard.cluster.nodeRole === 'loading' ? 'slate' : 'green'} />
         <Stat label="Containers online" value={`${onlineContainers}/${troncomandaContainers.length}`} detail="TronComanda" icon={Boxes} tone="slate" />
         <Stat label="Alertas" value={alerts.length} detail={alerts[0]?.message || 'sem alertas ativos'} icon={AlertTriangle} tone={alerts.length ? 'amber' : 'green'} />
         <Stat label="Hora servidor" value={formatDateTime(dashboard.generatedAt)} detail="gerado pelo backend" icon={FileClock} tone="slate" />
@@ -800,7 +802,7 @@ function ClusterView({ dashboard }) {
     vipCidr: cluster.vipCidr || (cluster.vip ? `${cluster.vip}/24` : ''),
     routerId: Number(cluster.keepalived?.routerId || 51),
     authPass: '',
-    nodeState: cluster.keepalived?.nodeState || (values.nodeRole === 'primary' ? 'MASTER' : 'BACKUP'),
+    nodeState: cluster.keepalived?.nodeState || 'BACKUP',
     priority: Number(cluster.keepalived?.priority || (values.nodeRole === 'primary' ? 150 : 100))
   };
   const saveMutation = useMutation({
@@ -991,6 +993,13 @@ function ClusterView({ dashboard }) {
     { id: 'identity', label: 'Identidade', icon: ShieldCheck }
   ];
   const activeClusterTab = clusterTabs.some(item => item.id === clusterTab) ? clusterTab : 'overview';
+  const localActivationIsPrimary = values.nodeRole === 'primary';
+  const localActivationLabel = localActivationIsPrimary ? 'Confirmar primary ativo neste servidor' : 'Promover standby para primary';
+  const localActivationReason = lockValues.reason || (localActivationIsPrimary ? 'confirmacao manual do primary local pelo TronSoftOS' : 'promocao manual confirmada no TronSoftOS');
+  const localActivationHelp = localActivationIsPrimary
+    ? 'Use apos boot, atualizacao ou failback para confirmar que este servidor continua sendo o primary e pode manter o VIP/producao.'
+    : 'Use somente quando o primary estiver indisponivel e este standby estiver validado para assumir o VIP/producao.';
+  const localActivationSuccess = localActivationIsPrimary ? 'Primary local confirmado.' : 'Promocao/ativacao registrada.';
   const identityForm = (
     <Card title="Identidade do no" icon={ShieldCheck}>
       <form
@@ -1300,7 +1309,7 @@ function ClusterView({ dashboard }) {
                       vipCidr: pairingImportMutation.data.keepalived.vipCidr,
                       routerId: pairingImportMutation.data.keepalived.routerId,
                       authPass: '',
-                      nodeState: values.nodeRole === 'primary' ? 'MASTER' : 'BACKUP',
+                      nodeState: 'BACKUP',
                       priority: values.nodeRole === 'primary' ? 150 : 100
                     })}
                     className="inline-flex items-center justify-center gap-2 rounded-md bg-green-700 px-3 py-2 text-sm font-medium text-white hover:bg-green-800 disabled:opacity-50"
@@ -1505,16 +1514,17 @@ function ClusterView({ dashboard }) {
         </div>
         {guard.returnedFormerPrimary ? <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">Este nó parece ser um antigo principal retornando. Ele fica bloqueado para VIP/producao ate ressincronizar.</div> : null}
         <div className="mt-4 flex flex-wrap items-center gap-3">
-          <button type="button" disabled={activateMutation.isPending || (!guard.canPromote && values.deploymentMode === 'ha' && values.nodeRole === 'standby')} onClick={() => activateMutation.mutate(lockValues.reason || 'ativacao manual confirmada no TronSoftOS')} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
+          <button type="button" disabled={activateMutation.isPending || (!guard.canPromote && values.deploymentMode === 'ha' && values.nodeRole === 'standby')} onClick={() => activateMutation.mutate(localActivationReason)} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
             <ShieldCheck className="h-4 w-4" />
-            Promover/ativar este no
+            {localActivationLabel}
           </button>
           <button type="button" disabled={recoveryMutation.isPending} onClick={() => recoveryMutation.mutate(lockValues.reason || 'nó retornou e sera ressincronizado antes de voltar ao cluster')} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
             <XCircle className="h-4 w-4" />
             Colocar em recuperacao
           </button>
         </div>
-        {activateMutation.isSuccess || recoveryMutation.isSuccess ? <div className="mt-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Protecao atualizada.</div> : null}
+        <div className="mt-2 text-xs text-slate-500">{localActivationHelp}</div>
+        {activateMutation.isSuccess || recoveryMutation.isSuccess ? <div className="mt-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">{activateMutation.isSuccess ? localActivationSuccess : 'No local colocado em recuperacao.'}</div> : null}
         {activateMutation.isError || recoveryMutation.isError ? <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{activateMutation.error?.message || recoveryMutation.error?.message}</div> : null}
       </Card>
         </div>
@@ -1598,11 +1608,17 @@ function ClusterView({ dashboard }) {
 
 function BackupsView({ dashboard }) {
   const queryClient = useQueryClient();
+  const [googleAuthPolling, setGoogleAuthPolling] = useState(false);
   const rcloneQuery = useQuery({ queryKey: ['rclone-settings'], queryFn: () => api('/api/backups/rclone') });
   const rclone = rcloneQuery.data || dashboard.backups.rclone || {};
-  const centralGoogleQuery = useQuery({ queryKey: ['central-google-oauth'], queryFn: () => api('/api/backups/google/central'), retry: false });
-  const centralGoogle = centralGoogleQuery.data || {};
   const driveConfigured = Boolean(rclone.remote && rclone.configConfigured);
+  const centralGoogleQuery = useQuery({
+    queryKey: ['central-google-oauth'],
+    queryFn: () => api('/api/backups/google/central'),
+    retry: false,
+    refetchInterval: query => (googleAuthPolling && !driveConfigured && query.state.data?.configured !== false ? 5000 : false)
+  });
+  const centralGoogle = centralGoogleQuery.data || {};
   const remoteBackupsQuery = useQuery({ queryKey: ['rclone-remote-backups'], queryFn: () => api('/api/backups/rclone/remote-files'), enabled: driveConfigured, staleTime: 30000 });
   const quota = dashboard.backups.quota;
   const quotaLabel = quota?.ok === false
@@ -1618,9 +1634,11 @@ function BackupsView({ dashboard }) {
       : 'Conta Google: aguardando autenticacao';
   const tokenStatus = rclone.tokenStatus || {};
   const needsGoogleReconnect = quota?.code === 'google_drive_auth_expired' || (tokenStatus.configured && !tokenStatus.hasRefreshToken);
+  const centralConnectedPendingApply = Boolean(centralGoogle.connected && !driveConfigured);
   const remoteFiles = remoteBackupsQuery.data?.files || [];
   const [downloadJobId, setDownloadJobId] = useState(null);
   const [cleanupConfirmOpen, setCleanupConfirmOpen] = useState(false);
+  const [centralApplyAttemptKey, setCentralApplyAttemptKey] = useState('');
   const values = {
     enabled: rclone.enabled || false,
     bin: rclone.bin || '/usr/bin/rclone',
@@ -1632,6 +1650,17 @@ function BackupsView({ dashboard }) {
     remoteRetentionDays: rclone.remoteRetentionDays || 30,
     configContent: ''
   };
+  const centralApplyMutation = useMutation({
+    mutationFn: () => postApi('/api/backups/google/central/apply', values),
+    onSuccess: () => {
+      setGoogleAuthPolling(false);
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['rclone-settings'] });
+      queryClient.invalidateQueries({ queryKey: ['rclone-remote-backups'] });
+      queryClient.invalidateQueries({ queryKey: ['central-google-oauth'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    }
+  });
   const uploadTestMutation = useMutation({
     mutationFn: async () => {
       if (!driveConfigured) {
@@ -1650,7 +1679,9 @@ function BackupsView({ dashboard }) {
   const centralGoogleStartMutation = useMutation({
     mutationFn: () => postApi('/api/backups/google/central/start', { remote: values.remote, path: values.path }),
     onSuccess: data => {
+      setGoogleAuthPolling(true);
       queryClient.invalidateQueries({ queryKey: ['events'] });
+      queryClient.invalidateQueries({ queryKey: ['central-google-oauth'] });
       if (data.authUrl) window.open(data.authUrl, '_blank', 'noopener,noreferrer');
     }
   });
@@ -1685,14 +1716,21 @@ function BackupsView({ dashboard }) {
     enabled: !!downloadJobId,
     refetchInterval: query => query.state.data?.status === 'running' ? 1200 : false
   });
+  const centralApplyKey = `${googleAccountEmail || 'google'}|${values.remote}|${values.path}`;
+
+  useEffect(() => {
+    if (!centralConnectedPendingApply || centralApplyMutation.isPending || centralApplyAttemptKey === centralApplyKey) return;
+    setCentralApplyAttemptKey(centralApplyKey);
+    centralApplyMutation.mutate();
+  }, [centralApplyKey, centralApplyAttemptKey, centralApplyMutation, centralConnectedPendingApply]);
 
   return (
     <div className="grid gap-5 xl:grid-cols-[1fr_1fr]">
-      <Card title="Backups no Google Drive" icon={Cloud} action={<StatusPill value={remoteBackupsQuery.isError ? 'warning' : driveConfigured ? 'online' : centralGoogle.connected ? 'warning' : 'disabled'} />} className="xl:col-span-2">
+      <Card title="Backups no Google Drive" icon={Cloud} action={<StatusPill value={remoteBackupsQuery.isError || centralApplyMutation.isError ? 'warning' : driveConfigured ? 'online' : centralGoogle.connected ? 'warning' : 'disabled'} />} className="xl:col-span-2">
         <div className="mb-4 grid gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-700 lg:grid-cols-[minmax(0,1fr)_auto]">
           <div>
-            <div className="font-medium text-slate-900">{remoteBackupsQuery.data?.target || (driveConfigured ? `${values.remote}:${values.path}` : 'Google Drive ainda nao aplicado')}</div>
-            <div className="text-xs text-slate-500">Use a Central para autorizar o Google Drive e confirme com upload de teste.</div>
+            <div className="font-medium text-slate-900">{remoteBackupsQuery.data?.target || (driveConfigured ? `${values.remote}:${values.path}` : centralConnectedPendingApply ? 'Google Drive autenticado; aplicando neste servidor' : 'Google Drive ainda nao aplicado')}</div>
+            <div className="text-xs text-slate-500">Use a Central para autorizar o Google Drive. O TronSoftOS aplica a configuracao local automaticamente; o upload de teste continua recomendado como conferencia final.</div>
             <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
               <StatusPill value={centralGoogleQuery.isError ? 'Central indisponivel' : centralGoogle.connected ? 'Google conectado' : 'Google pendente'} />
               <span className={googleAccountEmail ? 'font-medium text-slate-700' : 'text-amber-700'}>{googleAccountLabel}</span>
@@ -1740,6 +1778,8 @@ function BackupsView({ dashboard }) {
           </div>
         </div>
         {uploadTestMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Upload OK: {uploadTestMutation.data.target}</div> : null}
+        {centralApplyMutation.isPending ? <div className="mb-3 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800">Google autenticado na Central. Aplicando rclone neste servidor...</div> : null}
+        {centralConnectedPendingApply && !centralApplyMutation.isPending && !centralApplyMutation.isError ? <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">Google conectado na Central, mas o rclone local ainda nao foi confirmado. O TronSoftOS esta tentando aplicar automaticamente.</div> : null}
         {cleanupMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">Gdrive limpo: {cleanupMutation.data.removed} arquivo(s) removido(s), {formatBytesValue(cleanupMutation.data.freedBytes)} liberados.</div> : null}
         {needsGoogleReconnect ? (
           <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
@@ -1748,7 +1788,7 @@ function BackupsView({ dashboard }) {
           </div>
         ) : null}
         {resetAuthMutation.isSuccess ? <div className="mb-3 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">{resetAuthMutation.data.message}</div> : null}
-        {centralGoogleStartMutation.isError || uploadTestMutation.isError || resetAuthMutation.isError || cleanupMutation.isError ? <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{centralGoogleStartMutation.error?.message || uploadTestMutation.error?.message || resetAuthMutation.error?.message || cleanupMutation.error?.message}</div> : null}
+        {centralGoogleStartMutation.isError || centralApplyMutation.isError || uploadTestMutation.isError || resetAuthMutation.isError || cleanupMutation.isError ? <div className="mb-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{centralGoogleStartMutation.error?.message || centralApplyMutation.error?.message || uploadTestMutation.error?.message || resetAuthMutation.error?.message || cleanupMutation.error?.message}</div> : null}
         <div className="overflow-hidden rounded-md border border-slate-200">
           {remoteFiles.length ? remoteFiles.slice(0, 30).map(file => (
             <div key={file.path} className="grid grid-cols-[1fr_100px_170px_110px] items-center gap-3 border-b border-slate-100 px-3 py-2 text-sm last:border-0">
@@ -2093,9 +2133,7 @@ function CloudflareView({ dashboard }) {
   const [form, setForm] = useState(null);
   const values = form || {
     enabled: cloudflare.enabled || false,
-    tunnelToken: '',
-    maintenanceSshEnabled: cloudflare.maintenanceSshEnabled || false,
-    maintenanceSshHostname: cloudflare.maintenanceSshHostname || ''
+    tunnelToken: ''
   };
   const saveMutation = useMutation({
     mutationFn: payload => fetch('/api/cloudflare', {
@@ -2141,16 +2179,6 @@ function CloudflareView({ dashboard }) {
           <div className="md:col-span-2">
             <Field label="Token do Tunnel" type="password" value={values.tunnelToken} onChange={value => setValue('tunnelToken', value)} placeholder={cloudflare.tokenConfigured ? 'token ja configurado' : 'cole o token do tunnel'} autoComplete="off" />
           </div>
-          <div className="md:col-span-2">
-            <Checkbox label="Habilitar SSH de manutencao pelo tunnel" checked={values.maintenanceSshEnabled} onChange={value => setValue('maintenanceSshEnabled', value)} />
-          </div>
-          <Field label="Hostname SSH de manutencao" value={values.maintenanceSshHostname || ''} onChange={value => setValue('maintenanceSshHostname', value)} placeholder="ssh-cliente.tronsoft.app.br" />
-          <Field label="Servico Cloudflare" value={cloudflare.maintenanceSshService || 'ssh://host.docker.internal:22'} readOnly />
-          {values.maintenanceSshEnabled ? (
-            <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800 md:col-span-2">
-              Crie esse Public Hostname no painel da Cloudflare apontando para o servico SSH acima. O hostname principal do painel continua separado.
-            </div>
-          ) : null}
           <div className="flex flex-wrap items-center gap-3 md:col-span-2">
             <button disabled={busy} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
               <Save className="h-4 w-4" />
@@ -2863,6 +2891,77 @@ function CentralSettings() {
   );
 }
 
+function MaintenanceSshTunnelSettings() {
+  const queryClient = useQueryClient();
+  const cloudflareQuery = useQuery({ queryKey: ['cloudflare-settings'], queryFn: () => api('/api/cloudflare') });
+  const cloudflare = cloudflareQuery.data || {};
+  const [form, setForm] = useState(null);
+  const values = form || {
+    maintenanceSshEnabled: cloudflare.maintenanceSshEnabled || false,
+    maintenanceSshHostname: cloudflare.maintenanceSshHostname || ''
+  };
+  const mutation = useMutation({
+    mutationFn: payload => fetch('/api/cloudflare', {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        enabled: cloudflare.enabled === true,
+        tunnelToken: '',
+        maintenanceSshEnabled: payload.maintenanceSshEnabled === true,
+        maintenanceSshHostname: payload.maintenanceSshHostname || ''
+      })
+    }).then(async response => {
+      if (!response.ok) throw new Error((await response.json()).error || `HTTP ${response.status}`);
+      return response.json();
+    }),
+    onSuccess: data => {
+      setForm({
+        maintenanceSshEnabled: data.maintenanceSshEnabled || false,
+        maintenanceSshHostname: data.maintenanceSshHostname || ''
+      });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['cloudflare-settings'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    }
+  });
+  const setValue = (key, value) => setForm(previous => ({ ...(previous || values), [key]: value }));
+  const busy = cloudflareQuery.isFetching || mutation.isPending;
+
+  return (
+    <Card title="SSH de manutencao pelo Cloudflare" icon={Terminal} action={<StatusPill value={values.maintenanceSshEnabled ? 'online' : 'disabled'} />}>
+      <form
+        className="grid gap-3 md:grid-cols-2"
+        onSubmit={event => {
+          event.preventDefault();
+          mutation.mutate(values);
+        }}
+      >
+        <div className="md:col-span-2">
+          <Checkbox label="Habilitar SSH de manutencao pelo tunnel" checked={values.maintenanceSshEnabled} onChange={value => setValue('maintenanceSshEnabled', value)} />
+        </div>
+        <Field label="Hostname SSH de manutencao" value={values.maintenanceSshHostname || ''} onChange={value => setValue('maintenanceSshHostname', value)} placeholder="ssh-cliente.tronsoft.app.br" />
+        <Field label="Servico Cloudflare" value={cloudflare.maintenanceSshService || 'ssh://host.docker.internal:22'} readOnly />
+        <div className="rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-sm text-sky-800 md:col-span-2">
+          Crie o Public Hostname no painel da Cloudflare apontando para o servico SSH acima. O token do tunnel continua na guia Cloudflare.
+        </div>
+        {!cloudflare.tokenConfigured ? (
+          <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 md:col-span-2">
+            Configure o token do Cloudflare Tunnel antes de publicar o SSH de manutencao.
+          </div>
+        ) : null}
+        <div className="flex items-center gap-3 md:col-span-2">
+          <button disabled={busy} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
+            <Save className="h-4 w-4" />
+            Salvar SSH
+          </button>
+          {mutation.isSuccess ? <StatusPill value="online" /> : null}
+          {mutation.isError ? <span className="text-sm text-red-700">{mutation.error.message}</span> : null}
+        </div>
+      </form>
+    </Card>
+  );
+}
+
 function TroncomandaSettings() {
   const queryClient = useQueryClient();
   const settingsQuery = useQuery({ queryKey: ['troncomanda-settings'], queryFn: () => api('/api/troncomanda/settings') });
@@ -3000,6 +3099,7 @@ function SettingsView({ dashboard }) {
   return (
     <div className="space-y-5">
       <CentralSettings />
+      <MaintenanceSshTunnelSettings />
       <NetworkSettings />
     </div>
   );

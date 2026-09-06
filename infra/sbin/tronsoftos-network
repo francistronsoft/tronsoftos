@@ -37,12 +37,41 @@ valid_drive_path() {
   [[ "$1" =~ ^/[^[:cntrl:]]+$ ]] && [[ "$1" != *".."* ]]
 }
 
+service_user() {
+  printf '%s' "${TRONSOFTOS_SERVICE_USER:-tronsoftos}"
+}
+
+service_group() {
+  printf '%s' "${TRONSOFTOS_SERVICE_GROUP:-$(service_user)}"
+}
+
+chown_service_account() {
+  local recursive="false"
+  if [ "${1:-}" = "-R" ]; then
+    recursive="true"
+    shift
+  fi
+  local target="$1"
+  local user
+  local group
+  user="$(service_user)"
+  group="$(service_group)"
+  id "$user" >/dev/null 2>&1 || return 0
+  getent group "$group" >/dev/null 2>&1 || group="$user"
+  if [ "$recursive" = "true" ]; then
+    chown -R "$user:$group" "$target" 2>/dev/null || true
+  else
+    chown "$user:$group" "$target" 2>/dev/null || true
+  fi
+}
+
 valid_samba_user() {
   [[ "$1" =~ ^[a-z_][a-z0-9_-]{2,31}$ ]]
 }
 
 valid_samba_secret_path() {
-  [[ "$1" =~ ^/opt/tronsoftos/state/drive-samba-[A-Za-z0-9._-]+/password\.secret$ ]]
+  local app_dir="${TRONSOFTOS_APP_DIR:-/opt/tronsoftos}"
+  [[ "$1" == "$app_dir"/state/drive-samba-[A-Za-z0-9._-]*/password.secret ]] && [[ "$1" != *".."* ]]
 }
 
 env_escape() {
@@ -61,73 +90,6 @@ set_env_value() {
   else
     printf '\n%s=%s\n' "$key" "$value" >> "$file"
   fi
-}
-
-disable_iface_dhcp_sources() {
-  local iface="$1"
-  local file tmp backup
-
-  for file in /etc/network/interfaces /etc/network/interfaces.d/*; do
-    [ -f "$file" ] || continue
-    tmp="$(mktemp)"
-    awk -v iface="$iface" '
-      $1 == "iface" && $2 == iface && $3 == "inet" && $4 == "dhcp" {
-        print "iface " iface " inet manual"
-        next
-      }
-      { print }
-    ' "$file" > "$tmp"
-    if ! cmp -s "$file" "$tmp"; then
-      backup="$file.tronsoftos-bak-$(date +%Y%m%d%H%M%S)"
-      cp -a "$file" "$backup"
-      install -m 0644 "$tmp" "$file"
-    fi
-    rm -f "$tmp"
-  done
-
-  if command -v dhcpcd >/dev/null 2>&1 || [ -f /etc/dhcpcd.conf ]; then
-    touch /etc/dhcpcd.conf
-    if ! awk -v iface="$iface" '$1 == "denyinterfaces" { for (i = 2; i <= NF; i++) if ($i == iface) found = 1 } END { exit found ? 0 : 1 }' /etc/dhcpcd.conf; then
-      {
-        echo
-        echo "# Managed by TronSoftOS: static IP is handled by systemd-networkd."
-        echo "denyinterfaces $iface"
-      } >> /etc/dhcpcd.conf
-    fi
-  fi
-}
-
-remove_dynamic_ipv4_addresses() {
-  local iface="$1"
-  local keep_cidr="$2"
-  local keep_vip_cidr=""
-  local cidr
-
-  if [ -f /etc/tronsoftos/tronsoftos.env ]; then
-    keep_vip_cidr="$(grep '^HA_VIP_CIDR=' /etc/tronsoftos/tronsoftos.env | tail -n1 | cut -d= -f2- || true)"
-  fi
-
-  ip -4 -o addr show dev "$iface" scope global 2>/dev/null \
-    | awk -v keep="$keep_cidr" -v keep_vip="$keep_vip_cidr" '$4 != keep && (keep_vip == "" || $4 != keep_vip) { print $4 }' \
-    | while read -r cidr; do
-        [ -n "$cidr" ] && ip addr del "$cidr" dev "$iface" 2>/dev/null || true
-      done
-}
-
-stop_iface_dhcp_client() {
-  local iface="$1"
-
-  if command -v timeout >/dev/null 2>&1 && command -v dhcpcd >/dev/null 2>&1; then
-    timeout 5s dhcpcd -k "$iface" >/dev/null 2>&1 || true
-    timeout 5s dhcpcd -x "$iface" >/dev/null 2>&1 || true
-  elif command -v dhcpcd >/dev/null 2>&1; then
-    dhcpcd -k "$iface" >/dev/null 2>&1 || true
-    dhcpcd -x "$iface" >/dev/null 2>&1 || true
-  fi
-
-  pkill -TERM -f "dhcpcd: .*${iface}" >/dev/null 2>&1 || true
-  sleep 1
-  pkill -KILL -f "dhcpcd: .*${iface}" >/dev/null 2>&1 || true
 }
 
 apply_pairing() {
@@ -159,7 +121,7 @@ apply_pairing() {
   ssh_user="${HA_SYNC_SSH_USER:-$ssh_user}"
 
   install -m 0600 "$source_file" "$cluster_secrets"
-  chown tronsoftos:tronsoftos "$cluster_secrets" 2>/dev/null || true
+  chown_service_account "$cluster_secrets"
   set_env_value "$cluster_secrets" "SESSION_SECRET" "$SESSION_SECRET"
   set_env_value "$cluster_secrets" "TRONSOFTOS_INTERNAL_TOKEN" "$TRONSOFTOS_INTERNAL_TOKEN"
   set_env_value "$cluster_secrets" "POSTGRES_PASSWORD" "$POSTGRES_PASSWORD"
@@ -218,7 +180,7 @@ apply_pairing() {
       printf '%s\n' "$TRONSOFTOS_SSH_PUBLIC_KEY" >> "$authorized_keys"
     fi
     chown -R "$ssh_user:$ssh_user" "$ssh_dir" 2>/dev/null || true
-    chown -R tronsoftos:tronsoftos "$app_dir/state" 2>/dev/null || true
+    chown_service_account -R "$app_dir/state"
     chmod 700 "$ssh_dir"
     chmod 600 "$authorized_keys"
     usermod -aG docker "$ssh_user" 2>/dev/null || true
@@ -331,12 +293,13 @@ apply_vip() {
   [[ "$auth_pass" =~ ^[A-Za-z0-9_.:-]{6,32}$ ]] || fail "Senha VRRP invalida; use 6 a 32 caracteres simples"
 
   local vip="${vip_cidr%%/*}"
+  local vrrp_state="BACKUP"
   local tronsoftos_env="/etc/tronsoftos/tronsoftos.env"
   local check_source="$app_dir/infra/keepalived/check-tronsoftos.sh"
   local check_target="/etc/keepalived/check-tronsoftos.sh"
   local conf_target="/etc/keepalived/keepalived.conf"
 
-  [ -s "$check_source" ] || fail "check-tronsoftos.sh nao encontrado ou vazio"
+  [ -f "$check_source" ] || fail "check-tronsoftos.sh nao encontrado"
   mkdir -p /etc/keepalived
   install -m 0755 "$check_source" "$check_target"
 
@@ -347,14 +310,14 @@ vrrp_script chk_tronsoftos {
     timeout 2
     fall 3
     rise 2
-    weight -50
 }
 
 vrrp_instance TRONSOFTOS_VIP {
-    state $node_state
+    state $vrrp_state
     interface $iface
     virtual_router_id $router_id
     priority $priority
+    nopreempt
     advert_int 1
 
     authentication {
@@ -378,7 +341,7 @@ EOF
   set_env_value "$tronsoftos_env" "HA_VIP_CIDR" "$vip_cidr"
   set_env_value "$tronsoftos_env" "HA_ROUTER_ID" "$router_id"
   set_env_value "$tronsoftos_env" "HA_AUTH_PASS" "$auth_pass"
-  set_env_value "$tronsoftos_env" "HA_NODE_ROLE" "$node_state"
+  set_env_value "$tronsoftos_env" "HA_NODE_ROLE" "$vrrp_state"
   set_env_value "$tronsoftos_env" "HA_PRIORITY" "$priority"
 
   sync_service_vip_envs "$app_dir" "$vip"
@@ -386,8 +349,8 @@ EOF
   systemctl enable keepalived.service >/dev/null 2>&1 || true
   systemctl restart keepalived.service
 
-  printf '{"ok":true,"interface":"%s","vip":"%s","vipCidr":"%s","routerId":%s,"nodeState":"%s","priority":%s,"config":"%s"}\n' \
-    "$(json_escape "$iface")" "$(json_escape "$vip")" "$(json_escape "$vip_cidr")" "$router_id" "$(json_escape "$node_state")" "$priority" "$(json_escape "$conf_target")"
+  printf '{"ok":true,"interface":"%s","vip":"%s","vipCidr":"%s","routerId":%s,"nodeState":"%s","requestedNodeState":"%s","priority":%s,"preempt":false,"config":"%s"}\n' \
+    "$(json_escape "$iface")" "$(json_escape "$vip")" "$(json_escape "$vip_cidr")" "$router_id" "$(json_escape "$vrrp_state")" "$(json_escape "$node_state")" "$priority" "$(json_escape "$conf_target")"
 }
 
 apply_static() {
@@ -430,7 +393,6 @@ apply_static() {
 
   if systemctl list-unit-files systemd-networkd.service >/dev/null 2>&1; then
     local network_file="/etc/systemd/network/10-tronsoftos-$iface.network"
-    disable_iface_dhcp_sources "$iface"
     {
       echo "[Match]"
       echo "Name=$iface"
@@ -447,10 +409,7 @@ apply_static() {
 
     systemctl enable systemd-networkd.service >/dev/null 2>&1 || true
     if [ "$apply_now" = "true" ]; then
-      systemctl restart dhcpcd.service >/dev/null 2>&1 || true
-      stop_iface_dhcp_client "$iface"
       systemctl restart systemd-networkd.service
-      remove_dynamic_ipv4_addresses "$iface" "$address_cidr"
     fi
 
     printf '{"ok":true,"backend":"systemd-networkd","interface":"%s","networkFile":"%s","addressCidr":"%s","applied":%s,"envUpdated":true}\n' \
@@ -498,7 +457,7 @@ set_node_role() {
   set_env_value "$tronfire_env" "TRONFIRE_NODE_ROLE" "$role"
 
   if [ "$role" = "primary" ]; then
-    set_env_value "$tronsoftos_env" "HA_NODE_ROLE" "MASTER"
+    set_env_value "$tronsoftos_env" "HA_NODE_ROLE" "BACKUP"
     set_env_value "$tronsoftos_env" "HA_PRIORITY" "150"
   elif [ "$role" = "standby" ]; then
     set_env_value "$tronsoftos_env" "HA_NODE_ROLE" "BACKUP"
@@ -522,12 +481,22 @@ host_power() {
 
 fix_rclone_permissions() {
   local app_dir="${1:-/opt/tronsoftos}"
+  local user
+  local group
   valid_app_dir "$app_dir" || fail "Diretorio da aplicacao invalido"
+  user="$(service_user)"
+  group="$(service_group)"
 
-  install -d -o tronsoftos -g tronsoftos -m 0750 "$app_dir/config"
-  install -d -o tronsoftos -g tronsoftos -m 0700 "$app_dir/config/rclone"
+  if id "$user" >/dev/null 2>&1; then
+    getent group "$group" >/dev/null 2>&1 || group="$user"
+    install -d -o "$user" -g "$group" -m 0750 "$app_dir/config"
+    install -d -o "$user" -g "$group" -m 0700 "$app_dir/config/rclone"
+  else
+    install -d -m 0750 "$app_dir/config"
+    install -d -m 0700 "$app_dir/config/rclone"
+  fi
   if [ -f "$app_dir/config/rclone/rclone.conf" ]; then
-    chown tronsoftos:tronsoftos "$app_dir/config/rclone/rclone.conf"
+    chown_service_account "$app_dir/config/rclone/rclone.conf"
     chmod 0600 "$app_dir/config/rclone/rclone.conf"
   fi
 
@@ -538,6 +507,15 @@ drive_samba_remove_block() {
   local conf="$1"
   [ -f "$conf" ] || return 0
   sed -i '/^# BEGIN TRONSYSTEM DRIVE SHARE$/,/^# END TRONSYSTEM DRIVE SHARE$/d' "$conf"
+}
+
+drive_prepare() {
+  local share_path="${1:-}"
+  valid_drive_path "$share_path" || fail "Caminho do compartilhamento invalido"
+  mkdir -p "$share_path" || fail "Nao foi possivel criar a pasta do compartilhamento"
+  chown_service_account "$share_path"
+  chmod 0770 "$share_path" 2>/dev/null || true
+  printf '{"ok":true,"path":"%s"}\n' "$(json_escape "$share_path")"
 }
 
 drive_samba() {
@@ -649,7 +627,10 @@ EOF
     "$testparm_bin" -s "$smb_conf" >/dev/null
   fi
   systemctl enable smbd.service >/dev/null 2>&1 || true
-  systemctl restart smbd.service
+  systemctl restart smbd.service >/dev/null 2>&1 \
+    || systemctl restart smbd >/dev/null 2>&1 \
+    || service smbd restart >/dev/null 2>&1 \
+    || fail "Nao foi possivel reiniciar o servico Samba smbd"
   if systemctl list-unit-files nmbd.service >/dev/null 2>&1; then
     systemctl enable nmbd.service >/dev/null 2>&1 || true
     systemctl restart nmbd.service >/dev/null 2>&1 || true
@@ -747,6 +728,10 @@ case "$action" in
   drive-samba)
     shift
     drive_samba "$@"
+    ;;
+  drive-prepare)
+    shift
+    drive_prepare "$@"
     ;;
   drive-samba-disable)
     shift

@@ -153,12 +153,10 @@ if [ -n "${HA_VIP:-}" ]; then
       ;;
   esac
 
-  if [ "${HA_NODE_ROLE:-}" = "MASTER" ] && [ "$NODE_ROLE" != "primary" ]; then
-    fail "Keepalived MASTER configurado em no $NODE_ROLE"
-  elif [ "${HA_NODE_ROLE:-}" = "BACKUP" ] && [ "$NODE_ROLE" = "primary" ]; then
-    fail "Keepalived BACKUP configurado no primary"
+  if [ "${HA_NODE_ROLE:-}" != "BACKUP" ]; then
+    fail "Keepalived deve iniciar como BACKUP com nopreempt para evitar failback automatico"
   elif [ -n "${HA_NODE_ROLE:-}" ]; then
-    ok "Papel Keepalived coerente: $HA_NODE_ROLE"
+    ok "Papel Keepalived coerente: $HA_NODE_ROLE com prioridade ${HA_PRIORITY:-nao configurada}"
   else
     warn "HA_NODE_ROLE nao configurado"
   fi

@@ -39,6 +39,7 @@ const defaultBackupFrequencyMinutes = normalizeBackupMinutes(process.env.TRONFIR
 const defaultBackupRetentionDays = normalizeBackupMinutes(process.env.TRONFIRE_BACKUP_RETENTION_DAYS, 30);
 const backupTimeoutMinutes = normalizeBackupMinutes(process.env.TRONFIRE_BACKUP_TIMEOUT_MINUTES, 120, 30, 1440);
 const backupValidationTimeoutMinutes = normalizeBackupMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_TIMEOUT_MINUTES, 45, 15, 240);
+const firebirdQueryTimeoutSeconds = normalizeBackupMinutes(process.env.TRONFIRE_FIREBIRD_QUERY_TIMEOUT_SECONDS, 20, 5, 600);
 const backupValidationTimeoutMs = backupValidationTimeoutMinutes * 60 * 1000;
 const configuredRunningBackupTtlMinutes = Number(process.env.TRONFIRE_BACKUP_RUNNING_TTL_MINUTES || 60);
 const runningBackupTtlMinutes = Number.isFinite(configuredRunningBackupTtlMinutes)
@@ -142,6 +143,11 @@ function shellErrorText(err) {
   return [err?.stdout, err?.stderr, err?.message].filter(Boolean).join('\n').trim() || String(err);
 }
 
+function firebirdTimeoutSecondsCommand(seconds = firebirdQueryTimeoutSeconds) {
+  const timeout = Math.max(5, Math.round(Number(seconds) || firebirdQueryTimeoutSeconds));
+  return `if command -v timeout >/dev/null 2>&1; then timeout -k 5s ${timeout}s "$@"; else "$@"; fi`;
+}
+
 function isHaMode() {
   return deploymentMode === 'ha';
 }
@@ -150,13 +156,17 @@ function isPrimaryNode() {
   return nodeRole === 'primary';
 }
 
+function normalizeNodeName(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
 function isServingProductionNode() {
   if (!isPrimaryNode()) return false;
   if (!isHaMode()) return true;
   try {
     const lock = JSON.parse(fs.readFileSync(clusterLockPath, 'utf8'));
     const currentNode = String(process.env.TRONSOFTOS_NODE_NAME || '').trim();
-    return !lock.active_node || !currentNode || lock.active_node === currentNode;
+    return !lock.active_node || !currentNode || normalizeNodeName(lock.active_node) === normalizeNodeName(currentNode);
   } catch {
     return true;
   }
@@ -539,7 +549,7 @@ async function firebirdAttachmentsForDatabase(db) {
     'QUIT;'
   ].join('\n');
   const cmd = [
-    `run_with_timeout() { ${firebirdTimeoutCommand(2)}; };`,
+    `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; };`,
     `printf %s ${shQuote(`${sql}\n`)}`,
     '|',
     'run_with_timeout',
@@ -549,7 +559,7 @@ async function firebirdAttachmentsForDatabase(db) {
     `-password ${shQuote(password)}`,
     shQuote(connect)
   ].join(' ');
-  const out = await runFirebirdShellScript(cmd, 60_000);
+  const out = await runFirebirdShellScript(cmd, (firebirdQueryTimeoutSeconds + 15) * 1000);
   const attachments = parseFirebirdAttachments(out.stdout);
   return {
     databaseId: db.id,
@@ -606,6 +616,43 @@ function parseIndexHealth(stdout) {
       }
     });
   return { ...totals, userNonConstraint, tables };
+}
+
+function numberFromGstat(stdout, label) {
+  const match = String(stdout || '').match(new RegExp(`^\\s*${label}:?\\s+(\\d+)`, 'mi'));
+  return match ? Number(match[1]) : null;
+}
+
+function parseGstatHeader(stdout) {
+  return {
+    oldestTransaction: numberFromGstat(stdout, 'Oldest transaction'),
+    oldestActive: numberFromGstat(stdout, 'Oldest active'),
+    oldestSnapshot: numberFromGstat(stdout, 'Oldest snapshot'),
+    nextTransaction: numberFromGstat(stdout, 'Next transaction'),
+    sweepInterval: numberFromGstat(stdout, 'Sweep interval')
+  };
+}
+
+function transactionGapThreshold(name, fallback) {
+  const parsed = Number(process.env[name]);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function classifyTransactionHealth(health) {
+  const oldestTransaction = Number(health?.oldestTransaction);
+  const oldestActive = Number(health?.oldestActive);
+  const oldestSnapshot = Number(health?.oldestSnapshot);
+  const nextTransaction = Number(health?.nextTransaction);
+  if (!Number.isFinite(oldestTransaction) || !Number.isFinite(nextTransaction)) {
+    return { severity: 'OK', gap: null, activeGap: null, snapshotGap: null, warningThreshold: transactionGapThreshold('TRONFIRE_TRANSACTION_GAP_WARNING', 500000), criticalThreshold: transactionGapThreshold('TRONFIRE_TRANSACTION_GAP_CRITICAL', 1000000) };
+  }
+  const warningThreshold = transactionGapThreshold('TRONFIRE_TRANSACTION_GAP_WARNING', 500000);
+  const criticalThreshold = transactionGapThreshold('TRONFIRE_TRANSACTION_GAP_CRITICAL', 1000000);
+  const gap = Math.max(0, nextTransaction - oldestTransaction);
+  const activeGap = Number.isFinite(oldestActive) ? Math.max(0, nextTransaction - oldestActive) : null;
+  const snapshotGap = Number.isFinite(oldestSnapshot) ? Math.max(0, nextTransaction - oldestSnapshot) : null;
+  const severity = gap >= criticalThreshold ? 'CRITICAL' : gap >= warningThreshold ? 'WARNING' : 'OK';
+  return { severity, gap, activeGap, snapshotGap, warningThreshold, criticalThreshold };
 }
 
 function classifyIndexHealth(summary) {
@@ -696,7 +743,7 @@ async function indexHealthForDatabase(db) {
     'QUIT;'
   ].join('\n');
   const cmd = [
-    `run_with_timeout() { ${firebirdTimeoutCommand(2)}; };`,
+    `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; };`,
     `printf %s ${shQuote(`${sql}\n`)}`,
     '|',
     'run_with_timeout',
@@ -706,8 +753,13 @@ async function indexHealthForDatabase(db) {
     `-password ${shQuote(password)}`,
     shQuote(connect)
   ].join(' ');
-  const out = await runFirebirdShellScript(cmd, 60_000);
+  const out = await runFirebirdShellScript(cmd, (firebirdQueryTimeoutSeconds + 15) * 1000);
+  const gstat = await runFirebirdShellScript(
+    `${shQuote(`${firebirdBin}/gstat`)} -h ${shQuote(databasePath)}`,
+    120_000
+  );
   const summary = parseIndexHealth(out.stdout);
+  const transactionHealth = parseGstatHeader(gstat.stdout);
   const classification = classifyIndexHealth(summary);
   const sizeTrend = await databaseSizeTrend(db, databaseFileSizeBytes(databasePath));
   const checkedAt = new Date().toISOString();
@@ -722,9 +774,14 @@ async function indexHealthForDatabase(db) {
     userIndexes: summary.userNonConstraint.total,
     activeUserIndexes: summary.userNonConstraint.active,
     inactiveUserIndexes: summary.userNonConstraint.inactive,
-    total: summary.total,
-    active: summary.active,
-    inactive: summary.inactive,
+    transactionHealth,
+    transactionGap: classifyTransactionHealth(transactionHealth),
+    oldestTransaction: transactionHealth.oldestTransaction,
+    oldestActive: transactionHealth.oldestActive,
+    oldestSnapshot: transactionHealth.oldestSnapshot,
+    nextTransaction: transactionHealth.nextTransaction,
+    sweepInterval: transactionHealth.sweepInterval,
+    total: summary.inactive,
     severity: classification.severity,
     activeRatio: classification.activeRatio,
     userActiveRatio: classification.userActiveRatio,
@@ -757,6 +814,12 @@ function indexAuditFromHealth(health) {
     totalIndexes: health.totalIndexes,
     activeIndexes: health.activeIndexes,
     inactiveIndexes: health.inactiveIndexes,
+    transactionHealth: health.transactionHealth || null,
+    oldestTransaction: health.oldestTransaction ?? health.transactionHealth?.oldestTransaction ?? null,
+    oldestActive: health.oldestActive ?? health.transactionHealth?.oldestActive ?? null,
+    oldestSnapshot: health.oldestSnapshot ?? health.transactionHealth?.oldestSnapshot ?? null,
+    nextTransaction: health.nextTransaction ?? health.transactionHealth?.nextTransaction ?? null,
+    sweepInterval: health.sweepInterval ?? health.transactionHealth?.sweepInterval ?? null,
     previousInactiveIndexes: null,
     inactiveDelta: 0,
     firstSnapshot: false,
@@ -796,6 +859,12 @@ async function refreshInactiveIndexAlert(db) {
       userIndexes: health.userIndexes,
       activeUserIndexes: health.activeUserIndexes,
       inactiveUserIndexes: health.inactiveUserIndexes,
+      transactionHealth: health.transactionHealth || null,
+      oldestTransaction: health.oldestTransaction ?? health.transactionHealth?.oldestTransaction ?? null,
+      oldestActive: health.oldestActive ?? health.transactionHealth?.oldestActive ?? null,
+      oldestSnapshot: health.oldestSnapshot ?? health.transactionHealth?.oldestSnapshot ?? null,
+      nextTransaction: health.nextTransaction ?? health.transactionHealth?.nextTransaction ?? null,
+      sweepInterval: health.sweepInterval ?? health.transactionHealth?.sweepInterval ?? null,
       activeRatio: health.activeRatio,
       userActiveRatio: health.userActiveRatio,
       missingActiveTables: health.missingActiveTables,
@@ -815,7 +884,46 @@ async function refreshInactiveIndexAlert(db) {
   } else {
     await resolveActiveAlertsByType(type);
   }
+  await refreshTransactionGapAlert(db, health);
   return health;
+}
+
+async function refreshTransactionGapAlert(db, health) {
+  const type = `FIREBIRD_TRANSACTION_GAP_${db.alias}`;
+  const transactionGap = health.transactionGap || classifyTransactionHealth(health.transactionHealth || health);
+  if (!transactionGap || transactionGap.severity === 'OK') {
+    await resolveActiveAlertsByType(type);
+    return;
+  }
+  const transactionHealth = health.transactionHealth || {};
+  const sweepText = Number(transactionHealth.sweepInterval) === 0 ? ' Auto-sweep esta desativado neste banco.' : '';
+  const message = `Banco ${db.name} com gap transacional ${transactionGap.gap} entre OIT e Next. OIT ${transactionHealth.oldestTransaction ?? '-'}, OAT ${transactionHealth.oldestActive ?? '-'}, OST ${transactionHealth.oldestSnapshot ?? '-'}, Next ${transactionHealth.nextTransaction ?? '-'}.${sweepText}`;
+  const details = {
+    kind: 'FIREBIRD_TRANSACTION_GAP',
+    databaseId: db.id,
+    databaseName: db.name,
+    databaseAlias: db.alias,
+    checkedAt: health.checkedAt,
+    transactionHealth,
+    transactionGap,
+    oldestTransaction: transactionHealth.oldestTransaction ?? null,
+    oldestActive: transactionHealth.oldestActive ?? null,
+    oldestSnapshot: transactionHealth.oldestSnapshot ?? null,
+    nextTransaction: transactionHealth.nextTransaction ?? null,
+    sweepInterval: transactionHealth.sweepInterval ?? null,
+    gap: transactionGap.gap,
+    activeGap: transactionGap.activeGap,
+    snapshotGap: transactionGap.snapshotGap,
+    warningThreshold: transactionGap.warningThreshold,
+    criticalThreshold: transactionGap.criticalThreshold,
+    pathRole: health.pathRole
+  };
+  const existing = await prisma.alert.findFirst({ where: { type, resolved: false } });
+  if (existing) {
+    await prisma.alert.update({ where: { id: existing.id }, data: { severity: transactionGap.severity, message, details } });
+  } else {
+    await prisma.alert.create({ data: { type, severity: transactionGap.severity, message, details } });
+  }
 }
 
 async function refreshInactiveIndexAlertsForActiveDatabases() {
@@ -872,6 +980,42 @@ function countBy(items, keySelector, emptyLabel) {
     .slice(0, 10);
 }
 
+function serializeFirebirdSession(item) {
+  if (!item) return null;
+  const finishedAt = item.disconnectedAt || item.lastSeenAt || item.firstSeenAt;
+  return {
+    id: item.id,
+    attachmentId: item.attachmentId,
+    user: item.user,
+    remoteAddress: item.remoteAddress,
+    remoteProcess: item.remoteProcess,
+    remotePid: item.remotePid,
+    connectedAt: item.connectedAt,
+    firstSeenAt: item.firstSeenAt,
+    lastSeenAt: item.lastSeenAt,
+    disconnectedAt: item.disconnectedAt,
+    lastState: item.lastState,
+    sourceNode: item.sourceNode,
+    durationSeconds: item.firstSeenAt && finishedAt ? Math.max(0, Math.round((finishedAt - item.firstSeenAt) / 1000)) : null
+  };
+}
+
+async function recentFirebirdSessions(databaseId) {
+  if (!databaseId) return [];
+  const sessions = await prisma.firebirdSession.findMany({
+    where: {
+      databaseId,
+      OR: [
+        { disconnectedAt: null },
+        { lastSeenAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } }
+      ]
+    },
+    orderBy: [{ disconnectedAt: 'asc' }, { lastSeenAt: 'desc' }],
+    take: 50
+  });
+  return sessions.map(serializeFirebirdSession).filter(Boolean);
+}
+
 async function firebirdConnectionHistory(db, query = {}) {
   const period = firebirdHistoryRange(query);
   const remoteAddress = String(query.remoteAddress || '').trim();
@@ -918,20 +1062,7 @@ async function firebirdConnectionHistory(db, query = {}) {
       totalConnections: item.totalConnections,
       sourceNode: item.sourceNode
     })),
-    sessions: sessions.map(item => ({
-      id: item.id,
-      user: item.user,
-      remoteAddress: item.remoteAddress,
-      remoteProcess: item.remoteProcess,
-      remotePid: item.remotePid,
-      connectedAt: item.connectedAt,
-      firstSeenAt: item.firstSeenAt,
-      lastSeenAt: item.lastSeenAt,
-      disconnectedAt: item.disconnectedAt,
-      lastState: item.lastState,
-      sourceNode: item.sourceNode,
-      durationSeconds: Math.max(0, Math.round(((item.disconnectedAt || item.lastSeenAt) - item.firstSeenAt) / 1000))
-    }))
+    sessions: sessions.map(serializeFirebirdSession).filter(Boolean)
   };
 }
 
@@ -1361,14 +1492,14 @@ async function validateBackupRestore(db, backupPath, logPath, token = timestamp1
     'cleanup_validation() { rm -f "$restore"; if [ "${restore_src:-$backup}" != "$backup" ]; then rm -f "$restore_src" || true; fi; }',
     'trap cleanup_validation EXIT',
     'case "$backup" in *.gz) restore_src="$(mktemp /tmp/tronfire_backup_validate_XXXXXX.gbk)" || fail 81 "Falha ao criar arquivo temporario para validacao"; gzip -dc "$backup" > "$restore_src" || { rm -f "$restore_src"; fail 81 "Falha ao descompactar backup para validacao"; } ;; esac',
-    `run_with_timeout() { ${firebirdTimeoutCommand(backupValidationTimeoutMinutes)}; }`,
+    `run_with_timeout() { ${firebirdTimeoutCommand(backupValidationTimeoutMinutes)}; };`,
     `run_with_timeout ${gbak} -c -v -user SYSDBA -password ${password} "$restore_src" ${shQuote(firebirdCreateTarget(tempRestorePath))} >> "$log" 2>&1 || fail 82 "Falha ao restaurar backup para validacao"`,
     'if [ "$restore_src" != "$backup" ]; then rm -f "$restore_src" || true; fi',
     'test -f "$restore" || fail 83 "Restore de validacao terminou sem arquivo restaurado"',
     `${gstat} -h "$restore" >> "$log" 2>&1 || fail 84 "Falha no gstat do backup restaurado"`,
     'rm -f "$restore"',
     'echo "[validacao] backup aprovado" >> "$log"'
-  ].join('; ');
+  ].join('\n');
   await runFirebirdShellScript(cmd, backupValidationTimeoutMs + 60_000);
   return backupValidationFor(logPath);
 }
@@ -1387,6 +1518,20 @@ function quarantineInvalidBackup(backupPath, manifestPath = null) {
     // Keep the original error path; quarantine is best effort.
   }
   return moved;
+}
+
+async function withSoftTimeout(promise, ms, fallback) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise(resolve => {
+        timer = setTimeout(() => resolve(typeof fallback === 'function' ? fallback() : fallback), ms);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 app.get('/health', async () => ({ ok: true, app: 'TronFire', version: '0.1.0', deploymentMode, nodeRole }));
@@ -1542,13 +1687,34 @@ app.get('/api/settings/google-drive/oauth/callback', async (req, reply) => {
 app.get('/api/preflight', { preHandler: requireAuth }, async () => runPreflight());
 
 app.get('/api/dashboard', { preHandler: requireAuth }, async (req) => {
-  const [dbs, backups, metrics] = await Promise.all([
+  const [dbsResult, backupsResult, metricsResult] = await Promise.allSettled([
     prisma.managedDatabase.findMany({ orderBy: [{ isPrimary: 'desc' }, { name: 'asc' }] }),
     prisma.backupJob.findMany({ orderBy: { createdAt: 'desc' }, take: 5, include: { database: true } }),
     loadDashboardMetrics(reqQueryRange(req))
   ]);
-  const indexHealth = await refreshInactiveIndexAlertsForActiveDatabases();
-  const activeAlerts = await prisma.alert.findMany({ where: { resolved: false }, orderBy: { createdAt: 'desc' }, take: 5 });
+  const dbs = dbsResult.status === 'fulfilled' ? dbsResult.value : [];
+  const backups = backupsResult.status === 'fulfilled' ? backupsResult.value : [];
+  const metrics = metricsResult.status === 'fulfilled' ? metricsResult.value : { latest: [], series: [], error: shellErrorText(metricsResult.reason) };
+  const indexHealth = await withSoftTimeout(
+    refreshInactiveIndexAlertsForActiveDatabases(),
+    8000,
+    () => dbs.map(db => ({
+      databaseId: db.id,
+      databaseName: db.name,
+      databaseAlias: db.alias,
+      total: null,
+      checkedAt: new Date().toISOString(),
+      error: 'Leitura de indices demorou demais; abra Bancos > Detalhes > Validar para consultar este banco.'
+    }))
+  ).catch(err => dbs.map(db => ({
+    databaseId: db.id,
+    databaseName: db.name,
+    databaseAlias: db.alias,
+    total: null,
+    checkedAt: new Date().toISOString(),
+    error: shellErrorText(err)
+  })));
+  const activeAlerts = await prisma.alert.findMany({ where: { resolved: false }, orderBy: { createdAt: 'desc' }, take: 5 }).catch(() => []);
   const productionDatabase = dbs.find(db => db.isPrimary) || dbs.find(db => db.type === 'PRODUCAO') || null;
   let productionConnections = null;
   if (productionDatabase) {
@@ -1619,6 +1785,7 @@ app.get('/api/internal/database-version', async (req) => {
       }
     }
     const indexAudit = indexHealth ? indexAuditFromHealth(indexHealth) : null;
+    const firebirdSessions = managedDatabase ? await recentFirebirdSessions(managedDatabase.id) : [];
     databasesWithHealth.push({
       id: database.id || managedDatabase?.id || null,
       name: database.name || managedDatabase?.name || null,
@@ -1636,6 +1803,9 @@ app.get('/api/internal/database-version', async (req) => {
       error: database.error || '',
       versionError: database.versionError || '',
       licensedUnitError: database.licensedUnitError || '',
+      transactionHealth: indexHealth?.transactionHealth || database.transactionHealth || null,
+      transactionGap: indexHealth?.transactionGap || null,
+      firebirdSessions,
       indexHealth,
       indexAudit
     });
@@ -1667,6 +1837,9 @@ app.get('/api/internal/database-version', async (req) => {
     databaseAlias: database?.alias || null,
     fileSizeBytes: database?.fileSizeBytes ?? null,
     sizeMb: database?.fileSizeBytes ? Math.round((Number(database.fileSizeBytes) / 1024 / 1024) * 10) / 10 : null,
+    transactionHealth: indexHealth?.transactionHealth || database?.transactionHealth || null,
+    transactionGap: indexHealth?.transactionGap || null,
+    firebirdSessions: Array.isArray(database?.firebirdSessions) ? database.firebirdSessions : [],
     indexHealth,
     indexAudit,
     databases: databasesWithHealth
@@ -1729,7 +1902,7 @@ app.get('/api/services/firebird', { preHandler: requireOperator }, async () => {
   return { mode: 'container', container: firebirdContainer, status, details, logs, label: 'Container Firebird geral' };
 });
 
-app.post('/api/services/firebird/:action', { preHandler: requireAdmin }, async (req, reply) => {
+app.post('/api/services/firebird/:action', { preHandler: requireOperator }, async (req, reply) => {
   const action = String(req.params.action || '').toLowerCase();
   if (!['start', 'stop', 'restart'].includes(action)) return reply.code(400).send({ error: 'Acao invalida' });
   if (firebirdExecMode !== 'container') {
@@ -2710,7 +2883,7 @@ app.post('/api/ha/standby/promote', async (req, reply) => {
   }
   const lock = readClusterLock();
   if (!lock.allow_promotion) return reply.code(409).send({ error: 'cluster-lock nao permite promocao' });
-  if (lock.this_node && process.env.TRONSOFTOS_NODE_NAME && lock.this_node !== process.env.TRONSOFTOS_NODE_NAME) {
+  if (lock.this_node && process.env.TRONSOFTOS_NODE_NAME && normalizeNodeName(lock.this_node) !== normalizeNodeName(process.env.TRONSOFTOS_NODE_NAME)) {
     return reply.code(409).send({ error: 'cluster-lock pertence a outro no', lock });
   }
 
@@ -2731,24 +2904,33 @@ app.post('/api/ha/standby/promote', async (req, reply) => {
     const cmd = [
       'set -e',
       `prod=${shQuote(db.filePath)}`,
-      `prod_conn=${shQuote(firebirdDbConnect(db.filePath))}`,
       `standby=${shQuote(db.standbyPath)}`,
       `backup_current=${shQuote(backupCurrent)}`,
       `log=${shQuote(logPath)}`,
+      'fail() { code="$1"; shift; echo "$*" | tee -a "$log"; exit "$code"; }',
       'mkdir -p /firebird/data /firebird/restore-work /firebird/logs',
-      'test -f "$standby"',
+      'test -f "$standby" || fail 70 "Banco standby nao encontrado para promocao: $standby"',
+      'firebird_was_active=0',
+      'if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet firebird.service; then firebird_was_active=1; systemctl stop firebird.service || fail 71 "Nao foi possivel parar Firebird local antes da promocao"; fi',
+      'cleanup() { if [ "$firebird_was_active" = "1" ]; then systemctl start firebird.service >/dev/null 2>&1 || true; fi; }',
+      'trap cleanup EXIT',
       'if [ -f "$prod" ]; then mv "$prod" "$backup_current"; fi',
-      'mv "$standby" "$prod"',
-      'chmod 0666 "$prod"',
-      `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gfix`)} -mode read_write -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} "$prod_conn" >> "$log" 2>&1 || true`,
-      `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$prod" >> "$log" 2>&1`
+      'mv "$standby" "$prod" || fail 72 "Nao foi possivel mover banco standby para producao: $standby -> $prod"',
+      'chmod 0666 "$prod" || fail 73 "Nao foi possivel ajustar permissao do banco promovido"',
+      `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gfix`)} -mode read_write -user SYSDBA -password ${shQuote(process.env.FIREBIRD_PASSWORD || 'masterkey')} "$prod" >> "$log" 2>&1 || fail 74 "Falha ao colocar banco promovido em read_write"`,
+      `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$prod" >> "$log" 2>&1 || fail 75 "Falha ao validar banco promovido com gstat"`,
+      `attrs="$(${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$prod" | awk '/Attributes/ {print; exit}')"`,
+      'echo "$attrs" >> "$log"',
+      'echo "$attrs" | grep -qi "read only" && fail 76 "Banco promovido ainda esta read_only; VIP/producao nao deve ser liberado"',
+      'cleanup',
+      'trap - EXIT'
     ].join('; ');
     await runFirebirdShellScript(cmd, 1000 * 60 * 20);
     await prisma.managedDatabase.update({
       where: { id: db.id },
       data: { standbyStatus: 'PROMOTED', status: 'ONLINE', lastCheckAt: new Date(), accessMode: 'READ_WRITE' }
     });
-    promoted.push({ alias: db.alias, productionPath: db.filePath, previousProductionBackup: backupCurrent, logPath });
+    promoted.push({ alias: db.alias, productionPath: db.filePath, previousProductionBackup: backupCurrent, accessMode: 'READ_WRITE', logPath });
   }
   await syncFirebirdAliases();
   await audit(req, 'HA_STANDBY_PROMOTED', { entityType: 'cluster', entityId: lock.cluster || 'cluster', details: { lock, promoted } });

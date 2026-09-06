@@ -137,6 +137,37 @@ ask_secret() {
   fi
 }
 
+env_value() {
+  local file="$1"
+  local key="$2"
+  local line=""
+  [ -f "$file" ] || return 0
+  line="$(grep "^$key=" "$file" | tail -n1 || true)"
+  [ -n "$line" ] || return 0
+  printf '%s\n' "${line#*=}"
+}
+
+running_service_env_value() {
+  local key="$1"
+  local pid=""
+  local line=""
+  pid="$(systemctl show -p MainPID --value tronsoftos 2>/dev/null || true)"
+  [ -n "$pid" ] && [ "$pid" != "0" ] && [ -r "/proc/$pid/environ" ] || return 0
+  line="$(tr '\0' '\n' < "/proc/$pid/environ" | grep "^$key=" | tail -n1 || true)"
+  [ -n "$line" ] || return 0
+  printf '%s\n' "${line#*=}"
+}
+
+existing_secret_value() {
+  local key="$1"
+  local value=""
+  value="$(env_value "$TRONSOFTOS_ENV" "$key")"
+  value="${value:-$(running_service_env_value "$key")}"
+  value="${value:-$(env_value "$TRONFIRE_ENV" "$key")}"
+  value="${value:-$(env_value "$CLUSTER_SECRETS" "$key")}"
+  printf '%s' "$value"
+}
+
 yes_no() {
   local label="$1"
   local default="${2:-n}"
@@ -406,8 +437,8 @@ CLUSTER_ID="$(ask "ID do cluster/cliente" "$(echo "$NODE_NAME" | tr '[:upper:]' 
 NODE_ID="$(new_uuid)"
 INSTALL_ID="$(new_uuid)"
 
-SESSION_SECRET=""
-INTERNAL_TOKEN=""
+SESSION_SECRET="$(existing_secret_value "SESSION_SECRET")"
+INTERNAL_TOKEN="$(existing_secret_value "TRONSOFTOS_INTERNAL_TOKEN")"
 
 DEFAULT_IFACE="$(detect_default_iface)"
 DEFAULT_IPV4_CIDR="$(detect_default_ipv4_cidr "$DEFAULT_IFACE")"
@@ -560,7 +591,7 @@ HA_VIP=$HA_VIP
 HA_VIP_CIDR=$HA_VIP_CIDR
 HA_ROUTER_ID=$HA_ROUTER_ID
 HA_AUTH_PASS=$HA_AUTH_PASS
-HA_NODE_ROLE=$([ "$NODE_ROLE" = "primary" ] && echo MASTER || echo BACKUP)
+HA_NODE_ROLE=BACKUP
 HA_PRIORITY=$HA_PRIORITY
 
 FIREBIRD_SERVICE=firebird
@@ -662,6 +693,16 @@ TRONFIRE_FIREBIRD_PORT=$FIREBIRD_PORT
 TRONFIRE_LAN_HOST=${HA_VIP:-$SERVER_IP}
 PUBLIC_URL=http://${HA_VIP:-$SERVER_IP}:$TRONSOFTOS_PORT/tronfire
 TRONFIRE_AUTH_DISABLED=true
+
+TRONFIRE_BACKUP_VALIDATION_MODE=daily
+TRONFIRE_BACKUP_VALIDATION_HOUR=4
+TRONFIRE_BACKUP_VALIDATION_WINDOW_MINUTES=120
+TRONFIRE_BACKUP_VALIDATION_MAX_AGE_HOURS=30
+TRONFIRE_BACKUP_VALIDATION_FAILURE_COOLDOWN_HOURS=12
+TRONFIRE_FIREBIRD_SWEEP_ENABLED=true
+TRONFIRE_FIREBIRD_SWEEP_CRON="0 6 * * 2,6"
+TRONFIRE_FIREBIRD_SWEEP_TIMEZONE=America/Sao_Paulo
+TRONFIRE_FIREBIRD_SWEEP_TIMEOUT_MINUTES=180
 
 FIREBIRD_PACKAGE_URL=https://tronsoft.bitrix24.com.br/~qQVae
 FIREBIRD_TEMPLATE_URL=https://tronsoft.bitrix24.com.br/~wUw0m

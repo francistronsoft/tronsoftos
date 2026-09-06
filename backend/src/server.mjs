@@ -6,14 +6,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { setDefaultResultOrder } from 'node:dns';
 import dns from 'node:dns/promises';
 import { fileURLToPath } from 'node:url';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
-setDefaultResultOrder('ipv4first');
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = process.env.TRONSOFTOS_APP_DIR || path.resolve(__dirname, '../..');
 const port = Number(process.env.TRONSOFTOS_PORT || 8080);
@@ -50,7 +48,6 @@ const FIXED_HA_SYNC_INTERVAL_MINUTES = 3;
 const HA_SYNC_CRITICAL_LAG_MINUTES = 20;
 const DEFAULT_HA_SYNC_MODE = 'physical';
 const UPDATE_MAINTENANCE_TIMEOUT_MINUTES = 30;
-const RCLONE_BACKUP_UPLOAD_INTERVAL_MS = Math.max(60_000, Number(process.env.RCLONE_BACKUP_UPLOAD_INTERVAL_MS || 5 * 60 * 1000));
 const UPDATE_ALLOWED_BRANCHES = new Set(['main', 'dev']);
 const SESSION_COOKIE = 'tronsoftos_session';
 const SESSION_DURATION_SECONDS = 12 * 60 * 60;
@@ -61,8 +58,6 @@ const loginFailures = new Map();
 const maxActionLogLength = 1024 * 128;
 const dockerConfigDir = process.env.TRONSOFTOS_DOCKER_CONFIG || path.join(stateDir, 'docker-config');
 let rcloneQuotaCache = { key: null, checkedAt: 0, value: null };
-let rcloneBackupUploadTimer = null;
-let rcloneBackupUploadInFlight = false;
 let companyIdentityCache = { checkedAt: 0, value: null };
 let haSyncSchedulerTimer = null;
 let haSyncSchedulerBusy = false;
@@ -413,7 +408,7 @@ function clusterActivation() {
   return readJson(clusterActivationPath, null);
 }
 
-function writeClusterActivation(identity, lock, reason = '') {
+function writeClusterActivation(identity, lock, reason = '', details = {}) {
   ensureStateDir();
   const activation = {
     cluster: identity.clusterId,
@@ -422,6 +417,7 @@ function writeClusterActivation(identity, lock, reason = '') {
     activeNode: lock.active_node || identity.nodeName,
     bootId: currentBootId(),
     reason: String(reason || lock.reason || '').trim(),
+    ...details,
     updatedAt: new Date().toISOString()
   };
   fs.writeFileSync(clusterActivationPath, `${JSON.stringify(activation, null, 2)}\n`, { mode: 0o600 });
@@ -454,6 +450,10 @@ function localActivationValid(identity, activeNode) {
     && (!bootId || activation.bootId === bootId)
   );
   return { valid, activation, bootId };
+}
+
+function normalizeNodeName(value) {
+  return String(value || '').trim().toLowerCase();
 }
 
 function blockClusterPromotion(reason = '') {
@@ -519,6 +519,7 @@ async function activateLocalNode(body = {}) {
   const identity = nodeIdentity();
   const lock = clusterLock();
   const reason = String(body.reason || lock.reason || '').trim();
+  const promotedFromStandby = identity.deploymentMode === 'ha' && identity.nodeRole === 'standby';
   const activeNode = String(lock.active_node || '').trim();
   if (identity.deploymentMode === 'ha') {
     if (identity.nodeRole === 'recovery') throw new Error('nó em recuperação não pode ser ativado sem trocar o papel primeiro');
@@ -549,7 +550,7 @@ async function activateLocalNode(body = {}) {
     reason
   });
   const activation = nextIdentity.deploymentMode === 'ha' && nextIdentity.nodeRole === 'primary'
-    ? writeClusterActivation(nextIdentity, nextLock, reason)
+    ? writeClusterActivation(nextIdentity, nextLock, reason, { promotedFromStandby })
     : null;
   appendEvent('CLUSTER_LOCAL_NODE_ACTIVATED', {
     cluster: nextIdentity.clusterId,
@@ -562,12 +563,24 @@ async function activateLocalNode(body = {}) {
   return { identity: nextIdentity, lock: nextLock, activation, guard: clusterGuard(), tronfirePromotion, roleEnv, tronfireRestart };
 }
 
-function putLocalNodeInRecovery(body = {}) {
+async function putLocalNodeInRecovery(body = {}) {
+  const currentLock = clusterLock();
+  const activeNode = String(body.activeNode || currentLock.active_node || '').trim();
+  const reason = String(body.reason || 'nó colocado em recuperação para evitar duplo primary').trim();
+  const roleEnv = await setNodeRoleEnv('recovery');
   const identity = writeNodeIdentity({ ...nodeIdentity(), nodeRole: 'recovery' });
-  clearClusterActivation(String(body.reason || 'no colocado em recovery').trim());
-  const lock = blockClusterPromotion(String(body.reason || 'nó colocado em recuperação para evitar duplo primary').trim());
-  appendEvent('CLUSTER_NODE_RECOVERY_MODE', { cluster: identity.clusterId, nodeName: identity.nodeName, reason: lock.reason });
-  return { identity, lock, guard: clusterGuard() };
+  clearClusterActivation(reason);
+  const lock = writeClusterLock({
+    ...currentLock,
+    cluster: identity.clusterId,
+    active_node: activeNode,
+    this_node: identity.nodeName,
+    allow_promotion: false,
+    reason
+  });
+  const tronfireRestart = await restartTronfireBackend();
+  appendEvent('CLUSTER_NODE_RECOVERY_MODE', { cluster: identity.clusterId, nodeName: identity.nodeName, reason: lock.reason, tronfireRestart });
+  return { identity, lock, guard: clusterGuard(), roleEnv, tronfireRestart };
 }
 
 function ipv4ToInt(ip) {
@@ -784,17 +797,11 @@ function normalizeHaSyncSettings(body) {
   return next;
 }
 
-function assertHaSyncPrimary(actionLabel) {
-  const identity = nodeIdentity();
-  const guard = clusterGuard();
-  if (identity.deploymentMode === 'ha' && identity.nodeRole !== 'primary') {
-    throw Object.assign(new Error(`${actionLabel} deve ser executado no no primary. Status atual: ${guard.reason || guard.status}`), { statusCode: 409 });
-  }
-  return { identity, guard };
-}
-
 function writeHaSyncSettings(body) {
-  assertHaSyncPrimary('Sync HA');
+  const guard = clusterGuard();
+  if (nodeIdentity().deploymentMode === 'ha' && guard.canServeProduction !== true) {
+    throw Object.assign(new Error(`Sync HA deve ser configurado no no primary/ativo. Status atual: ${guard.reason || guard.status}`), { statusCode: 409 });
+  }
   ensureStateDir();
   const settings = normalizeHaSyncSettings(body);
   fs.writeFileSync(haSyncSettingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
@@ -803,7 +810,10 @@ function writeHaSyncSettings(body) {
 }
 
 async function testHaSyncSsh(body = {}) {
-  assertHaSyncPrimary('Teste SSH do Sync HA');
+  const guard = clusterGuard();
+  if (nodeIdentity().deploymentMode === 'ha' && guard.canServeProduction !== true) {
+    throw Object.assign(new Error(`Teste SSH do Sync HA deve ser executado no no primary/ativo. Status atual: ${guard.reason || guard.status}`), { statusCode: 409 });
+  }
   const settings = normalizeHaSyncSettings(body);
   const identityFile = path.join(stateDir, 'ssh/id_ed25519');
   const knownHosts = path.join(stateDir, 'known_hosts');
@@ -1143,6 +1153,7 @@ function repairRcloneConfigPermissions(configPath) {
   if (!canRepairRcloneConfigPath(configPath)) return false;
   try {
     execFileSync('sudo', ['-n', '/usr/local/sbin/tronsoftos-network', 'fix-rclone-permissions', appRoot], {
+      env: serviceAccountEnv(),
       timeout: 15_000,
       stdio: 'ignore'
     });
@@ -1194,7 +1205,7 @@ function writeRcloneSettings(body) {
     try {
       writeRcloneConfigContent(settings, body.configContent);
     } catch (err) {
-      const error = new Error(`Nao foi possivel salvar o rclone.conf em ${settings.config}: ${err.message}. Verifique se a pasta pertence ao usuario tronsoftos.`);
+      const error = new Error(`Nao foi possivel salvar o rclone.conf em ${settings.config}: ${err.message}. Verifique se a pasta pertence ao usuario de servico ${serviceAccountNames().user}.`);
       error.statusCode = 500;
       throw error;
     }
@@ -1758,85 +1769,6 @@ async function rcloneUploadTest() {
   }
 }
 
-function rcloneUploadAllowedForNode(settings = rawRcloneSettings()) {
-  const uploadOnlyRole = String(settings.uploadOnlyRole || 'primary').toLowerCase();
-  if (uploadOnlyRole === 'any') return true;
-  const identity = nodeIdentity();
-  return String(identity.nodeRole || 'primary').toLowerCase() === uploadOnlyRole;
-}
-
-function localBackupUploadCandidates(backupDir) {
-  try {
-    return fs.readdirSync(backupDir, { withFileTypes: true })
-      .filter(entry => entry.isFile() && /\.(gbk|fbk|gbk\.gz|fbk\.gz|manifest\.json)$/i.test(entry.name))
-      .map(entry => entry.name)
-      .sort();
-  } catch {
-    return [];
-  }
-}
-
-async function rcloneUploadBackups(reason = 'manual') {
-  if (rcloneBackupUploadInFlight) return { ok: false, skipped: true, reason: 'upload ja em execucao' };
-  rcloneBackupUploadInFlight = true;
-  try {
-    const settings = rawRcloneSettings();
-    const config = settings.config || defaultRcloneConfigPath();
-    const bin = settings.bin || '/usr/bin/rclone';
-    const target = rcloneTarget(settings);
-    const backupDir = process.env.FIREBIRD_BACKUP_DIR || '/opt/tronfire-storage/firebird/backups';
-    if (settings.enabled !== true) return { ok: false, skipped: true, reason: 'rclone desabilitado' };
-    if (!settings.remote) throw new Error('Google Drive nao configurado para backups');
-    if (!fs.existsSync(bin)) throw new Error(`binario rclone nao encontrado: ${bin}`);
-    if (!ensureRcloneConfigReadable(config)) throw new Error(`Configuracao do Google Drive nao aplicada: ${config}`);
-    if (!rcloneUploadAllowedForNode(settings)) {
-      return { ok: false, skipped: true, reason: `upload restrito ao papel ${settings.uploadOnlyRole || 'primary'}`, nodeRole: nodeIdentity().nodeRole };
-    }
-    const candidates = localBackupUploadCandidates(backupDir);
-    if (!candidates.length) return { ok: false, skipped: true, reason: 'nenhum backup local encontrado', backupDir };
-    appendEvent('RCLONE_BACKUP_UPLOAD_STARTED', { target, backupDir, files: candidates.length, reason });
-    const out = await run(bin, rcloneArgs([
-      'copy',
-      backupDir,
-      target,
-      ...rcloneBackupFilters(),
-      '--config',
-      config
-    ]), {
-      timeout: 1000 * 60 * 60 * 2,
-      maxBuffer: 1024 * 1024 * 5
-    });
-    rcloneQuotaCache = { key: null, checkedAt: 0, value: null };
-    const remote = await rcloneRemoteBackups().catch(() => null);
-    appendEvent('RCLONE_BACKUP_UPLOAD_OK', {
-      target,
-      backupDir,
-      files: candidates.length,
-      remoteFiles: remote?.files?.length ?? null,
-      stdout: out.stdout,
-      stderr: out.stderr
-    });
-    return { ok: true, target, backupDir, files: candidates.length, remoteFiles: remote?.files || [], stdout: out.stdout, stderr: out.stderr };
-  } catch (err) {
-    const details = googleDriveErrorDetails(err);
-    appendEvent('RCLONE_BACKUP_UPLOAD_FAILED', { error: details.message, code: details.code, activationUrl: details.activationUrl });
-    throw new Error(details.message);
-  } finally {
-    rcloneBackupUploadInFlight = false;
-  }
-}
-
-function startRcloneBackupUploadScheduler() {
-  if (rcloneBackupUploadTimer) clearInterval(rcloneBackupUploadTimer);
-  rcloneBackupUploadTimer = setInterval(() => {
-    rcloneUploadBackups('scheduled').catch(err => console.error(`Falha no upload automatico para Google Drive: ${err.message}`));
-  }, RCLONE_BACKUP_UPLOAD_INTERVAL_MS);
-  setTimeout(() => {
-    rcloneUploadBackups('startup').catch(err => console.error(`Falha no upload inicial para Google Drive: ${err.message}`));
-  }, 15_000).unref?.();
-  rcloneBackupUploadTimer.unref?.();
-}
-
 async function rcloneAbout({ force = false } = {}) {
   const settings = rawRcloneSettings();
   const config = settings.config || defaultRcloneConfigPath();
@@ -1900,7 +1832,24 @@ async function diskUsageForPath(targetPath) {
   }
 }
 
+function serviceAccountNames() {
+  const user = String(process.env.TRONSOFTOS_SERVICE_USER || 'tronsoftos').trim() || 'tronsoftos';
+  const group = String(process.env.TRONSOFTOS_SERVICE_GROUP || user).trim() || user;
+  return { user, group };
+}
+
+function serviceAccountEnv() {
+  const account = serviceAccountNames();
+  return {
+    ...process.env,
+    TRONSOFTOS_APP_DIR: appRoot,
+    TRONSOFTOS_SERVICE_USER: account.user,
+    TRONSOFTOS_SERVICE_GROUP: account.group
+  };
+}
+
 function serviceUserIds() {
+  const account = serviceAccountNames();
   const fallback = (() => {
     try {
       const stat = fs.statSync(appRoot);
@@ -1912,10 +1861,10 @@ function serviceUserIds() {
   try {
     const userLine = fs.readFileSync('/etc/passwd', 'utf8')
       .split('\n')
-      .find(line => line.startsWith('tronsoftos:'));
+      .find(line => line.startsWith(`${account.user}:`));
     const groupLine = fs.readFileSync('/etc/group', 'utf8')
       .split('\n')
-      .find(line => line.startsWith('tronsoftos:'));
+      .find(line => line.startsWith(`${account.group}:`));
     const uid = Number(userLine?.split(':')[2]);
     const gid = Number(groupLine?.split(':')[2] ?? userLine?.split(':')[3]);
     if (Number.isInteger(uid) && Number.isInteger(gid)) return { uid, gid };
@@ -2193,6 +2142,15 @@ function writeSambaPasswordFile(password) {
   return { tmpDir, passwordPath };
 }
 
+function privilegedDriveError(err, prefix) {
+  const payload = commandErrorPayload(err);
+  const scriptError = parseJsonLinesBestEffort(`${payload.stdout}\n${payload.stderr}`)
+    .reverse()
+    .find(item => item?.error)?.error;
+  const message = scriptError || payload.stderr || payload.stdout || payload.error || err.message;
+  return Object.assign(new Error(`${prefix}: ${message}`), { statusCode: 400, details: payload });
+}
+
 async function writeDriveSettings(body) {
   const mounts = await driveMounts();
   if (!String(body.mountPath || '').trim()) {
@@ -2223,11 +2181,26 @@ async function writeDriveSettings(body) {
     throw Object.assign(new Error('Diretorio do Drive precisa ficar dentro do disco selecionado.'), { statusCode: 400 });
   }
 
-  fs.mkdirSync(drivePath, { recursive: true, mode: 0o770 });
+  let localDirectoryReady = false;
   try {
+    fs.mkdirSync(drivePath, { recursive: true, mode: 0o770 });
     fs.chmodSync(drivePath, 0o770);
-  } catch {
-    // Some filesystems do not support chmod; the directory still remains usable.
+    localDirectoryReady = true;
+  } catch (err) {
+    if (!['EACCES', 'EPERM', 'ENOENT'].includes(err.code)) {
+      throw Object.assign(new Error(`Falha ao preparar pasta do Drive: ${err.message}`), { statusCode: 400 });
+    }
+  }
+  if (!localDirectoryReady) {
+    try {
+      await privilegedRun('/usr/local/sbin/tronsoftos-network', ['drive-prepare', drivePath], {
+        env: serviceAccountEnv(),
+        timeout: 60_000,
+        maxBuffer: 1024 * 1024
+      });
+    } catch (err) {
+      throw privilegedDriveError(err, 'Falha ao preparar pasta do Drive');
+    }
   }
 
   const settings = {
@@ -2255,10 +2228,13 @@ async function writeDriveSettings(body) {
         sambaUsername,
         secret?.passwordPath || ''
       ], {
+        env: serviceAccountEnv(),
         timeout: 120_000,
         maxBuffer: 1024 * 1024 * 2
       });
       samba = parseJsonLinesBestEffort(out.stdout).at(-1) || { ok: true };
+    } catch (err) {
+      throw privilegedDriveError(err, 'Falha ao configurar Samba');
     } finally {
       if (secret) fs.rmSync(secret.tmpDir, { recursive: true, force: true });
     }
@@ -2681,7 +2657,7 @@ async function tronfireAlerts() {
   try {
     const target = tronfireProxyTarget();
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2500);
+    const timeout = setTimeout(() => controller.abort(), 8000);
     const response = await fetch(new URL('/api/internal/alerts', target), {
       signal: controller.signal,
       headers: { 'x-tronsoftos-token': token }
@@ -2689,18 +2665,91 @@ async function tronfireAlerts() {
     clearTimeout(timeout);
     if (!response.ok) return [];
     const alerts = await response.json();
-    return Array.isArray(alerts) ? alerts.map(alert => ({
-      source: 'TronFire',
-      severity: String(alert.severity || 'warning').toLowerCase(),
-      message: alert.message || alert.type || 'Alerta TronFire',
-      code: alert.type || null,
-      type: alert.type || null,
-      createdAt: alert.createdAt || null,
-      details: alert.details || null
-    })) : [];
+    return Array.isArray(alerts) ? alerts.map(normalizeTronfireAlert) : [];
   } catch {
     return [];
   }
+}
+
+function normalizeTronfireAlert(alert = {}) {
+  const type = String(alert.type || alert.code || '').trim();
+  const message = alert.message || type || 'Alerta TronFire';
+  const normalized = {
+    source: 'TronFire',
+    severity: String(alert.severity || 'warning').toLowerCase(),
+    title: alert.title || message,
+    message,
+    code: type || null,
+    type: type || null,
+    createdAt: alert.createdAt || null,
+    details: alert.details || null
+  };
+  if (type.startsWith('BACKUP_VALIDATION_OVERDUE_')) {
+    return {
+      ...normalized,
+      severity: 'warning',
+      title: 'Validacao diaria de backup pendente',
+      message: `${message}. Backups simples continuam sendo gerados; a validacao por restore/gstat roda na janela diaria configurada.`,
+      details: {
+        ...(alert.details || {}),
+        category: 'backup_validation',
+        validationMode: 'daily',
+        operationalImpact: 'backup_available_validation_pending'
+      }
+    };
+  }
+  if (type.startsWith('BACKUP_VALIDATION_FAILED_')) {
+    return {
+      ...normalized,
+      severity: 'critical',
+      title: 'Validacao de backup falhou',
+      message: `${message}. O backup foi gerado, mas nao foi aprovado pelo restore/gstat; investigue antes de considerar esse ponto como recuperavel.`,
+      details: {
+        ...(alert.details || {}),
+        category: 'backup_validation',
+        operationalImpact: 'backup_generated_validation_failed'
+      }
+    };
+  }
+  if (type.startsWith('FIREBIRD_DEGRADED_') || type.startsWith('FIREBIRD_UNRESPONSIVE_')) {
+    return {
+      ...normalized,
+      severity: 'critical',
+      title: 'Firebird em risco operacional',
+      message: `${message}. Servico pode estar online, mas o ambiente requer acao tecnica.`,
+      details: {
+        ...(alert.details || {}),
+        category: 'firebird_health',
+        operationalImpact: 'service_online_with_database_risk'
+      }
+    };
+  }
+  if (type.startsWith('FIREBIRD_TRANSACTION_GAP_')) {
+    return {
+      ...normalized,
+      severity: normalized.severity === 'critical' ? 'critical' : 'warning',
+      title: 'Firebird com gap transacional',
+      message: `${message}. Verifique conexoes antigas, transacoes presas e necessidade de manutencao/sweep em janela segura.`,
+      details: {
+        ...(alert.details || {}),
+        category: 'firebird_health',
+        operationalImpact: 'transaction_gap_may_delay_garbage_collection'
+      }
+    };
+  }
+  if (type === 'BACKUP_FAILED') {
+    return {
+      ...normalized,
+      severity: 'critical',
+      title: 'Backup falhou',
+      details: {
+        ...(alert.details || {}),
+        category: 'backup',
+        operationalImpact: 'backup_failure'
+      }
+    };
+  }
+  return normalized;
 }
 
 async function tronfireCompanyIdentity() {
@@ -2880,6 +2929,71 @@ async function remoteTronsoftosHealth(host) {
     if (!response.ok) return { ok: false, url: base, status: response.status };
     const payload = await response.json();
     return { ok: true, url: base, ...payload };
+  } catch (err) {
+    return { ok: false, url: base, error: err.message };
+  }
+}
+
+function summarizeRemoteDashboard(payload = {}, url = '') {
+  const cluster = payload.cluster && typeof payload.cluster === 'object' ? payload.cluster : {};
+  const build = payload.build && typeof payload.build === 'object' ? payload.build : {};
+  return {
+    ok: true,
+    url,
+    status: payload.status || null,
+    collectedAt: new Date().toISOString(),
+    build: {
+      version: build.version || payload.version || '',
+      buildNumber: build.buildNumber || payload.buildNumber || null,
+      commit: build.commit || payload.commit || '',
+      branch: build.branch || payload.branch || ''
+    },
+    host: payload.host || {},
+    database: payload.database || {},
+    metrics: {
+      systemMetrics: centralSystemMetricsPayload(payload),
+      firebird: centralFirebirdMetricsPayload(payload),
+      network: payload.network || payload.metrics?.network || null,
+      hostUptimeSeconds: payload.hostUptimeSeconds ?? payload.metrics?.hostUptimeSeconds ?? null
+    },
+    backups: payload.backups || {},
+    services: Array.isArray(payload.apps) || payload.services
+      ? {
+          platform: payload.services?.platform || 'linux-docker',
+          collectedAt: payload.services?.collectedAt || new Date().toISOString(),
+          apps: Array.isArray(payload.apps) ? payload.apps : payload.services?.apps || [],
+          containers: payload.services?.containers || []
+        }
+      : {},
+    cluster: {
+      mode: cluster.mode || '',
+      nodeName: cluster.nodeName || cluster.identity?.nodeName || '',
+      nodeRole: cluster.nodeRole || cluster.identity?.nodeRole || '',
+      activeNode: cluster.lock?.active_node || cluster.guard?.activeNode || '',
+      guard: cluster.guard || null,
+      vip: cluster.vip || null,
+      vipStatus: cluster.vipStatus || null,
+      recovery: cluster.nodeRole === 'recovery' || cluster.identity?.nodeRole === 'recovery'
+    }
+  };
+}
+
+async function remoteTronsoftosDashboard(host) {
+  const targetHost = String(host || '').trim();
+  if (!targetHost) return null;
+  const base = /^https?:\/\//i.test(targetHost) ? targetHost : `http://${targetHost}:${port}`;
+  try {
+    const token = internalTokenValue();
+    if (!token) return { ok: false, url: base, error: 'token interno nao configurado' };
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 6500);
+    const response = await fetch(new URL('/api/dashboard', base), {
+      signal: controller.signal,
+      headers: { 'x-tronsoftos-token': token }
+    });
+    clearTimeout(timeout);
+    if (!response.ok) return { ok: false, url: base, status: response.status };
+    return summarizeRemoteDashboard(await response.json(), base);
   } catch (err) {
     return { ok: false, url: base, error: err.message };
   }
@@ -3162,7 +3276,9 @@ function normalizeCloudflareSettings(body) {
     enabled: body.enabled === true,
     tokenCleared: providedToken ? false : current.tokenCleared === true,
     tunnelToken: providedToken || current.tunnelToken || '',
-    maintenanceSshEnabled: body.maintenanceSshEnabled === true,
+    maintenanceSshEnabled: body.maintenanceSshEnabled === undefined
+      ? current.maintenanceSshEnabled === true
+      : body.maintenanceSshEnabled === true,
     maintenanceSshHostname,
     maintenanceSshService: 'ssh://host.docker.internal:22'
   };
@@ -3675,6 +3791,11 @@ async function dashboard() {
   const identity = cluster.identity || nodeIdentity();
   if (haMode && cluster.sync?.standbyHost) {
     cluster.standbyHealth = await remoteTronsoftosHealth(cluster.sync.standbyHost);
+    const peerDashboard = await remoteTronsoftosDashboard(cluster.sync.standbyHost);
+    cluster.peerDashboard = peerDashboard;
+    const peerRole = String(peerDashboard?.cluster?.nodeRole || '').toLowerCase();
+    if (peerRole === 'primary') cluster.primaryDashboard = peerDashboard;
+    if (['standby', 'recovery'].includes(peerRole)) cluster.standbyDashboard = peerDashboard;
   }
   const tronfireHa = haMode && identity.nodeRole === 'primary' && cluster.sync?.standbyHost
     ? await remoteTronfireHaStatus(cluster.sync.standbyHost)
@@ -4276,7 +4397,10 @@ function startAppAction(app, action, options = {}) {
 }
 
 function startHaSync() {
-  assertHaSyncPrimary('Sync HA');
+  const guard = clusterGuard();
+  if (nodeIdentity().deploymentMode === 'ha' && guard.canServeProduction !== true) {
+    throw Object.assign(new Error(`Sync HA deve ser executado no no primary/ativo. Status atual: ${guard.reason || guard.status}`), { statusCode: 409 });
+  }
   const settings = publicHaSyncSettings(rawHaSyncSettings());
   if (settings.enabled !== true) throw new Error('sync HA desabilitado');
   if (!settings.standbyHost) throw new Error('host standby nao configurado');
@@ -4368,12 +4492,11 @@ function startHaSyncScheduler() {
       let settings = publicHaSyncSettings();
       const identity = nodeIdentity();
       if (!settings.enabled || !settings.autoEnabled || !settings.standbyHost) return;
-      if (identity.deploymentMode === 'ha' && identity.nodeRole !== 'primary') return;
+      if (identity.deploymentMode === 'ha' && clusterGuard().canServeProduction !== true) return;
       if (!settings.sshValidated) {
         await testHaSyncSsh(settings);
         settings = publicHaSyncSettings();
       }
-      if (identity.deploymentMode === 'ha' && clusterGuard().canServeProduction !== true) return;
       if (!shouldRunAutoHaSync(settings)) return;
       lastAutoHaSyncStartedAt = Date.now();
       appendEvent('HA_SYNC_AUTO_TRIGGERED', { standbyHost: settings.standbyHost, intervalMinutes: settings.intervalMinutes, syncMode: settings.syncMode });
@@ -4402,8 +4525,69 @@ async function primaryHealthOk(url) {
   }
 }
 
+function haPeerBaseUrl(host) {
+  const value = String(host || '').trim().replace(/\/+$/, '');
+  if (!value) return '';
+  return /^https?:\/\//i.test(value) ? value : `http://${value}:${port}`;
+}
+
+async function peerClusterGuard(host) {
+  const baseUrl = haPeerBaseUrl(host);
+  if (!baseUrl) return null;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2500);
+    const response = await fetch(new URL('/api/cluster/guard', baseUrl), { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!response.ok) return null;
+    return response.json();
+  } catch {
+    return null;
+  }
+}
+
+async function maybeDemoteReturnedPrimary() {
+  const identity = nodeIdentity();
+  if (identity.deploymentMode !== 'ha' || identity.nodeRole !== 'primary') return false;
+
+  const activation = clusterActivation();
+  if (activation?.promotedFromStandby === true || /failover|promov/i.test(String(activation?.reason || ''))) {
+    return false;
+  }
+
+  const settings = publicHaSyncSettings();
+  if (!settings.standbyHost) return false;
+
+  const peerGuard = await peerClusterGuard(settings.standbyHost);
+  const peerActiveNode = normalizeNodeName(peerGuard?.activeNode);
+  const thisNode = normalizeNodeName(identity.nodeName);
+  const sameCluster = !peerGuard?.cluster || !identity.clusterId || peerGuard.cluster === identity.clusterId;
+  const peerServingAnotherNode = sameCluster
+    && peerGuard?.canServeProduction === true
+    && peerActiveNode
+    && peerActiveNode !== thisNode;
+
+  if (!peerServingAnotherNode) return false;
+
+  appendEvent('HA_RETURNED_PRIMARY_DETECTED_ACTIVE_PEER', {
+    peerHost: settings.standbyHost,
+    peerActiveNode: peerGuard.activeNode,
+    peerStatus: peerGuard.status
+  });
+  await putLocalNodeInRecovery({
+    activeNode: peerGuard.activeNode,
+    reason: `primary anterior voltou, mas o ativo atual e ${peerGuard.activeNode}`
+  });
+  return true;
+}
+
 async function maybeAutoFailover() {
   const identity = nodeIdentity();
+  if (await maybeDemoteReturnedPrimary()) {
+    primaryDownSince = 0;
+    return;
+  }
+
   const settings = publicHaFailoverSettings();
   if (identity.deploymentMode !== 'ha' || identity.nodeRole !== 'standby' || !settings.primaryHealthUrl) {
     primaryDownSince = 0;
@@ -4470,6 +4654,7 @@ function startHaFailoverWatchdog() {
     maybeAutoFailover().catch(err => appendEvent('HA_FAILOVER_WATCHDOG_ERROR', { error: err.message }));
   }, Math.max(publicHaFailoverSettings().checkIntervalSeconds, 2) * 1000);
   if (typeof haFailoverWatchdogTimer.unref === 'function') haFailoverWatchdogTimer.unref();
+  maybeAutoFailover().catch(err => appendEvent('HA_FAILOVER_WATCHDOG_ERROR', { error: err.message }));
 }
 
 function restartHaFailoverWatchdog() {
@@ -5057,9 +5242,41 @@ function centralResellerPayload() {
   };
 }
 
+function interfacePrimaryIpv4(interfaces, interfaceName) {
+  if (!interfaceName) return '';
+  return (interfaces[interfaceName] || [])
+    .find(item => item.family === 'IPv4' && !item.internal)?.address || '';
+}
+
 function primaryHostIp() {
+  const configuredAddress = parseIpv4Cidr(
+    process.env.TRONSOFTOS_CENTRAL_HOST_IP
+      || process.env.HOST_STATIC_IP_ADDRESS_CIDR
+      || process.env.TRONFIRE_LAN_HOST
+  );
+  if (configuredAddress?.address) return configuredAddress.address;
+
   const interfaces = os.networkInterfaces();
-  for (const items of Object.values(interfaces)) {
+  const staticInterface = String(process.env.HOST_STATIC_IP_INTERFACE || '').trim();
+  const syncInterface = String(process.env.HOST_SYNC_IP_INTERFACE || '').trim();
+  if (staticInterface) {
+    const staticAddress = interfacePrimaryIpv4(interfaces, staticInterface);
+    if (staticAddress) return staticAddress;
+  }
+
+  try {
+    const stdout = execFileSync('ip', ['route', 'show', 'default'], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] });
+    const defaultInterface = stdout.match(/\bdev\s+(\S+)/)?.[1] || '';
+    if (defaultInterface && defaultInterface !== syncInterface) {
+      const defaultAddress = interfacePrimaryIpv4(interfaces, defaultInterface);
+      if (defaultAddress) return defaultAddress;
+    }
+  } catch {
+    // Sistemas antigos podem nao ter o comando ip disponivel no PATH do servico.
+  }
+
+  for (const [name, items] of Object.entries(interfaces)) {
+    if (syncInterface && name === syncInterface) continue;
     for (const item of items || []) {
       if (item.family === 'IPv4' && !item.internal) return item.address;
     }
@@ -5100,6 +5317,9 @@ async function centralDatabaseInfoFromTronFire() {
           fileSizeBytes: db.fileSizeBytes ?? null,
           sizeMb: db.sizeMb ?? null,
           error: db.error || '',
+          transactionHealth: db.transactionHealth || db.indexHealth?.transactionHealth || null,
+          transactionGap: db.transactionGap || db.indexHealth?.transactionGap || null,
+          firebirdSessions: Array.isArray(db.firebirdSessions || db.sessions) ? (db.firebirdSessions || db.sessions).slice(0, 50) : [],
           indexHealth: db.indexHealth || null,
           indexAudit: db.indexAudit || null
         }))
@@ -5110,11 +5330,14 @@ async function centralDatabaseInfoFromTronFire() {
       databaseAlias: payload.databaseAlias || null,
       fileSizeBytes: payload.fileSizeBytes ?? null,
       sizeMb: payload.sizeMb ?? null,
+      transactionHealth: payload.transactionHealth || payload.indexHealth?.transactionHealth || null,
+      transactionGap: payload.transactionGap || payload.indexHealth?.transactionGap || null,
+      firebirdSessions: Array.isArray(payload.firebirdSessions || payload.sessions) ? (payload.firebirdSessions || payload.sessions).slice(0, 50) : [],
       indexHealth: payload.indexHealth || null,
       indexAudit: payload.indexAudit || null,
       databases
     };
-    if (value.version || value.fileSizeBytes || value.indexHealth || value.indexAudit || value.databases.length) {
+    if (value.version || value.fileSizeBytes || value.transactionHealth || value.indexHealth || value.indexAudit || value.databases.length) {
       centralDatabaseInfoCache = { checkedAt: Date.now(), value };
     }
     return value;
@@ -5144,6 +5367,9 @@ async function centralDatabasePayload() {
     fileSizeBytes: tronfireDatabase?.fileSizeBytes ?? null,
     databaseName: tronfireDatabase?.databaseName || null,
     databaseAlias: tronfireDatabase?.databaseAlias || null,
+    transactionHealth: tronfireDatabase?.transactionHealth || tronfireDatabase?.indexHealth?.transactionHealth || null,
+    transactionGap: tronfireDatabase?.transactionGap || tronfireDatabase?.indexHealth?.transactionGap || null,
+    firebirdSessions: Array.isArray(tronfireDatabase?.firebirdSessions) ? tronfireDatabase.firebirdSessions : [],
     indexHealth: tronfireDatabase?.indexHealth || null,
     indexAudit: tronfireDatabase?.indexAudit || null,
     databases: Array.isArray(tronfireDatabase?.databases) ? tronfireDatabase.databases : []
@@ -5184,34 +5410,21 @@ function writeCentralToken(token) {
 }
 
 async function centralRequest(pathname, { method = 'GET', token = '', body = null } = {}) {
-  const attempts = Math.max(1, Number(process.env.TRONSOFTOS_CENTRAL_REQUEST_ATTEMPTS || 3));
-  let lastError = null;
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    try {
-      const response = await fetch(`${centralBaseUrl()}${pathname}`, {
-        method,
-        headers: {
-          ...(body ? { 'content-type': 'application/json' } : {}),
-          ...(token ? { 'x-installation-token': token } : {})
-        },
-        body: body ? JSON.stringify(body) : undefined
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        const error = new Error(payload.error || `Central HTTP ${response.status}`);
-        error.statusCode = response.status;
-        throw error;
-      }
-      return payload;
-    } catch (err) {
-      if (err.statusCode) throw err;
-      lastError = err;
-      if (attempt < attempts) await delay(1000 * attempt);
-    }
+  const response = await fetch(`${centralBaseUrl()}${pathname}`, {
+    method,
+    headers: {
+      ...(body ? { 'content-type': 'application/json' } : {}),
+      ...(token ? { 'x-installation-token': token } : {})
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(payload.error || `Central HTTP ${response.status}`);
+    error.statusCode = response.status;
+    throw error;
   }
-  const cause = lastError?.cause;
-  const causeMessage = cause?.code ? `${cause.code}: ${cause.message || ''}`.trim() : cause?.message || '';
-  throw new Error(causeMessage ? `${lastError?.message || 'fetch failed'} (${causeMessage})` : lastError?.message || 'fetch failed');
+  return payload;
 }
 
 function requireCentralInstallationToken() {
@@ -5354,8 +5567,8 @@ async function centralIdentify() {
 
 function centralStatusFromDashboard(payload) {
   if (payload.apps?.some(app => app.status === 'offline' && app.enabled !== false)) return 'offline';
-  if (payload.alerts?.some(alert => alert.severity === 'critical')) return 'warning';
-  if (payload.alerts?.some(alert => alert.severity === 'warning')) return 'warning';
+  if (payload.alerts?.some(alert => String(alert.severity || '').toLowerCase() === 'critical')) return 'warning';
+  if (payload.alerts?.some(alert => String(alert.severity || '').toLowerCase() === 'warning')) return 'warning';
   return 'online';
 }
 
@@ -5388,13 +5601,8 @@ function centralSystemMetricsPayload(payload = {}) {
 function centralFirebirdMetricsPayload(payload = {}) {
   const metrics = payload.systemMetrics && typeof payload.systemMetrics === 'object' ? payload.systemMetrics : {};
   const latestRows = Array.isArray(metrics.latest) ? metrics.latest : (metrics.latest ? [metrics.latest] : []);
-  const latestFirebird = latestRows.find(row => row && row.scope === 'FIREBIRD' && row.target) || null;
-  const latest = latestFirebird && typeof latestFirebird === 'object'
-    ? {
-        ...latestFirebird,
-        collectedAt: latestFirebird.collectedAt || latestFirebird.createdAt || metrics.collectedAt || new Date().toISOString()
-      }
-    : null;
+  const latestFirebird = latestRows.find(row => row && row.scope === 'FIREBIRD') || null;
+  const uptime = latestRows.find(row => row && row.target === 'firebird_uptime') || null;
   const series = Array.isArray(metrics.series)
     ? metrics.series
         .filter(row => row && row.scope === 'FIREBIRD')
@@ -5404,13 +5612,16 @@ function centralFirebirdMetricsPayload(payload = {}) {
         }))
         .slice(-288)
     : [];
-  const uptimeMetric = latestRows.find(row => row && row.scope === 'SERVER' && row.target === 'firebird_uptime')
-    || (Array.isArray(metrics.series) ? [...metrics.series].reverse().find(row => row && row.scope === 'SERVER' && row.target === 'firebird_uptime') : null);
-  if (!latest && !series.length && !uptimeMetric) return null;
+  if (!latestFirebird && !series.length && !uptime) return null;
   return {
-    ...(latest ? { latest } : {}),
-    ...(series.length ? { series } : {}),
-    uptimeSeconds: uptimeMetric?.uptimeSeconds ?? uptimeMetric?.value ?? null
+    latest: latestFirebird
+      ? {
+          ...latestFirebird,
+          collectedAt: latestFirebird.collectedAt || latestFirebird.createdAt || metrics.collectedAt || new Date().toISOString()
+        }
+      : null,
+    uptimeSeconds: uptime?.uptimeSeconds ?? null,
+    series
   };
 }
 
@@ -5619,6 +5830,19 @@ async function centralServicesPayload(payload = {}) {
   };
 }
 
+function centralClusterPayload(payload = {}) {
+  const cluster = payload.cluster && typeof payload.cluster === 'object' ? payload.cluster : {};
+  return {
+    ...cluster,
+    mode: cluster.mode || '',
+    nodeName: cluster.nodeName || cluster.identity?.nodeName || '',
+    nodeRole: cluster.nodeRole || cluster.identity?.nodeRole || '',
+    activeNode: cluster.lock?.active_node || cluster.guard?.activeNode || cluster.vipStatus?.holder?.nodeName || '',
+    recoveryActive: cluster.nodeRole === 'recovery' || cluster.identity?.nodeRole === 'recovery',
+    vip: cluster.vip || null
+  };
+}
+
 async function centralHeartbeat(token, payload) {
   const networkMetrics = await centralNetworkMetricsPayload();
   return centralRequest('/api/tronsoftos/heartbeat', {
@@ -5633,12 +5857,7 @@ async function centralHeartbeat(token, payload) {
       },
       database: await centralDatabasePayload(),
       host: centralHostPayload(),
-      cluster: {
-        mode: payload.cluster?.mode || '',
-        nodeName: payload.cluster?.nodeName || '',
-        nodeRole: payload.cluster?.nodeRole || '',
-        vip: payload.cluster?.vip || null
-      },
+      cluster: centralClusterPayload(payload),
       backups: payload.backups || {},
       services: await centralServicesPayload(payload),
       metrics: {
@@ -5653,7 +5872,9 @@ async function centralHeartbeat(token, payload) {
           severity: alert.severity || 'info',
           title,
           message: alert.message || title,
-          code: alert.code || centralAlertKey(alert)
+          code: stableAlertCode(alert),
+          source: alert.source || 'TronSoftOS',
+          details: alert.details || null
         };
       })
     }
@@ -5664,6 +5885,10 @@ function centralAlertKey(alert) {
   return crypto.createHash('sha1')
     .update(`${alert.severity || 'info'}:${alert.message || alert.title || ''}`)
     .digest('hex');
+}
+
+function stableAlertCode(alert) {
+  return alert.code || alert.type || centralAlertKey(alert);
 }
 
 function writeCentralAlertStates() {
@@ -5680,7 +5905,7 @@ async function centralSendAlert(token, alert) {
       severity: alert.severity || 'info',
       title,
       message: alert.message || title,
-      code: alert.code || centralAlertKey(alert),
+      code: stableAlertCode(alert),
       details: {
         source: 'tronsoftos',
         node: nodeIdentity(),
@@ -5693,7 +5918,7 @@ async function centralSendAlert(token, alert) {
 async function centralSyncAlerts(token, alerts) {
   const activeKeys = new Set();
   for (const alert of alerts || []) {
-    const key = centralAlertKey(alert);
+    const key = stableAlertCode(alert);
     activeKeys.add(key);
     if (centralAlertStates.get(key) === 'active') continue;
     await centralSendAlert(token, alert);
@@ -5911,7 +6136,7 @@ async function handleApi(req, reply, url) {
   if (req.method === 'PATCH' && url.pathname === '/api/cluster/lock') return json(reply, 200, writeClusterLock(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/cluster/promotion/block') return json(reply, 200, blockClusterPromotion((await readBody(req).catch(() => ({}))).reason));
   if (req.method === 'POST' && url.pathname === '/api/cluster/activate-local') return json(reply, 200, await activateLocalNode(await readBody(req).catch(() => ({}))));
-  if (req.method === 'POST' && url.pathname === '/api/cluster/recovery-local') return json(reply, 200, putLocalNodeInRecovery(await readBody(req).catch(() => ({}))));
+  if (req.method === 'POST' && url.pathname === '/api/cluster/recovery-local') return json(reply, 200, await putLocalNodeInRecovery(await readBody(req).catch(() => ({}))));
   if (req.method === 'GET' && url.pathname === '/api/cluster/network-impact') return json(reply, 200, await clusterNetworkImpact(url.searchParams.get('proposed') || ''));
   if (req.method === 'GET' && url.pathname === '/api/cluster/sync') return json(reply, 200, publicHaSyncSettings());
   if (req.method === 'GET' && url.pathname === '/api/cluster/sync/logs') return json(reply, 200, haSyncLogs(url.searchParams.get('file') || ''));
@@ -5927,7 +6152,6 @@ async function handleApi(req, reply, url) {
   if (req.method === 'PATCH' && url.pathname === '/api/backups/rclone') return json(reply, 200, writeRcloneSettings(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/test') return json(reply, 200, await rcloneTest());
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/upload-test') return json(reply, 200, await rcloneUploadTest());
-  if (req.method === 'POST' && url.pathname === '/api/backups/rclone/upload-now') return json(reply, 200, await rcloneUploadBackups('manual'));
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/cleanup') return json(reply, 200, await rcloneCleanupRemoteBackups());
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/token') return json(reply, 200, saveGoogleDriveToken(await readBody(req)));
   if (req.method === 'POST' && url.pathname === '/api/backups/rclone/reset-auth') return json(reply, 200, await resetGoogleDriveAuth());
@@ -6061,7 +6285,6 @@ if (friendlyPort && friendlyPort !== port && friendlyPath) {
 
 server.listen(port, '0.0.0.0', () => {
   ensureStateDir();
-  startRcloneBackupUploadScheduler();
   startHaSyncScheduler();
   startHaFailoverWatchdog();
   startCentralAgent();

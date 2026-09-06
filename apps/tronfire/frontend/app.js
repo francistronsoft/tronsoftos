@@ -179,17 +179,7 @@ function operationBadge(db) {
   return `<span class="badge bg-warning text-dark" title="${escapeHtml(db.operationMessage || '')}">${escapeHtml(label)}</span>`;
 }
 
-function databaseStatusView(db, diagnostic, haStatus) {
-  const usingStandbyPath = diagnostic?.pathRole === 'standby_read_only'
-    || (diagnostic?.path && diagnostic.path !== db.filePath);
-  if (
-    haStatus?.deploymentMode === 'ha'
-    && haStatus?.nodeRole === 'standby'
-    && usingStandbyPath
-    && String(db.standbyStatus || '').toUpperCase() === 'READY'
-  ) {
-    return { text: 'Standby pronto', className: 'success', title: 'Arquivo standby restaurado e validado para promocao' };
-  }
+function databaseStatusView(db, diagnostic) {
   if (diagnostic?.ok === false) return { text: 'Erro/offline', className: 'danger', title: diagnostic.error || 'Falha ao consultar o banco' };
   if (diagnostic?.ok) return { text: 'Conexao OK', className: 'success', title: 'Consulta via isql respondeu; use gfix -online se o ERP ficar limitado por shutdown/maintenance' };
   if (db.status === 'ONLINE') return { text: 'Conexao OK', className: 'success', title: 'Ultima validacao respondeu; use gfix -online se precisar forcar o modo online do Firebird' };
@@ -207,6 +197,32 @@ function haOperationWarning(haStatus) {
 function num(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function formatInteger(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed.toLocaleString('pt-BR') : '-';
+}
+
+function transactionHealthPanel(health) {
+  if (!health) return '';
+  const gap = Number.isFinite(Number(health.nextTransaction)) && Number.isFinite(Number(health.oldestTransaction))
+    ? Number(health.nextTransaction) - Number(health.oldestTransaction)
+    : null;
+  return `
+    <div class="col-12">
+      <div class="border rounded p-3">
+        <div class="subheader mb-2">Transacoes Firebird</div>
+        <div class="row g-3">
+          <div class="col-sm-6 col-lg-2"><div class="text-muted small">Oldest transaction</div><div class="h3 mb-0">${formatInteger(health.oldestTransaction)}</div></div>
+          <div class="col-sm-6 col-lg-2"><div class="text-muted small">Oldest active</div><div class="h3 mb-0">${formatInteger(health.oldestActive)}</div></div>
+          <div class="col-sm-6 col-lg-2"><div class="text-muted small">Oldest snapshot</div><div class="h3 mb-0">${formatInteger(health.oldestSnapshot)}</div></div>
+          <div class="col-sm-6 col-lg-2"><div class="text-muted small">Next transaction</div><div class="h3 mb-0">${formatInteger(health.nextTransaction)}</div></div>
+          <div class="col-sm-6 col-lg-2"><div class="text-muted small">Gap OIT/Next</div><div class="h3 mb-0">${formatInteger(gap)}</div></div>
+          <div class="col-sm-6 col-lg-2"><div class="text-muted small">Sweep interval</div><div class="h3 mb-0">${formatInteger(health.sweepInterval)}</div></div>
+        </div>
+      </div>
+    </div>`;
 }
 
 function formatBytes(value) {
@@ -462,11 +478,27 @@ function alertSeverityClass(severity) {
 
 function alertDetailsText(alert) {
   const details = alert?.details || {};
+  if (details.kind === 'FIREBIRD_TRANSACTION_GAP') {
+    const parts = [];
+    const transactionHealth = details.transactionHealth || details;
+    if (details.checkedAt) parts.push(`Verificado: ${new Date(details.checkedAt).toLocaleString()}`);
+    parts.push(`Gap OIT/Next: ${formatInteger(details.gap ?? details.transactionGap?.gap)}`);
+    parts.push(`OIT ${formatInteger(transactionHealth.oldestTransaction)}, OAT ${formatInteger(transactionHealth.oldestActive)}, OST ${formatInteger(transactionHealth.oldestSnapshot)}, Next ${formatInteger(transactionHealth.nextTransaction)}`);
+    parts.push(`Sweep ${formatInteger(transactionHealth.sweepInterval)}`);
+    if (details.criticalThreshold !== undefined || details.warningThreshold !== undefined) {
+      parts.push(`Limites: aviso ${formatInteger(details.warningThreshold)}, critico ${formatInteger(details.criticalThreshold)}`);
+    }
+    return parts.join(' | ');
+  }
   if (details.kind !== 'DATABASE_MISSING_ACTIVE_INDEXES') return '';
   const parts = [];
   if (details.checkedAt) parts.push(`Verificado: ${new Date(details.checkedAt).toLocaleString()}`);
   if (details.activeIndexes !== undefined && details.totalIndexes !== undefined) parts.push(`Indices ativos: ${details.activeIndexes}/${details.totalIndexes}`);
   if (details.activeUserIndexes !== undefined && details.userIndexes !== undefined) parts.push(`Indices comuns ativos: ${details.activeUserIndexes}/${details.userIndexes}`);
+  const transactionHealth = details.transactionHealth || details;
+  if (transactionHealth.oldestTransaction !== undefined || transactionHealth.nextTransaction !== undefined) {
+    parts.push(`Transacoes: OIT ${formatInteger(transactionHealth.oldestTransaction)}, OAT ${formatInteger(transactionHealth.oldestActive)}, Next ${formatInteger(transactionHealth.nextTransaction)}`);
+  }
   if (details.sizeDropPercent !== null && details.sizeDropPercent !== undefined && Number(details.sizeDropPercent) > 0) {
     parts.push(`Queda: ${details.sizeDropPercent}%`);
   }
@@ -500,6 +532,36 @@ function dashboardAlertShortcut(alerts) {
   </div></div>`;
 }
 
+function dashboardIndexCards(databases = [], indexHealthItems = []) {
+  const healthById = new Map(indexHealthItems.map(item => [item.databaseId, item]));
+  const healthByAlias = new Map(indexHealthItems.map(item => [item.databaseAlias, item]));
+  const rows = databases.map(db => {
+    const health = healthById.get(db.id) || healthByAlias.get(db.alias) || null;
+    const severity = String(health?.severity || '').toUpperCase();
+    const className = health?.error ? 'danger' : severity === 'CRITICAL' ? 'danger' : severity === 'WARNING' ? 'warning' : health ? 'success' : 'secondary';
+    const active = health ? formatInteger(health.activeIndexes) : '-';
+    const total = health ? formatInteger(health.totalIndexes) : '-';
+    const inactive = health ? formatInteger(health.inactiveIndexes ?? health.total) : '-';
+    const commonActive = health ? `${formatInteger(health.activeUserIndexes)}/${formatInteger(health.userIndexes)}` : '-';
+    const detail = health?.error
+      ? health.error
+      : health
+        ? `${inactive} inativo(s), indices comuns ${commonActive}`
+        : 'Sem leitura de indices ainda';
+    return `<div class="col-sm-6 col-xl-3"><div class="card summary-card h-100"><div class="card-body">
+      <div class="d-flex align-items-start justify-content-between gap-2">
+        <div class="min-w-0">
+          <div class="subheader text-truncate">${escapeHtml(db.alias || db.name)}</div>
+          <div class="h1 mb-0 text-${className === 'danger' ? 'danger' : className === 'warning' ? 'warning' : 'reset'}">${active}/${total}</div>
+        </div>
+        <span class="badge bg-${className}">${escapeHtml(health ? (severity || 'OK') : 'SEM LEITURA')}</span>
+      </div>
+      <div class="text-muted small mt-2">${escapeHtml(detail)}</div>
+    </div></div></div>`;
+  });
+  return `<div class="row row-cards zbx-board mb-3">${rows.length ? rows.join('') : '<div class="col-12"><div class="alert alert-info mb-0">Nenhum banco cadastrado para leitura de indices.</div></div>'}</div>`;
+}
+
 async function dashboard() {
   const params = new URLSearchParams(location.hash.split('?')[1] || '');
   const range = ['day', 'week', 'month'].includes(params.get('range')) ? params.get('range') : 'day';
@@ -526,11 +588,11 @@ async function dashboard() {
   const backupOk = data.backups.filter(b => b.status === 'SUCCESS').length;
   const backupFailed = data.backups.filter(b => b.status === 'FAILED').length;
   const indexHealthItems = data.indexHealth || [];
-  const activeIndexTotal = indexHealthItems.reduce((sum, item) => sum + Number(item.activeIndexes || 0), 0);
   const inactiveIndexTotal = indexHealthItems.reduce((sum, item) => sum + Number((item.inactiveIndexes ?? item.total) || 0), 0);
   const criticalIndexDatabases = indexHealthItems.filter(item => item.severity === 'CRITICAL').length;
   const inactiveIndexErrors = indexHealthItems.filter(item => item.error).length;
   const maxIndexSizeDrop = Math.max(0, ...indexHealthItems.map(item => Number(item.sizeDropPercent || 0)));
+  const okIndexDatabases = indexHealthItems.filter(item => !item.error && item.severity !== 'CRITICAL').length;
   const indexHealthDetail = inactiveIndexErrors
     ? `${inactiveIndexErrors} banco(s) sem leitura`
     : criticalIndexDatabases
@@ -557,9 +619,10 @@ async function dashboard() {
       <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Bancos</div><div class="h1 mb-0">${data.databases.length}</div></div></div></div>
       <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Producao</div><div class="h3 mb-0 text-truncate">${escapeHtml(prod?.name || 'Nao definido')}</div></div></div></div>
       <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Conexoes producao</div><div class="h1 mb-0">${data.productionConnections?.total ?? '-'}</div><div class="text-muted small">${data.productionConnections?.error ? 'Consulta indisponivel' : escapeHtml(data.productionConnections?.databaseAlias || 'Sem banco')}</div></div></div></div>
-      <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Indices ativos</div><div class="h1 mb-0 ${criticalIndexDatabases ? 'text-danger' : ''}">${activeIndexTotal || '-'}</div><div class="text-muted small">${escapeHtml(indexHealthDetail)}</div></div></div></div>
+      <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Saude dos indices</div><div class="h1 mb-0 ${criticalIndexDatabases ? 'text-danger' : ''}">${okIndexDatabases}/${indexHealthItems.length || data.databases.length || '-'}</div><div class="text-muted small">${escapeHtml(indexHealthDetail)}</div></div></div></div>
       <div class="col-sm-6 col-xl-3"><div class="card summary-card"><div class="card-body"><div class="subheader">Uptime Firebird</div><div class="h1 mb-0">${formatDuration(uptime.uptimeSeconds)}</div></div></div></div>
     </div>
+    ${dashboardIndexCards(data.databases, indexHealthItems)}
     <div class="row row-cards">
       ${zabbixMetricCard('Firebird: uso de CPU em %', `${num(firebird.cpuPercent).toFixed(1)}%`, rangeLabel, gaugeChart(firebird.cpuPercent, 'CPU Firebird'))}
       ${zabbixMetricCard('Firebird: memoria usada em %', `${num(firebird.memoryPercent).toFixed(1)}%`, `${formatBytes(firebird.memoryUsageBytes)} de ${formatBytes(firebird.memoryLimitBytes)}`, gaugeChart(firebird.memoryPercent, 'Memoria Firebird'))}
@@ -823,13 +886,10 @@ function bindDatabaseSessionsPanel(db, slot) {
 }
 
 function databaseDetailsPanel(db, diagnostic, haStatus) {
+  const status = databaseStatusView(db, diagnostic);
   const diagnosticPath = diagnostic?.path || db.filePath;
   const usingStandbyPath = diagnostic?.pathRole === 'standby_read_only' || diagnosticPath !== db.filePath;
-  const status = databaseStatusView(db, diagnostic, haStatus);
-  const suppressDiagnosticError = haStatus?.deploymentMode === 'ha'
-    && haStatus?.nodeRole === 'standby'
-    && usingStandbyPath
-    && String(db.standbyStatus || '').toUpperCase() === 'READY';
+  const transactionHealth = diagnostic?.transactionHealth || diagnostic?.indexHealth?.transactionHealth || null;
   return `
     <div class="card mb-3" id="databaseDetailsPanel">
       <div class="card-header d-flex align-items-center justify-content-between">
@@ -850,6 +910,7 @@ function databaseDetailsPanel(db, diagnostic, haStatus) {
           ${usingStandbyPath ? `<div class="col-md-6"><div class="subheader">Caminho de producao</div><code>${escapeHtml(db.filePath)}</code></div>` : ''}
           ${db.standbyPath ? `<div class="col-md-6"><div class="subheader">Caminho standby</div><code>${escapeHtml(db.standbyPath)}</code></div>` : ''}
           ${db.standbyStatus ? `<div class="col-md-3"><div class="subheader">Status standby</div><div>${escapeHtml(db.standbyStatus)}</div></div>` : ''}
+          ${transactionHealthPanel(transactionHealth)}
           <div class="col-md-3"><div class="subheader">Operacao</div><div>${operationBadge(db)}</div></div>
           ${db.operationStartedAt ? `<div class="col-md-3"><div class="subheader">Inicio operacao</div><div>${new Date(db.operationStartedAt).toLocaleString()}</div></div>` : ''}
           ${db.operationExpiresAt ? `<div class="col-md-3"><div class="subheader">Expira em</div><div>${new Date(db.operationExpiresAt).toLocaleString()}</div></div>` : ''}
@@ -858,7 +919,7 @@ function databaseDetailsPanel(db, diagnostic, haStatus) {
           <div class="col-md-3"><div class="subheader">Backup automatico</div><div>${db.backupEnabled ? 'Ativo' : 'Inativo'}</div></div>
           <div class="col-md-3"><div class="subheader">Frequencia</div><div>${escapeHtml(db.backupFrequencyMinutes)} min</div></div>
           <div class="col-md-3"><div class="subheader">Retencao</div><div>${escapeHtml(db.retentionDays)} dias</div></div>
-          ${diagnostic?.error && !suppressDiagnosticError ? `<div class="col-12"><div class="alert alert-danger mb-0">${escapeHtml(diagnostic.error)}</div></div>` : ''}
+          ${diagnostic?.error ? `<div class="col-12"><div class="alert alert-danger mb-0">${escapeHtml(diagnostic.error)}</div></div>` : ''}
         </div>
         <div class="mt-3 btn-list">
           <button class="btn btn-sm btn-outline-dark" data-detail-connection="${db.id}">Conexao</button>
@@ -877,19 +938,20 @@ function databaseDetailsPanel(db, diagnostic, haStatus) {
 }
 
 function firebirdServiceCard(info) {
+  info = info || {};
   const statusClass = ['running', 'active'].includes(info.status) ? 'success' : info.status === 'exited' || info.status === 'dead' || info.status === 'inactive' ? 'danger' : 'warning';
   const label = info.label || (info.mode === 'host' ? 'Servico Firebird no host' : 'Container Firebird geral');
   const name = info.mode === 'host' ? (info.service || 'firebird') : info.container;
   const warning = info.mode === 'host'
     ? 'Estas acoes sao gerais e afetam o servico Firebird 2.5.9 instalado no host Debian.'
     : 'Estas acoes sao gerais e afetam todos os bancos atendidos por este container Firebird.';
-  const actions = currentUser?.role === 'ADMIN'
+  const actions = currentUser?.role !== 'CONSULTA'
     ? `<div class="btn-list">
         <button class="btn btn-outline-success" data-firebird-action="start">Iniciar</button>
         <button class="btn btn-outline-warning" data-firebird-action="restart">Reiniciar</button>
         <button class="btn btn-outline-danger" data-firebird-action="stop">Parar</button>
       </div>`
-    : '<div class="alert alert-info mb-0">Somente administradores podem iniciar, parar ou reiniciar o Firebird.</div>';
+    : '<div class="alert alert-info mb-0">Usuario de consulta nao pode iniciar, parar ou reiniciar o Firebird.</div>';
   return `<div class="card mb-3"><div class="card-body">
     <div class="d-flex flex-wrap align-items-start justify-content-between gap-3">
       <div>
@@ -916,23 +978,43 @@ function bindFirebirdActions(refresh) {
     });
     if (!ok) return;
     btn.disabled = true;
+    const originalText = btn.textContent;
     btn.textContent = 'Executando...';
-    await api(`/api/services/firebird/${action}`, { method: 'POST' });
-    setTimeout(refresh, 900);
+    try {
+      await api(`/api/services/firebird/${action}`, { method: 'POST' });
+      setTimeout(refresh, 900);
+    } catch (err) {
+      await appAlert('Falha na acao do Firebird', err.message, 'danger');
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
   });
 }
 
 async function databases() {
-  const [dbs, diagnosticData, firebirdInfo, haStatus] = await Promise.all([
+  content.innerHTML = '<div class="page-header"><h2 class="page-title">Bancos</h2></div><div class="text-muted">Carregando bancos e status do Firebird...</div>';
+  const [dbsResult, diagnosticResult, firebirdResult, haResult] = await Promise.allSettled([
     api('/api/databases'),
     api('/api/preflight'),
     api('/api/services/firebird'),
-    api('/api/ha/status').catch(() => null)
+    api('/api/ha/status')
   ]);
+  const dbs = dbsResult.status === 'fulfilled' && Array.isArray(dbsResult.value) ? dbsResult.value : [];
+  const diagnosticData = diagnosticResult.status === 'fulfilled' ? diagnosticResult.value : { databases: [], error: diagnosticResult.reason?.message || 'Diagnostico indisponivel' };
+  const firebirdInfo = firebirdResult.status === 'fulfilled'
+    ? firebirdResult.value
+    : { mode: 'host', service: 'firebird', status: 'unknown', details: firebirdResult.reason?.message || 'Status indisponivel', logs: '', label: 'Servico Firebird' };
+  const haStatus = haResult.status === 'fulfilled' ? haResult.value : null;
   const hasProductionDatabase = dbs.some(db => db.isPrimary || db.type === 'PRODUCAO');
   const diagnosticById = new Map((diagnosticData.databases || []).map(db => [db.id, db]));
+  const loadWarnings = [
+    dbsResult.status === 'rejected' ? `Bancos: ${dbsResult.reason?.message || 'falha na API'}` : '',
+    diagnosticResult.status === 'rejected' ? `Diagnostico: ${diagnosticResult.reason?.message || 'falha na API'}` : '',
+    firebirdResult.status === 'rejected' ? `Servico Firebird: ${firebirdResult.reason?.message || 'falha na API'}` : ''
+  ].filter(Boolean);
   content.innerHTML = `
     <div class="page-header"><h2 class="page-title">Bancos</h2></div>
+    ${loadWarnings.length ? `<div class="alert alert-warning mb-3">${escapeHtml(loadWarnings.join(' | '))}</div>` : ''}
     ${firebirdServiceCard(firebirdInfo)}
     <div id="connectionSlot"></div>
     <div id="databaseDetailsSlot"></div>
@@ -1039,10 +1121,14 @@ async function databases() {
         const indexLine = health
           ? `\nIndices totais: ${health.activeIndexes}/${health.totalIndexes} ativos, ${health.inactiveIndexes} inativos.\nIndices comuns: ${health.activeUserIndexes ?? '-'}/${health.userIndexes ?? '-'} ativos.`
           : '';
+        const transactionHealth = health?.transactionHealth || health;
+        const transactionLine = transactionHealth
+          ? `\nTransacoes: OIT ${formatInteger(transactionHealth.oldestTransaction)}, OAT ${formatInteger(transactionHealth.oldestActive)}, OST ${formatInteger(transactionHealth.oldestSnapshot)}, Next ${formatInteger(transactionHealth.nextTransaction)}, Sweep ${formatInteger(transactionHealth.sweepInterval)}.`
+          : '';
         const sizeLine = health?.sizeDropPercent
           ? `\nQueda de tamanho: ${health.sizeDropPercent}% em relacao ao maior tamanho recente.`
           : '';
-        await appAlert('Validacao concluida', `gstat -h executado e alerta de indices reavaliado.${indexLine}${sizeLine}`, health?.severity === 'CRITICAL' ? 'warning' : 'success');
+        await appAlert('Validacao concluida', `gstat -h executado e alerta de indices reavaliado.${indexLine}${transactionLine}${sizeLine}`, health?.severity === 'CRITICAL' ? 'warning' : 'success');
         databases();
       } catch (err) {
         await appAlert('Falha na validacao', err.message, 'danger');
@@ -1537,13 +1623,13 @@ async function services() {
     ? 'Estas acoes sao gerais e afetam o servico Firebird 2.5.9 instalado no host Debian.'
     : 'Estas acoes sao gerais e afetam todos os bancos atendidos por este container Firebird.';
   const logsTitle = info.mode === 'host' ? 'Logs/status recentes do servico' : 'Logs recentes do container';
-  const actions = currentUser?.role === 'ADMIN'
+  const actions = currentUser?.role !== 'CONSULTA'
     ? `<div class="btn-list">
         <button class="btn btn-outline-success" data-firebird-action="start">Iniciar</button>
         <button class="btn btn-outline-warning" data-firebird-action="restart">Reiniciar</button>
         <button class="btn btn-outline-danger" data-firebird-action="stop">Parar</button>
       </div>`
-    : '<div class="alert alert-info mb-0">Somente administradores podem iniciar, parar ou reiniciar o Firebird.</div>';
+    : '<div class="alert alert-info mb-0">Usuario de consulta nao pode iniciar, parar ou reiniciar o Firebird.</div>';
   content.innerHTML = `<div class="page-header"><h2 class="page-title">Servicos</h2></div>
     <div class="card mb-3"><div class="card-body">
       <div class="d-flex flex-wrap align-items-start justify-content-between gap-3">
@@ -1569,9 +1655,16 @@ async function services() {
     });
     if (!ok) return;
     btn.disabled = true;
+    const originalText = btn.textContent;
     btn.textContent = 'Executando...';
-    await api(`/api/services/firebird/${action}`, { method: 'POST' });
-    setTimeout(() => { services(); }, 900);
+    try {
+      await api(`/api/services/firebird/${action}`, { method: 'POST' });
+      setTimeout(() => { services(); }, 900);
+    } catch (err) {
+      await appAlert('Falha na acao do Firebird', err.message, 'danger');
+      btn.disabled = false;
+      btn.textContent = originalText;
+    }
   });
 }
 
