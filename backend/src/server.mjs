@@ -2970,9 +2970,13 @@ function summarizeRemoteDashboard(payload = {}, url = '') {
       nodeName: cluster.nodeName || cluster.identity?.nodeName || '',
       nodeRole: cluster.nodeRole || cluster.identity?.nodeRole || '',
       activeNode: cluster.lock?.active_node || cluster.guard?.activeNode || '',
+      identity: cluster.identity || null,
       guard: cluster.guard || null,
       vip: cluster.vip || null,
       vipStatus: cluster.vipStatus || null,
+      keepalived: cluster.keepalived || null,
+      sync: cluster.sync || null,
+      failover: cluster.failover || null,
       recovery: cluster.nodeRole === 'recovery' || cluster.identity?.nodeRole === 'recovery'
     }
   };
@@ -3897,6 +3901,7 @@ async function dashboard() {
   return {
     generatedAt: new Date().toISOString(),
     build: buildInfo(),
+    host: centralHostPayload(),
     cluster,
     apps,
     systemMetrics,
@@ -5248,27 +5253,43 @@ function interfacePrimaryIpv4(interfaces, interfaceName) {
     .find(item => item.family === 'IPv4' && !item.internal)?.address || '';
 }
 
-function primaryHostIp() {
-  const configuredAddress = parseIpv4Cidr(
-    process.env.TRONSOFTOS_CENTRAL_HOST_IP
-      || process.env.HOST_STATIC_IP_ADDRESS_CIDR
-      || process.env.TRONFIRE_LAN_HOST
-  );
-  if (configuredAddress?.address) return configuredAddress.address;
+function normalizeHostIpv4Candidate(value) {
+  return parseIpv4Cidr(value)?.address || '';
+}
 
+function primaryHostIp() {
   const interfaces = os.networkInterfaces();
   const staticInterface = String(process.env.HOST_STATIC_IP_INTERFACE || '').trim();
   const syncInterface = String(process.env.HOST_SYNC_IP_INTERFACE || '').trim();
+  const syncAddress = normalizeHostIpv4Candidate(process.env.HOST_SYNC_IP_ADDRESS_CIDR);
+  const vipAddress = normalizeHostIpv4Candidate(process.env.HA_VIP || process.env.HA_VIP_CIDR);
+  const rejectedAddresses = new Set([syncAddress, vipAddress].filter(Boolean));
+  const acceptAddress = address => {
+    const normalized = normalizeHostIpv4Candidate(address);
+    return normalized && !rejectedAddresses.has(normalized) ? normalized : '';
+  };
+
+  for (const value of [
+    process.env.TRONSOFTOS_CENTRAL_HOST_IP,
+    process.env.HOST_STATIC_IP_ADDRESS_CIDR
+  ]) {
+    const configuredAddress = acceptAddress(value);
+    if (configuredAddress) return configuredAddress;
+  }
+
   if (staticInterface) {
-    const staticAddress = interfacePrimaryIpv4(interfaces, staticInterface);
+    const staticAddress = acceptAddress(interfacePrimaryIpv4(interfaces, staticInterface));
     if (staticAddress) return staticAddress;
   }
+
+  const tronfireLanHost = acceptAddress(process.env.TRONFIRE_LAN_HOST);
+  if (tronfireLanHost) return tronfireLanHost;
 
   try {
     const stdout = execFileSync('ip', ['route', 'show', 'default'], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] });
     const defaultInterface = stdout.match(/\bdev\s+(\S+)/)?.[1] || '';
     if (defaultInterface && defaultInterface !== syncInterface) {
-      const defaultAddress = interfacePrimaryIpv4(interfaces, defaultInterface);
+      const defaultAddress = acceptAddress(interfacePrimaryIpv4(interfaces, defaultInterface));
       if (defaultAddress) return defaultAddress;
     }
   } catch {
@@ -5278,7 +5299,10 @@ function primaryHostIp() {
   for (const [name, items] of Object.entries(interfaces)) {
     if (syncInterface && name === syncInterface) continue;
     for (const item of items || []) {
-      if (item.family === 'IPv4' && !item.internal) return item.address;
+      if (item.family === 'IPv4' && !item.internal) {
+        const address = acceptAddress(item.address);
+        if (address) return address;
+      }
     }
   }
   return '';
