@@ -2992,7 +2992,9 @@ async function remoteTronsoftosDashboard(host) {
     if (!token) return { ok: false, url: base, error: 'token interno nao configurado' };
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REMOTE_DASHBOARD_TIMEOUT_MS);
-    const response = await fetch(new URL('/api/dashboard', base), {
+    const dashboardUrl = new URL('/api/dashboard', base);
+    dashboardUrl.searchParams.set('peer', '0');
+    const response = await fetch(dashboardUrl, {
       signal: controller.signal,
       headers: { 'x-tronsoftos-token': token }
     }).finally(() => clearTimeout(timeout));
@@ -3787,13 +3789,14 @@ function exportPairingFile(reply) {
   reply.end(content);
 }
 
-async function dashboard() {
+async function dashboard(options = {}) {
+  const includePeer = options.includePeer !== false;
   const [apps, localTronfireHa, systemMetrics] = await Promise.all([appsStatus(), tronfireHaStatus(), tronfireSystemMetrics()]);
   const cluster = clusterStatus();
   const haMode = cluster.mode === 'ha';
   cluster.vipStatus = await vipStatus(cluster);
   const identity = cluster.identity || nodeIdentity();
-  if (haMode && cluster.sync?.standbyHost) {
+  if (includePeer && haMode && cluster.sync?.standbyHost) {
     cluster.standbyHealth = await remoteTronsoftosHealth(cluster.sync.standbyHost);
     const peerDashboard = await remoteTronsoftosDashboard(cluster.sync.standbyHost);
     cluster.peerDashboard = peerDashboard;
@@ -6135,7 +6138,7 @@ async function handleApi(req, reply, url) {
   if (!sessionFromRequest(req) && !requestHasInternalToken(req)) {
     return json(reply, 401, { error: 'UNAUTHORIZED' });
   }
-  if (req.method === 'GET' && url.pathname === '/api/dashboard') return json(reply, 200, await dashboard());
+  if (req.method === 'GET' && url.pathname === '/api/dashboard') return json(reply, 200, await dashboard({ includePeer: url.searchParams.get('peer') !== '0' }));
   if (req.method === 'GET' && url.pathname === '/api/diagnostics') return json(reply, 200, await diagnostics());
   if (req.method === 'GET' && url.pathname === '/api/apps') return json(reply, 200, { apps: await appsStatus() });
   if (req.method === 'GET' && url.pathname === '/api/troncomanda/settings') return json(reply, 200, await troncomandaSettings());
