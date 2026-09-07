@@ -141,6 +141,21 @@ nbackup_cmd() {
   fi
 }
 
+physical_unlock_db() {
+  local db_file="$1"
+  nbackup_cmd -user SYSDBA -password "$FIREBIRD_PASSWORD" -N "$db_file"
+}
+
+physical_lock_db() {
+  local db_file="$1"
+  if nbackup_cmd -user SYSDBA -password "$FIREBIRD_PASSWORD" -L "$db_file"; then
+    return 0
+  fi
+  echo "[ha-sync] aviso: banco ja pode estar em modo backup fisico; tentando finalizar estado pendente"
+  physical_unlock_db "$db_file" || true
+  nbackup_cmd -user SYSDBA -password "$FIREBIRD_PASSWORD" -L "$db_file"
+}
+
 run_physical_sync() {
   local found=0
   local db_file
@@ -156,13 +171,13 @@ run_physical_sync() {
     remote_tmp_path="${REMOTE_RESTORE_DIR%/}/${temp_name}"
     api_tmp_path="/firebird/restore-work/${temp_name}"
     echo "[ha-sync] sync fisico ${alias}: bloqueando banco para copia"
-    nbackup_cmd -user SYSDBA -password "$FIREBIRD_PASSWORD" -L "$db_file"
+    physical_lock_db "$db_file"
     if ! rsync -aHAX --no-owner --no-group --inplace -e "$RSYNC_SSH" "$db_file" "${SSH_USER}@${STANDBY_HOST}:${remote_tmp_path}"; then
-      nbackup_cmd -user SYSDBA -password "$FIREBIRD_PASSWORD" -N "$db_file" || true
+      physical_unlock_db "$db_file" || true
       echo "[ha-sync] falha no rsync fisico ${alias}" >&2
       exit 31
     fi
-    nbackup_cmd -user SYSDBA -password "$FIREBIRD_PASSWORD" -N "$db_file"
+    physical_unlock_db "$db_file"
     echo "[ha-sync] sync fisico ${alias}: finalizando no standby"
     body="{\"databaseAlias\":\"$(json_escape "$alias")\",\"physicalPath\":\"$(json_escape "$api_tmp_path")\",\"logToken\":\"ha_physical_${STAMP}\"}"
     ssh ${SSH_BASE_OPTS} "${SSH_USER}@${STANDBY_HOST}" \
