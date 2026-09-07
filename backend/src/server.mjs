@@ -46,6 +46,7 @@ const haSyncLogDir = process.env.TRONSOFTOS_HA_SYNC_LOG_DIR || path.join(appRoot
 const installerSecretsUrl = process.env.TRONSOFTOS_INSTALLER_SECRETS_URL || 'https://tronsoft.bitrix24.com.br/file/MhJuIFtuaVf1PtvmtsfS';
 const FIXED_HA_SYNC_INTERVAL_MINUTES = 3;
 const HA_SYNC_CRITICAL_LAG_MINUTES = 20;
+const REMOTE_DASHBOARD_TIMEOUT_MS = 20_000;
 const DEFAULT_HA_SYNC_MODE = 'physical';
 const UPDATE_MAINTENANCE_TIMEOUT_MINUTES = 30;
 const UPDATE_ALLOWED_BRANCHES = new Set(['main', 'dev']);
@@ -2990,12 +2991,11 @@ async function remoteTronsoftosDashboard(host) {
     const token = internalTokenValue();
     if (!token) return { ok: false, url: base, error: 'token interno nao configurado' };
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 6500);
+    const timeout = setTimeout(() => controller.abort(), REMOTE_DASHBOARD_TIMEOUT_MS);
     const response = await fetch(new URL('/api/dashboard', base), {
       signal: controller.signal,
       headers: { 'x-tronsoftos-token': token }
-    });
-    clearTimeout(timeout);
+    }).finally(() => clearTimeout(timeout));
     if (!response.ok) return { ok: false, url: base, status: response.status };
     return summarizeRemoteDashboard(await response.json(), base);
   } catch (err) {
