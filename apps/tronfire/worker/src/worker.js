@@ -41,6 +41,8 @@ const FIREBIRD_SWEEP_ENABLED = !['0', 'false', 'off', 'disabled', 'never'].inclu
 const FIREBIRD_SWEEP_CRON = String(process.env.TRONFIRE_FIREBIRD_SWEEP_CRON || '0 6 * * 2,6').trim();
 const FIREBIRD_SWEEP_TIMEZONE = String(process.env.TRONFIRE_FIREBIRD_SWEEP_TIMEZONE || process.env.TZ || 'America/Sao_Paulo').trim();
 const FIREBIRD_SWEEP_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_SWEEP_TIMEOUT_MINUTES, 180, 30, 720);
+const FIREBIRD_SWEEP_RETRY_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_SWEEP_RETRY_MINUTES, 10, 1, 120);
+const FIREBIRD_SWEEP_MAX_RETRIES = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_SWEEP_MAX_RETRIES, 6, 1, 24);
 const FIREBIRD_QUERY_TIMEOUT_SECONDS = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_QUERY_TIMEOUT_SECONDS, 20, 5, 600);
 const FIREBIRD_HEALTH_COOLDOWN_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_HEALTH_COOLDOWN_MINUTES, 10, 1, 120);
 const ORPHANED_BACKUP_MIN_AGE_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_ORPHANED_MIN_AGE_MINUTES, 5, 1, 60);
@@ -55,6 +57,7 @@ const RUNNING_BACKUP_TTL_MS = RUNNING_BACKUP_TTL_MINUTES * 60 * 1000;
 const BACKUP_TIMEOUT_MS = BACKUP_TIMEOUT_MINUTES * 60 * 1000;
 const BACKUP_VALIDATION_TIMEOUT_MS = BACKUP_VALIDATION_TIMEOUT_MINUTES * 60 * 1000;
 const FIREBIRD_SWEEP_TIMEOUT_MS = FIREBIRD_SWEEP_TIMEOUT_MINUTES * 60 * 1000;
+const FIREBIRD_SWEEP_RETRY_MS = FIREBIRD_SWEEP_RETRY_MINUTES * 60 * 1000;
 const ORPHANED_BACKUP_MIN_AGE_MS = ORPHANED_BACKUP_MIN_AGE_MINUTES * 60 * 1000;
 const FIREBIRD_PROCESS_NAMES = new Set(['fbguard', 'fbserver', 'fb_inet_server', 'fb_smp_server', 'firebird']);
 const METRIC_CONTAINERS = [
@@ -66,6 +69,9 @@ const METRIC_CONTAINERS = [
 ].filter(name => FIREBIRD_EXEC_MODE === 'container' || name !== FIREBIRD_CONTAINER);
 const FIREBIRD_ROUTINE_LOCK_KEY = '__firebird_global__';
 let backupRunning = false;
+let scheduledSweepRunning = false;
+let scheduledSweepRetryTimer = null;
+let scheduledSweepRetryCount = 0;
 let sessionCollectionRunning = false;
 const firebirdSessionFailureCounts = new Map();
 const databaseRoutineLocks = new Map();
@@ -1712,28 +1718,88 @@ async function runFirebirdSweep(db) {
   }
 }
 
-async function runScheduledSweeps() {
-  if (!FIREBIRD_SWEEP_ENABLED) return;
-  if (!isPrimaryNode()) return;
-  if (backupRunning) return;
-  if (haSyncActive()) {
-    console.log('[worker] sweep semanal adiado: HA sync em execucao');
+function scheduleSweepRetry(reason) {
+  if (!FIREBIRD_SWEEP_ENABLED || !isPrimaryNode()) return;
+  if (scheduledSweepRetryTimer || scheduledSweepRetryCount >= FIREBIRD_SWEEP_MAX_RETRIES) {
+    if (scheduledSweepRetryCount >= FIREBIRD_SWEEP_MAX_RETRIES) {
+      console.warn(`[worker] sweep semanal sem nova tentativa: limite atingido apos ${reason}`);
+    }
     return;
   }
-  const dbs = await prisma.managedDatabase.findMany({
-    where: { type: { not: 'ARQUIVADO' } },
-    orderBy: [{ isPrimary: 'desc' }, { updatedAt: 'asc' }]
-  });
-  for (const db of dbs) {
-    if (haSyncActive()) {
-      console.log('[worker] sweep semanal interrompido antes de iniciar novo banco: HA sync em execucao');
-      break;
+  scheduledSweepRetryCount += 1;
+  console.log(`[worker] sweep semanal sera retentado em ${FIREBIRD_SWEEP_RETRY_MINUTES} min (${reason}, tentativa ${scheduledSweepRetryCount}/${FIREBIRD_SWEEP_MAX_RETRIES})`);
+  scheduledSweepRetryTimer = setTimeout(() => {
+    scheduledSweepRetryTimer = null;
+    runScheduledSweeps('retry').catch((err) => console.error('[worker] sweep semanal retry erro', err.message));
+  }, FIREBIRD_SWEEP_RETRY_MS);
+}
+
+async function runScheduledSweeps(source = 'cron') {
+  if (!FIREBIRD_SWEEP_ENABLED) return false;
+  if (!isPrimaryNode()) return false;
+  if (scheduledSweepRunning) {
+    console.log(`[worker] sweep semanal ignorado: rotina ja em execucao (${source})`);
+    return false;
+  }
+  if (backupRunning) {
+    console.log('[worker] sweep semanal adiado: backup em execucao');
+    scheduleSweepRetry('backup em execucao');
+    return false;
+  }
+  if (haSyncActive()) {
+    console.log('[worker] sweep semanal adiado: HA sync em execucao');
+    scheduleSweepRetry('HA sync em execucao');
+    return false;
+  }
+  scheduledSweepRunning = true;
+  let postponed = false;
+  try {
+    const dbs = await prisma.managedDatabase.findMany({
+      where: { type: { not: 'ARQUIVADO' } },
+      orderBy: [{ isPrimary: 'desc' }, { updatedAt: 'asc' }]
+    });
+    for (const db of dbs) {
+      if (haSyncActive()) {
+        console.log('[worker] sweep semanal interrompido antes de iniciar novo banco: HA sync em execucao');
+        postponed = true;
+        break;
+      }
+      await markOrphanedRunningBackupsFailed(db.id, 'before-weekly-sweep');
+      await markStaleRunningBackupsFailed(db.id, 'before-weekly-sweep');
+      const runningBackup = await prisma.backupJob.count({ where: { databaseId: db.id, status: 'RUNNING' } });
+      if (runningBackup > 0) {
+        console.log(`[worker] sweep adiado: backup RUNNING pendente para ${db.alias}`);
+        postponed = true;
+        continue;
+      }
+      await runFirebirdSweep(db);
     }
-    await markOrphanedRunningBackupsFailed(db.id, 'before-weekly-sweep');
-    await markStaleRunningBackupsFailed(db.id, 'before-weekly-sweep');
-    const runningBackup = await prisma.backupJob.count({ where: { databaseId: db.id, status: 'RUNNING' } });
-    if (runningBackup > 0) continue;
-    await runFirebirdSweep(db);
+  } finally {
+    scheduledSweepRunning = false;
+  }
+  if (postponed) {
+    scheduleSweepRetry('backup/HA pendente');
+    return false;
+  }
+  if (source === 'cron') {
+    scheduledSweepRetryCount = 0;
+  }
+  return true;
+}
+
+function resetScheduledSweepRetries() {
+  scheduledSweepRetryCount = 0;
+  if (scheduledSweepRetryTimer) {
+    clearTimeout(scheduledSweepRetryTimer);
+    scheduledSweepRetryTimer = null;
+  }
+}
+
+async function runScheduledSweepsFromCron() {
+  resetScheduledSweepRetries();
+  const completed = await runScheduledSweeps('cron');
+  if (completed) {
+    scheduledSweepRetryCount = 0;
   }
 }
 
@@ -1816,7 +1882,7 @@ if (FIREBIRD_SWEEP_ENABLED) {
   if (cron.validate(FIREBIRD_SWEEP_CRON)) {
     cron.schedule(FIREBIRD_SWEEP_CRON, async () => {
       console.log(`[worker] rotina de sweep Firebird semanal (${FIREBIRD_SWEEP_CRON}, ${FIREBIRD_SWEEP_TIMEZONE})`);
-      await runScheduledSweeps();
+      await runScheduledSweepsFromCron();
     }, { timezone: FIREBIRD_SWEEP_TIMEZONE });
   } else {
     console.error(`[worker] cron de sweep Firebird invalido: ${FIREBIRD_SWEEP_CRON}`);
