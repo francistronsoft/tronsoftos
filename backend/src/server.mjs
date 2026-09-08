@@ -749,6 +749,20 @@ function haSyncStatus() {
   };
 }
 
+function disabledHaSyncStatus() {
+  return {
+    ...publicHaSyncSettings({ enabled: false, autoEnabled: false, standbyHost: '' }),
+    status: 'disabled',
+    lastEvent: null,
+    runningJobId: null,
+    nextRunAt: null,
+    standbyLagMinutes: null,
+    standbyReady: false,
+    promotionReady: false,
+    receiver: null
+  };
+}
+
 function latestFileInfo(dirPath, pattern) {
   try {
     const files = fs.readdirSync(dirPath, { withFileTypes: true })
@@ -2983,6 +2997,23 @@ function summarizeRemoteDashboard(payload = {}, url = '') {
   };
 }
 
+function disabledHaFailoverStatus(identity = nodeIdentity()) {
+  return {
+    ...publicHaFailoverSettings({ enabled: false, primaryHealthUrl: '' }),
+    mode: identity.deploymentMode || 'simple',
+    nodeRole: identity.nodeRole || 'primary',
+    watchdogActive: false,
+    primaryDownSince: null,
+    elapsedSeconds: 0,
+    remainingSeconds: null,
+    inProgress: false,
+    canPromote: false,
+    maintenanceBlock: { active: false },
+    guardStatus: 'disabled',
+    guardReason: 'HA desativado neste servidor'
+  };
+}
+
 async function remoteTronsoftosDashboard(host) {
   const targetHost = String(host || '').trim();
   if (!targetHost) return null;
@@ -3091,27 +3122,31 @@ function clusterStatus() {
   const lock = clusterLock();
   const identity = nodeIdentity();
   const guard = clusterGuard();
+  const mode = identity.deploymentMode || process.env.TRONSOFTOS_DEPLOYMENT_MODE || 'simple';
+  const haMode = mode === 'ha';
   return {
-    mode: identity.deploymentMode || process.env.TRONSOFTOS_DEPLOYMENT_MODE || 'simple',
+    mode,
     nodeName: identity.nodeName || process.env.TRONSOFTOS_NODE_NAME || 'local',
     nodeRole: identity.nodeRole || process.env.TRONFIRE_NODE_ROLE || process.env.TRONSOFTOS_NODE_ROLE || 'primary',
     build: buildInfo(),
     identity,
-    vip: process.env.HA_VIP || null,
-    vipCidr: process.env.HA_VIP_CIDR || null,
+    vip: haMode ? process.env.HA_VIP || null : null,
+    vipCidr: haMode ? process.env.HA_VIP_CIDR || null : null,
     lockPath: clusterLockPath,
     lock,
     guard,
     maintenance: maintenanceState(),
-    keepalived: {
-      enabled: process.env.TRONSOFTOS_KEEPALIVED_ENABLED === 'true',
-      interface: process.env.HA_INTERFACE || null,
-      routerId: process.env.HA_ROUTER_ID || null,
-      nodeState: process.env.HA_NODE_ROLE || null,
-      priority: process.env.HA_PRIORITY || null
-    },
-    sync: haSyncStatus(),
-    failover: haFailoverStatus()
+    keepalived: haMode
+      ? {
+          enabled: process.env.TRONSOFTOS_KEEPALIVED_ENABLED === 'true',
+          interface: process.env.HA_INTERFACE || null,
+          routerId: process.env.HA_ROUTER_ID || null,
+          nodeState: process.env.HA_NODE_ROLE || null,
+          priority: process.env.HA_PRIORITY || null
+        }
+      : { enabled: false, interface: null, routerId: null, nodeState: null, priority: null },
+    sync: haMode ? haSyncStatus() : disabledHaSyncStatus(),
+    failover: haMode ? haFailoverStatus() : disabledHaFailoverStatus(identity)
   };
 }
 
@@ -5859,14 +5894,25 @@ async function centralServicesPayload(payload = {}) {
 
 function centralClusterPayload(payload = {}) {
   const cluster = payload.cluster && typeof payload.cluster === 'object' ? payload.cluster : {};
+  const mode = cluster.mode || cluster.identity?.deploymentMode || '';
+  const haMode = mode === 'ha';
   return {
     ...cluster,
-    mode: cluster.mode || '',
+    mode,
     nodeName: cluster.nodeName || cluster.identity?.nodeName || '',
     nodeRole: cluster.nodeRole || cluster.identity?.nodeRole || '',
     activeNode: cluster.lock?.active_node || cluster.guard?.activeNode || cluster.vipStatus?.holder?.nodeName || '',
     recoveryActive: cluster.nodeRole === 'recovery' || cluster.identity?.nodeRole === 'recovery',
-    vip: cluster.vip || null
+    vip: haMode ? cluster.vip || null : null,
+    vipCidr: haMode ? cluster.vipCidr || null : null,
+    vipStatus: haMode ? cluster.vipStatus || null : null,
+    keepalived: haMode ? cluster.keepalived || null : { enabled: false },
+    sync: haMode ? cluster.sync || null : { enabled: false, status: 'disabled', standbyHost: '' },
+    failover: haMode ? cluster.failover || null : { enabled: false, mode: mode || 'simple', nodeRole: cluster.nodeRole || cluster.identity?.nodeRole || '' },
+    standbyHealth: haMode ? cluster.standbyHealth || null : null,
+    standbyDashboard: haMode ? cluster.standbyDashboard || null : null,
+    primaryDashboard: haMode ? cluster.primaryDashboard || null : null,
+    peerDashboard: haMode ? cluster.peerDashboard || null : null
   };
 }
 
