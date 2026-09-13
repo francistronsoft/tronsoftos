@@ -1773,6 +1773,7 @@ app.get('/api/internal/database-version', async (req) => {
     if (managedDatabase) {
       try {
         indexHealth = await indexHealthForDatabase(managedDatabase);
+        await refreshTransactionGapAlert(managedDatabase, indexHealth);
       } catch (err) {
         indexHealth = {
           databaseId: managedDatabase.id,
