@@ -267,8 +267,11 @@ function databaseOperationActive(db, now = new Date()) {
 }
 
 function databaseInPostRestoreGrace(db, now = new Date()) {
-  if (!db?.lastCheckAt) return false;
-  return now.getTime() - new Date(db.lastCheckAt).getTime() < FIREBIRD_RESTORE_GRACE_MINUTES * 60 * 1000;
+  const operationKind = String(db?.operationKind || '').toUpperCase();
+  if (!operationKind.includes('RESTORE')) return false;
+  const startedAt = db?.operationStartedAt ? new Date(db.operationStartedAt).getTime() : 0;
+  if (!Number.isFinite(startedAt) || !startedAt) return false;
+  return now.getTime() - startedAt < FIREBIRD_RESTORE_GRACE_MINUTES * 60 * 1000;
 }
 
 async function clearExpiredDatabaseOperation(db) {
