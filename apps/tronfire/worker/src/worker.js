@@ -1664,32 +1664,32 @@ async function runAutomaticBackups() {
 async function runFirebirdSweep(db) {
   if (!isPrimaryNode()) {
     console.log(`[worker] sweep ignorado no no ${TRONFIRE_NODE_ROLE}: ${db.alias}`);
-    return;
+    return { status: 'skipped', reason: `no ${TRONFIRE_NODE_ROLE}` };
   }
   if (haSyncActive()) {
     console.log(`[worker] sweep adiado: HA sync em execucao para ${db.alias}`);
-    return;
+    return { status: 'postponed', reason: 'HA sync em execucao' };
   }
   if (backupRunning) {
     console.log(`[worker] sweep adiado: backup em execucao para ${db.alias}`);
-    return;
+    return { status: 'postponed', reason: 'backup em execucao' };
   }
   const currentDb = await clearExpiredDatabaseOperation(db);
   if (databaseOperationActive(currentDb)) {
     console.log(`[worker] sweep ignorado: operacao ${currentDb.operationKind || 'desconhecida'} em andamento para ${db.alias}`);
-    return;
+    return { status: 'postponed', reason: `operacao ${currentDb.operationKind || 'desconhecida'} em andamento` };
   }
   if (databaseInPostRestoreGrace(currentDb)) {
     console.log(`[worker] sweep ignorado: ${db.alias} em periodo de estabilizacao apos restore`);
-    return;
+    return { status: 'postponed', reason: 'periodo de estabilizacao apos restore' };
   }
   if (databaseRoutineActive(db)) {
     console.log(`[worker] sweep ignorado: rotina Firebird ja em andamento para ${db.alias}`);
-    return;
+    return { status: 'postponed', reason: 'rotina Firebird ja em andamento' };
   }
   if (firebirdCircuitOpen(db)) {
     console.log(`[worker] sweep adiado: Firebird degradado para ${db.alias}`);
-    return;
+    return { status: 'postponed', reason: 'Firebird degradado' };
   }
 
   const stamp = backupStamp();
@@ -1709,12 +1709,14 @@ async function runFirebirdSweep(db) {
 
   try {
     const result = await withDatabaseRoutineLock(db, 'weekly-sweep', () => dockerExec(['sh', '-lc', cmd], FIREBIRD_SWEEP_TIMEOUT_MS + 60_000));
-    if (!result) return;
+    if (!result) return { status: 'postponed', reason: 'rotina Firebird ja em andamento' };
     await resolveActiveAlertsByType(`FIREBIRD_SWEEP_FAILED_${db.alias}`);
     console.log(`[worker] sweep OK: ${db.alias}`);
+    return { status: 'ok' };
   } catch (err) {
     await createAlertOnce(`FIREBIRD_SWEEP_FAILED_${db.alias}`, 'WARNING', `Sweep Firebird falhou para ${db.name}: ${err.message}`);
     console.error(`[worker] sweep erro: ${db.alias}`, err.message);
+    return { status: 'error', reason: err.message };
   }
 }
 
@@ -1772,7 +1774,10 @@ async function runScheduledSweeps(source = 'cron') {
         postponed = true;
         continue;
       }
-      await runFirebirdSweep(db);
+      const sweep = await runFirebirdSweep(db);
+      if (sweep?.status === 'postponed') {
+        postponed = true;
+      }
     }
   } finally {
     scheduledSweepRunning = false;
