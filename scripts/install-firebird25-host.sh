@@ -298,6 +298,12 @@ if [ ! -e /firebird ]; then
   ln -s "$STORAGE_ROOT/firebird" /firebird
 fi
 
+cat > /etc/sysctl.d/99-tronsoftos-firebird-core.conf <<'EOF'
+kernel.core_pattern=/firebird/logs/core.firebird.%e.%p.%t
+kernel.core_uses_pid=1
+EOF
+sysctl -q -p /etc/sysctl.d/99-tronsoftos-firebird-core.conf >/dev/null 2>&1 || true
+
 if [ -f "$TEMPLATE" ]; then
   cp "$TEMPLATE" "$STORAGE_ROOT/firebird/templates/template.fdb"
   chmod 0666 "$STORAGE_ROOT/firebird/templates/template.fdb"
@@ -320,6 +326,7 @@ ExecStop=/bin/kill -TERM $MAINPID
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
+LimitCORE=infinity
 
 [Install]
 WantedBy=multi-user.target
