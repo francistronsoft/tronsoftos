@@ -33,7 +33,7 @@ const BACKUP_VALIDATION_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.T
 const BACKUP_VALIDATION_MODE = String(process.env.TRONFIRE_BACKUP_VALIDATION_MODE || 'daily').toLowerCase();
 const BACKUP_VALIDATION_HOUR = normalizeHour(process.env.TRONFIRE_BACKUP_VALIDATION_HOUR, 4);
 const BACKUP_VALIDATION_WINDOW_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_WINDOW_MINUTES, 120, 30, 720);
-const BACKUP_VALIDATION_MAX_AGE_HOURS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_MAX_AGE_HOURS, 30, 6, 168);
+const BACKUP_VALIDATION_MAX_AGE_HOURS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_MAX_AGE_HOURS, 168, 6, 336);
 const BACKUP_VALIDATION_FAILURE_COOLDOWN_HOURS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_FAILURE_COOLDOWN_HOURS, 12, 1, 72);
 const BACKUP_RESTORE_VALIDATION_WINDOW = String(process.env.TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW || '03:00-06:00').trim();
 const BACKUP_RESTORE_VALIDATION_WEEKDAY = String(process.env.TRONFIRE_BACKUP_RESTORE_VALIDATION_WEEKDAY || 'monday').trim();
@@ -1346,7 +1346,7 @@ async function maybeAlertValidationOverdue(db, latest) {
   await createAlertOnce(
     alertType,
     'WARNING',
-    `Validacao diaria de backup pendente para ${db.name}: ${ageText}`
+    `Validacao semanal de backup pendente para ${db.name}: ${ageText}`
   );
 }
 
