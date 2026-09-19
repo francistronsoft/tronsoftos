@@ -13,6 +13,7 @@ import cors from '@fastify/cors';
 import { prisma } from './prisma.js';
 import { createSession, makeToken, requireAuth, requireAdmin, requireOperator, verifyPassword, hashPassword, sha256 } from './security.js';
 import { audit } from './audit.js';
+import { AsyncProbeCache } from './async-probe-cache.js';
 import { databaseCompanyIdentity, databaseDiagnostics, runPreflight } from './preflight.js';
 import { docker, dockerExec } from './shell.js';
 import {
@@ -40,12 +41,17 @@ const defaultBackupRetentionDays = normalizeBackupMinutes(process.env.TRONFIRE_B
 const backupTimeoutMinutes = normalizeBackupMinutes(process.env.TRONFIRE_BACKUP_TIMEOUT_MINUTES, 120, 30, 1440);
 const backupValidationTimeoutMinutes = normalizeBackupMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_TIMEOUT_MINUTES, 45, 15, 240);
 const firebirdQueryTimeoutSeconds = normalizeBackupMinutes(process.env.TRONFIRE_FIREBIRD_QUERY_TIMEOUT_SECONDS, 20, 5, 600);
+const firebirdHealthCacheMs = normalizeBackupMinutes(process.env.TRONFIRE_FIREBIRD_HEALTH_CACHE_SECONDS, 300, 30, 1800) * 1000;
+const firebirdHealthStaleMs = normalizeBackupMinutes(process.env.TRONFIRE_FIREBIRD_HEALTH_STALE_SECONDS, 900, 60, 3600) * 1000;
+const firebirdAttachmentsCacheMs = normalizeBackupMinutes(process.env.TRONFIRE_FIREBIRD_ATTACHMENTS_CACHE_SECONDS, 60, 15, 300) * 1000;
 const backupValidationTimeoutMs = backupValidationTimeoutMinutes * 60 * 1000;
 const configuredRunningBackupTtlMinutes = Number(process.env.TRONFIRE_BACKUP_RUNNING_TTL_MINUTES || 60);
 const runningBackupTtlMinutes = Number.isFinite(configuredRunningBackupTtlMinutes)
   ? Math.max(configuredRunningBackupTtlMinutes, 30)
   : 60;
 const runningBackupTtlMs = runningBackupTtlMinutes * 60 * 1000;
+const firebirdHealthCache = new AsyncProbeCache({ ttlMs: firebirdHealthCacheMs, staleMs: firebirdHealthStaleMs });
+const firebirdAttachmentsCache = new AsyncProbeCache({ ttlMs: firebirdAttachmentsCacheMs, staleMs: firebirdAttachmentsCacheMs * 2 });
 
 function normalizeBackupMinutes(value, fallback, min = 1, max = 10080) {
   const number = Number(value);
@@ -525,7 +531,22 @@ function parseFirebirdAttachments(stdout) {
     });
 }
 
-async function firebirdAttachmentsForDatabase(db) {
+function firebirdProbeCacheKey(db) {
+  return `${db.id}:${effectiveDatabasePath(db)}`;
+}
+
+function invalidateFirebirdProbeCaches(db) {
+  if (!db) {
+    firebirdHealthCache.invalidate();
+    firebirdAttachmentsCache.invalidate();
+    return;
+  }
+  const key = firebirdProbeCacheKey(db);
+  firebirdHealthCache.invalidate(key);
+  firebirdAttachmentsCache.invalidate(key);
+}
+
+async function collectFirebirdAttachmentsForDatabase(db) {
   const databasePath = effectiveDatabasePath(db);
   const connect = firebirdDbConnect(databasePath);
   const firebirdBin = firebirdToolBin();
@@ -570,6 +591,14 @@ async function firebirdAttachmentsForDatabase(db) {
     collectedAt: new Date().toISOString(),
     attachments
   };
+}
+
+async function firebirdAttachmentsForDatabase(db, options = {}) {
+  return firebirdAttachmentsCache.get(
+    firebirdProbeCacheKey(db),
+    () => collectFirebirdAttachmentsForDatabase(db),
+    options
+  );
 }
 
 const criticalIndexTables = [
@@ -708,7 +737,7 @@ async function databaseSizeTrend(db, currentSizeBytes) {
   };
 }
 
-async function indexHealthForDatabase(db) {
+async function collectIndexHealthForDatabase(db) {
   const databasePath = effectiveDatabasePath(db);
   const connect = firebirdDbConnect(databasePath);
   const firebirdBin = firebirdToolBin();
@@ -742,7 +771,7 @@ async function indexHealthForDatabase(db) {
     'COMMIT;',
     'QUIT;'
   ].join('\n');
-  const cmd = [
+  const isqlCommand = [
     `run_with_timeout() { ${firebirdTimeoutSecondsCommand()}; };`,
     `printf %s ${shQuote(`${sql}\n`)}`,
     '|',
@@ -753,13 +782,10 @@ async function indexHealthForDatabase(db) {
     `-password ${shQuote(password)}`,
     shQuote(connect)
   ].join(' ');
-  const out = await runFirebirdShellScript(cmd, (firebirdQueryTimeoutSeconds + 15) * 1000);
-  const gstat = await runFirebirdShellScript(
-    `${shQuote(`${firebirdBin}/gstat`)} -h ${shQuote(databasePath)}`,
-    120_000
-  );
+  const cmd = `${isqlCommand} && run_with_timeout ${shQuote(`${firebirdBin}/gstat`)} -h ${shQuote(databasePath)}`;
+  const out = await runFirebirdShellScript(cmd, (firebirdQueryTimeoutSeconds * 2 + 15) * 1000);
   const summary = parseIndexHealth(out.stdout);
-  const transactionHealth = parseGstatHeader(gstat.stdout);
+  const transactionHealth = parseGstatHeader(out.stdout);
   const classification = classifyIndexHealth(summary);
   const sizeTrend = await databaseSizeTrend(db, databaseFileSizeBytes(databasePath));
   const checkedAt = new Date().toISOString();
@@ -793,6 +819,14 @@ async function indexHealthForDatabase(db) {
     checkedAt,
     tables: summary.tables
   };
+}
+
+async function indexHealthForDatabase(db, options = {}) {
+  return firebirdHealthCache.get(
+    firebirdProbeCacheKey(db),
+    () => collectIndexHealthForDatabase(db),
+    options
+  );
 }
 
 function indexAuditFromHealth(health) {
@@ -832,10 +866,10 @@ function indexAuditFromHealth(health) {
   };
 }
 
-async function refreshInactiveIndexAlert(db) {
+async function refreshInactiveIndexAlert(db, options = {}) {
   const type = `DATABASE_MISSING_ACTIVE_INDEXES_${db.alias}`;
   const legacyType = `DATABASE_INACTIVE_INDEXES_${db.alias}`;
-  const health = await indexHealthForDatabase(db);
+  const health = await indexHealthForDatabase(db, options);
   await resolveActiveAlertsByType(legacyType);
   if (health.severity === 'CRITICAL') {
     const sample = health.missingActiveTables.slice(0, 6).join(', ');
@@ -2104,7 +2138,7 @@ app.post('/api/databases/:id/validate', { preHandler: requireOperator }, async (
   const targetPath = effectiveDatabasePath(db);
   try {
     await runFirebirdShellScript(`test -f ${shQuote(targetPath)} && ${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h ${shQuote(targetPath)} >/tmp/tronfire_gstat.txt 2>&1`, 120000);
-    const indexHealth = await refreshInactiveIndexAlert(db);
+    const indexHealth = await refreshInactiveIndexAlert(db, { force: true, allowStale: false });
     const updated = await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ONLINE', lastCheckAt: new Date() } });
     await audit(req, 'DATABASE_VALIDATED', { entityType: 'database', entityId: db.id });
     return { ok: true, database: updated, indexHealth };
@@ -2220,7 +2254,8 @@ app.post('/api/databases/:id/disable-indexes', { preHandler: requireOperator }, 
     const out = await runFirebirdShellScript(cmd, 1000 * 60 * 60 * 4);
     const logText = fs.existsSync(logPath) ? readTail(logPath, 64_000) : out.stdout || '';
     const disabledIndexes = Number(logText.match(/TRONIDX_DISABLED\|(\d+)/)?.[1] || 0);
-    const indexHealth = await refreshInactiveIndexAlert(db);
+    invalidateFirebirdProbeCaches(db);
+    const indexHealth = await refreshInactiveIndexAlert(db, { force: true, allowStale: false });
     const databaseSizeAfter = Number(logText.match(/TRONIDX_DB_SIZE_AFTER\|(\d+)/)?.[1] || 0) || (fs.existsSync(db.filePath) ? fs.statSync(db.filePath).size : null);
     const backupSize = Number(logText.match(/TRONIDX_BACKUP_SIZE\|(\d+)/)?.[1] || 0);
     const updated = await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ONLINE', lastCheckAt: new Date(), lastBackupAt: new Date() } });
@@ -2275,6 +2310,7 @@ app.post('/api/databases/:id/online', { preHandler: requireOperator }, async (re
       `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$db_file" >> "$log" 2>&1`
     ].join('; ');
     await runFirebirdShellScript(cmd, 120000);
+    invalidateFirebirdProbeCaches(db);
     const updated = await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ONLINE', lastCheckAt: new Date() } });
     await audit(req, 'DATABASE_GFIX_ONLINE', { entityType: 'database', entityId: db.id, details: { logPath } });
     return { ok: true, database: updated, logPath };
@@ -2375,6 +2411,7 @@ app.post('/api/databases/:id/auto-maintenance', { preHandler: requireOperator },
       `${gstat} -h "$db_file" >> "$log" 2>&1 || fail 72 "Falha ao validar banco final com gstat"`
     ].join('; ');
     await runFirebirdShellScript(cmd, 1000 * 60 * 60 * 4);
+    invalidateFirebirdProbeCaches(db);
     const { stdout: sizeOut } = await dockerExec(['stat', '-c', '%s', backupPath]);
     const databaseSizeAfter = fs.existsSync(db.filePath) ? fs.statSync(db.filePath).size : null;
     const { stdout: shaOut } = await dockerExec(['sha256sum', backupPath]);
@@ -2619,6 +2656,7 @@ app.post('/api/restores/from-upload', { preHandler: requireOperator }, async (re
     ];
     const cmd = restoreSteps.join('; ');
     await runFirebirdShellScript(cmd, 1000 * 60 * 60 * 4);
+    invalidateFirebirdProbeCaches(targetDb);
     const db = await prisma.managedDatabase.update({
       where: { id: targetDb.id },
       data: {
@@ -2743,6 +2781,7 @@ app.post('/api/ha/standby/restore', async (req, reply) => {
       `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$standby" >> "$log" 2>&1 || fail 70 "Falha ao validar standby final com gstat"`
     ].join('; ');
     await runFirebirdShellScript(cmd, 1000 * 60 * 60 * 4);
+    invalidateFirebirdProbeCaches(db);
     const sha = manifest?.backupSha256 || null;
     await lockHandle.releaseWith({
         standbyPath,
@@ -2821,6 +2860,7 @@ app.post('/api/ha/standby/physical-restore', async (req, reply) => {
       `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$standby" >> "$log" 2>&1 || fail 66 "Falha ao validar standby final com gstat"`
     ].join('; ');
     await runFirebirdShellScript(cmd, 1000 * 60 * 60);
+    invalidateFirebirdProbeCaches(db);
     await lockHandle.releaseWith({
       standbyPath,
       standbyStatus: 'READY',
@@ -2862,6 +2902,7 @@ app.post('/api/ha/standby/validate', async (req, reply) => {
       `${shQuote(`${process.env.FIREBIRD_BIN || '/usr/local/firebird/bin'}/gstat`)} -h "$db" > "$log" 2>&1`
     ].join('; ');
     await runFirebirdShellScript(cmd, 120000);
+    invalidateFirebirdProbeCaches(db);
     const data = { standbyStatus: 'READY', lastStandbyValidatedAt: new Date() };
     if (backupSha256) data.lastStandbyBackupSha256 = backupSha256;
     if (backupFinishedAt && !Number.isNaN(backupFinishedAt.getTime())) data.lastStandbyBackupAt = backupFinishedAt;
@@ -2927,12 +2968,14 @@ app.post('/api/ha/standby/promote', async (req, reply) => {
       'trap - EXIT'
     ].join('; ');
     await runFirebirdShellScript(cmd, 1000 * 60 * 20);
+    invalidateFirebirdProbeCaches(db);
     await prisma.managedDatabase.update({
       where: { id: db.id },
       data: { standbyStatus: 'PROMOTED', status: 'ONLINE', lastCheckAt: new Date(), accessMode: 'READ_WRITE' }
     });
     promoted.push({ alias: db.alias, productionPath: db.filePath, previousProductionBackup: backupCurrent, accessMode: 'READ_WRITE', logPath });
   }
+  invalidateFirebirdProbeCaches();
   await syncFirebirdAliases();
   await audit(req, 'HA_STANDBY_PROMOTED', { entityType: 'cluster', entityId: lock.cluster || 'cluster', details: { lock, promoted } });
   return { ok: true, promoted, lock };
