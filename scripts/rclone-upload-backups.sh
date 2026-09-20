@@ -69,6 +69,10 @@ case "${RCLONE_REMOTE_RETENTION_DAYS:-30}" in
 esac
 
 if [ "${RCLONE_REMOTE_RETENTION_DAYS:-0}" -gt 0 ]; then
+  "$RCLONE_BIN" mkdir "${RCLONE_REMOTE}:${RCLONE_BACKUP_PATH}" \
+    --bind "$RCLONE_BIND" \
+    --config "$RCLONE_CONFIG"
+
   "$RCLONE_BIN" delete "${RCLONE_REMOTE}:${RCLONE_BACKUP_PATH}" \
     --bind "$RCLONE_BIND" \
     --config "$RCLONE_CONFIG" \
