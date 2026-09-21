@@ -252,12 +252,11 @@ Variaveis principais:
 TRONFIRE_BACKUP_VALIDATION_MODE=daily
 TRONFIRE_BACKUP_VALIDATION_TIMEOUT_MINUTES=45
 TRONFIRE_BACKUP_VALIDATION_MAX_AGE_HOURS=168
-TRONFIRE_BACKUP_VALIDATION_FAILURE_COOLDOWN_HOURS=12
 TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW=03:00-06:00
 TRONFIRE_BACKUP_RESTORE_VALIDATION_WEEKDAY=monday
 ```
 
-Use `always` somente quando cada backup precisar ser restaurado e validado imediatamente. Se a validacao falhar com erro interno do Firebird, o TronFire abre alerta critico, evita novas validacoes na mesma janela semanal e pausa rotinas pesadas temporariamente. O envio para Google Drive/rclone e centralizado no TronSoftOS para manter uma unica configuracao por servidor.
+Use `always` somente quando cada backup precisar ser restaurado e validado imediatamente. Se a validacao falhar, o TronFire abre alerta critico, coloca esse backup em quarentena e evita novas validacoes na mesma janela semanal. A saude do banco de producao continua sendo definida pelas sondagens diretas, sem pausar os backups simples por uma falha isolada do restore temporario. O envio para Google Drive/rclone e centralizado no TronSoftOS para manter uma unica configuracao por servidor.
 
 ### URL publica com Cloudflare Tunnel
 

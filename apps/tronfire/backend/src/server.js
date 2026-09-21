@@ -14,6 +14,7 @@ import { prisma } from './prisma.js';
 import { createSession, makeToken, requireAuth, requireAdmin, requireOperator, verifyPassword, hashPassword, sha256 } from './security.js';
 import { audit } from './audit.js';
 import { AsyncProbeCache } from './async-probe-cache.js';
+import { connectionSummaryFromSnapshot } from './connection-snapshot.js';
 import { databaseCompanyIdentity, databaseDiagnostics, runPreflight } from './preflight.js';
 import { docker, dockerExec } from './shell.js';
 import {
@@ -1050,6 +1051,15 @@ async function recentFirebirdSessions(databaseId) {
   return sessions.map(serializeFirebirdSession).filter(Boolean);
 }
 
+async function recentFirebirdConnectionSummary(db) {
+  if (!db?.id) return null;
+  const snapshot = await prisma.firebirdConnectionSnapshot.findFirst({
+    where: { databaseId: db.id },
+    orderBy: { collectedAt: 'desc' }
+  });
+  return connectionSummaryFromSnapshot(db, snapshot);
+}
+
 async function firebirdConnectionHistory(db, query = {}) {
   const period = firebirdHistoryRange(query);
   const remoteAddress = String(query.remoteAddress || '').trim();
@@ -1753,7 +1763,8 @@ app.get('/api/dashboard', { preHandler: requireAuth }, async (req) => {
   let productionConnections = null;
   if (productionDatabase) {
     try {
-      productionConnections = await firebirdAttachmentsForDatabase(productionDatabase);
+      productionConnections = await recentFirebirdConnectionSummary(productionDatabase)
+        || await firebirdAttachmentsForDatabase(productionDatabase);
     } catch (err) {
       productionConnections = {
         databaseId: productionDatabase.id,

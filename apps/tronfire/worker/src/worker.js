@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import cron from 'node-cron';
+import { backupValidationFailurePolicy } from './validation-failure-policy.js';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
 import http from 'node:http';
@@ -34,7 +35,6 @@ const BACKUP_VALIDATION_MODE = String(process.env.TRONFIRE_BACKUP_VALIDATION_MOD
 const BACKUP_VALIDATION_HOUR = normalizeHour(process.env.TRONFIRE_BACKUP_VALIDATION_HOUR, 4);
 const BACKUP_VALIDATION_WINDOW_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_WINDOW_MINUTES, 120, 30, 720);
 const BACKUP_VALIDATION_MAX_AGE_HOURS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_MAX_AGE_HOURS, 168, 6, 336);
-const BACKUP_VALIDATION_FAILURE_COOLDOWN_HOURS = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_VALIDATION_FAILURE_COOLDOWN_HOURS, 12, 1, 72);
 const BACKUP_RESTORE_VALIDATION_WINDOW = String(process.env.TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW || '03:00-06:00').trim();
 const BACKUP_RESTORE_VALIDATION_WEEKDAY = String(process.env.TRONFIRE_BACKUP_RESTORE_VALIDATION_WEEKDAY || 'monday').trim();
 const FIREBIRD_SWEEP_ENABLED = !['0', 'false', 'off', 'disabled', 'never'].includes(String(process.env.TRONFIRE_FIREBIRD_SWEEP_ENABLED || 'true').toLowerCase());
@@ -68,11 +68,14 @@ const METRIC_CONTAINERS = [
   'tronfire_worker'
 ].filter(name => FIREBIRD_EXEC_MODE === 'container' || name !== FIREBIRD_CONTAINER);
 const FIREBIRD_ROUTINE_LOCK_KEY = '__firebird_global__';
+const FIREBIRD_TOOL_CHECK_TTL_MS = 60 * 60 * 1000;
 let backupRunning = false;
 let scheduledSweepRunning = false;
 let scheduledSweepRetryTimer = null;
 let scheduledSweepRetryCount = 0;
 let sessionCollectionRunning = false;
+let firebirdToolCheckPromise = null;
+let firebirdToolsCheckedAt = 0;
 const firebirdSessionFailureCounts = new Map();
 const databaseRoutineLocks = new Map();
 const firebirdCircuitBreakers = new Map();
@@ -115,6 +118,12 @@ function firebirdExecOptions(timeout = 60_000, maxBuffer = 1024 * 1024 * 5) {
 
 async function docker(args, timeout = 60_000) {
   const { stdout, stderr } = await execFileAsync('docker', args, { timeout, maxBuffer: 1024 * 1024 * 10 });
+  return { stdout, stderr };
+}
+
+async function localExec(args, timeout = 60_000) {
+  const [command, ...commandArgs] = args;
+  const { stdout, stderr } = await execFileAsync(command, commandArgs, { timeout, maxBuffer: 1024 * 1024 * 10 });
   return { stdout, stderr };
 }
 
@@ -731,31 +740,17 @@ async function markFirebirdFailure(db, err, context) {
   firebirdCircuitBreakers.set(key, data);
 }
 
-async function markValidationFailureCircuit(db, err, windowKey) {
+async function recordValidationFailure(db, err, windowKey) {
   if (!db?.id) return;
   const reason = firebirdConnectionFailureMessage(err);
-  const degradedUntil = Date.now() + BACKUP_VALIDATION_FAILURE_COOLDOWN_HOURS * 60 * 60 * 1000;
-  firebirdCircuitBreakers.set(circuitKey(db), {
-    failures: FIREBIRD_UNRESPONSIVE_FAILURE_THRESHOLD,
-    reason: `falha na validacao: ${reason}`,
-    degradedUntil
-  });
-  await prisma.managedDatabase.update({
-    where: { id: db.id },
-    data: { status: 'DEGRADED', lastCheckAt: new Date() }
-  }).catch(() => {});
+  const policy = backupValidationFailurePolicy({ reason, windowKey });
   await createAlertOnce(
     `BACKUP_VALIDATION_FAILED_${db.alias}`,
     'CRITICAL',
     `Validacao do backup falhou para ${db.name}: ${reason}. Backup colocado em quarentena; novas validacoes serao evitadas ate a proxima janela semanal.`
   );
-  await createAlertOnce(
-    `FIREBIRD_DEGRADED_${db.alias}`,
-    'CRITICAL',
-    `Firebird em protecao apos falha de validacao em ${db.name}: ${reason}. Coletas e rotinas pesadas serao pausadas temporariamente.`
-  );
-  if (windowKey) {
-    console.warn(`[worker] validacao bloqueada para ${db.alias} na janela ${windowKey}: ${reason}`);
+  if (policy.windowKey) {
+    console.warn(`[worker] validacao bloqueada para ${db.alias} na janela ${policy.windowKey}: ${policy.reason}`);
   }
 }
 
@@ -1064,7 +1059,7 @@ async function collectHostHardwareMetrics() {
 
     let disk = {};
     try {
-      const { stdout } = await dockerExec(['sh', '-lc', "df -PB1 /firebird/data | awk 'NR==2 {print $2\" \"$3\" \"$4\" \"$5}'"], 60_000);
+      const { stdout } = await localExec(['sh', '-lc', "df -PB1 /firebird/data | awk 'NR==2 {print $2\" \"$3\" \"$4\" \"$5}'"], 60_000);
       const [total, used, free, usedPercentText] = stdout.trim().split(/\s+/);
       disk = {
         diskTotalBytes: bigIntOrNull(total),
@@ -1110,7 +1105,7 @@ async function collectHostHardwareMetrics() {
 
 async function collectDiskMetrics() {
   try {
-    const { stdout } = await dockerExec(['sh', '-lc', "mkdir -p /firebird/data /firebird/backups; for p in /firebird/data /firebird/backups; do df -PB1 \"$p\" | awk -v p=\"$p\" 'NR==2 {print p\" \"$2\" \"$3\" \"$4\" \"$5}'; done"], 60_000);
+    const { stdout } = await localExec(['sh', '-lc', "mkdir -p /firebird/data /firebird/backups; for p in /firebird/data /firebird/backups; do df -PB1 \"$p\" | awk -v p=\"$p\" 'NR==2 {print p\" \"$2\" \"$3\" \"$4\" \"$5}'; done"], 60_000);
     const seen = new Set();
     for (const line of stdout.split(/\r?\n/).map(row => row.trim()).filter(Boolean)) {
       const [mount, total, used, free, usedPercentText] = line.split(/\s+/);
@@ -1158,7 +1153,7 @@ async function collectDatabaseFileMetrics() {
   const dbs = await prisma.managedDatabase.findMany({ where: { type: { not: 'ARQUIVADO' } } });
   for (const db of dbs) {
     try {
-      const { stdout } = await dockerExec(['stat', '-c', '%s', db.filePath], 60_000);
+      const { stdout } = await localExec(['stat', '-c', '%s', db.filePath], 60_000);
       await prisma.metricSnapshot.create({
         data: {
           scope: 'DATABASE',
@@ -1392,7 +1387,7 @@ async function backupValidationPlan(db, now = new Date()) {
     }
     const failed = await latestValidationFailureForWindow(db, window.windowKey);
     if (failed) {
-      await markValidationFailureCircuit(db, new Error(failed.errorMessage || 'validacao falhou nesta janela'), window.windowKey);
+      await recordValidationFailure(db, new Error(failed.errorMessage || 'validacao falhou nesta janela'), window.windowKey);
       return { shouldValidate: false, reason: 'validation_failed_in_window', windowKey: window.windowKey, latest, failedJobId: failed.id, weekday: weekday.weekday, window: window.window };
     }
     return { shouldValidate: true, reason: 'weekly_validation_window', windowKey: window.windowKey, latest, weekday: weekday.weekday, window: window.window };
@@ -1438,7 +1433,7 @@ async function validateBackupRestore(db, backupPath, logPath, stamp) {
   } catch (err) {
     const message = commandTimeoutMessage(err, 'validacao do backup Firebird', BACKUP_VALIDATION_TIMEOUT_MINUTES);
     try {
-      await dockerExec(['sh', '-lc', `printf '%s\\n' ${shQuote(message)} >> ${shQuote(logPath)}; rm -f ${shQuote(tempRestorePath)}`], 60_000);
+      await localExec(['sh', '-lc', `printf '%s\\n' ${shQuote(message)} >> ${shQuote(logPath)}; rm -f ${shQuote(tempRestorePath)}`], 60_000);
     } catch {
       // The original validation error is the one that matters.
     }
@@ -1525,8 +1520,8 @@ async function runBackup(db, reason = 'AUTO') {
     } catch (err) {
       throw new Error(commandTimeoutMessage(err, 'geracao do backup Firebird', BACKUP_TIMEOUT_MINUTES));
     }
-    const { stdout: sizeOut } = await dockerExec(['stat','-c','%s', backupPath]);
-    const { stdout: shaOut } = await dockerExec(['sha256sum', backupPath]);
+    const { stdout: sizeOut } = await localExec(['stat','-c','%s', backupPath]);
+    const { stdout: shaOut } = await localExec(['sha256sum', backupPath]);
     const sha = shaOut.trim().split(/\s+/)[0];
     const validationPlan = await backupValidationPlan(db);
     const validation = validationPlan.shouldValidate
@@ -1575,7 +1570,7 @@ async function runBackup(db, reason = 'AUTO') {
     console.log(`[worker] backup ${reason} OK: ${db.alias}${validation?.ok ? ' (validado)' : ' (validacao diaria adiada)'}`);
   } catch (err) {
     if (err.validationFailure) {
-      await markValidationFailureCircuit(db, err, validationWindowInfo(new Date()).windowKey);
+      await recordValidationFailure(db, err, validationWindowInfo(new Date()).windowKey);
     } else {
       await markFirebirdFailure(db, err, `backup-${reason}`);
     }
@@ -1619,7 +1614,7 @@ async function cleanupRetention(db) {
   });
   for (const job of oldJobs) {
     for (const filePath of [job.backupPath, job.manifestPath].filter(Boolean)) {
-      try { await dockerExec(['rm', '-f', filePath], 60_000); }
+      try { await localExec(['rm', '-f', filePath], 60_000); }
       catch (err) { console.error('[worker] retention file error', filePath, err.message); }
     }
     await prisma.backupJob.delete({ where: { id: job.id } });
@@ -1813,7 +1808,7 @@ async function runScheduledSweepsFromCron() {
 
 async function checkDisk() {
   try {
-    const { stdout } = await dockerExec(['sh','-lc',"df -P /firebird/data | awk 'NR==2 {print $5}' | tr -d '%'"]);
+    const { stdout } = await localExec(['sh','-lc',"df -P /firebird/data | awk 'NR==2 {print $5}' | tr -d '%'"]);
     const used = Number(stdout.trim());
     if (used >= 95) await createAlertOnce('DISK_CRITICAL', 'CRITICAL', `Disco critico: ${used}% usado`);
     else if (used >= 85) await createAlertOnce('DISK_WARNING', 'WARNING', `Disco em atencao: ${used}% usado`);
@@ -1858,15 +1853,26 @@ async function checkDatabases() {
 }
 
 async function checkTools() {
-  let missing = 0;
-  for (const bin of ['gbak','gfix','gstat','isql']) {
-    try { await dockerExec(['test','-x',`${FIREBIRD_BIN}/${bin}`]); }
-    catch {
-      missing += 1;
-      await createAlertOnce('FIREBIRD_TOOL_MISSING', 'CRITICAL', `Utilitário ausente: ${bin}`);
+  if (Date.now() - firebirdToolsCheckedAt < FIREBIRD_TOOL_CHECK_TTL_MS) return;
+  if (firebirdToolCheckPromise) return firebirdToolCheckPromise;
+  firebirdToolCheckPromise = (async () => {
+    const cmd = `for bin in gbak gfix gstat isql; do test -x "${FIREBIRD_BIN}/$bin" || printf '%s\\n' "$bin"; done`;
+    try {
+      const { stdout } = await dockerExec(['sh', '-lc', cmd]);
+      const missing = String(stdout || '').split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+      if (missing.length) {
+        await createAlertOnce('FIREBIRD_TOOL_MISSING', 'CRITICAL', `Utilitarios Firebird ausentes: ${missing.join(', ')}`);
+        return;
+      }
+      firebirdToolsCheckedAt = Date.now();
+      await resolveActiveAlertsByType('FIREBIRD_TOOL_MISSING');
+    } catch {
+      await createAlertOnce('FIREBIRD_TOOL_MISSING', 'CRITICAL', 'Um ou mais utilitarios Firebird estao ausentes');
     }
-  }
-  if (missing === 0) await resolveActiveAlertsByType('FIREBIRD_TOOL_MISSING');
+  })().finally(() => {
+    firebirdToolCheckPromise = null;
+  });
+  return firebirdToolCheckPromise;
 }
 
 cron.schedule('*/5 * * * *', async () => {
