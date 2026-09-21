@@ -1888,7 +1888,8 @@ cron.schedule('* * * * *', async () => {
   await runAutomaticBackups();
 });
 
-cron.schedule('* * * * *', async () => {
+// Keep session sampling away from the minute boundary, where backups are queued.
+cron.schedule('30 * * * * *', async () => {
   await collectFirebirdSessionHistory();
 });
 
