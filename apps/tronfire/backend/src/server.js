@@ -53,6 +53,7 @@ const runningBackupTtlMinutes = Number.isFinite(configuredRunningBackupTtlMinute
 const runningBackupTtlMs = runningBackupTtlMinutes * 60 * 1000;
 const firebirdHealthCache = new AsyncProbeCache({ ttlMs: firebirdHealthCacheMs, staleMs: firebirdHealthStaleMs });
 const firebirdAttachmentsCache = new AsyncProbeCache({ ttlMs: firebirdAttachmentsCacheMs, staleMs: firebirdAttachmentsCacheMs * 2 });
+const databaseDiagnosticsCache = new AsyncProbeCache({ ttlMs: firebirdHealthCacheMs, staleMs: firebirdHealthStaleMs });
 
 function normalizeBackupMinutes(value, fallback, min = 1, max = 10080) {
   const number = Number(value);
@@ -1805,7 +1806,7 @@ app.get('/api/internal/company-identity', async (req) => {
 
 app.get('/api/internal/database-version', async (req) => {
   assertInternalTronsoftos(req);
-  const databases = await databaseDiagnostics();
+  const databases = await databaseDiagnosticsCache.get('managed-databases', databaseDiagnostics);
   const activeDatabases = await prisma.managedDatabase.findMany({
     where: { type: { not: 'ARQUIVADO' } },
     orderBy: [{ isPrimary: 'desc' }, { name: 'asc' }]
