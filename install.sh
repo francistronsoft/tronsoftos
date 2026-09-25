@@ -444,6 +444,8 @@ cp "$APP_DIR/infra/systemd/tronsoftos-rclone-backup.service" /etc/systemd/system
 cp "$APP_DIR/infra/systemd/tronsoftos-rclone-backup.timer" /etc/systemd/system/tronsoftos-rclone-backup.timer
 sed -i "s|/opt/tronsoftos|$APP_DIR|g" /etc/systemd/system/tronsoftos.service
 sed -i "s|/opt/tronsoftos|$APP_DIR|g" /etc/systemd/system/tronsoftos-rclone-backup.service
+NODE_EXECUTABLE="$(command -v node)"
+sed -i "s|^ExecStart=/usr/bin/node |ExecStart=$NODE_EXECUTABLE |" /etc/systemd/system/tronsoftos.service
 
 chown -R "$USER_NAME:$GROUP_NAME" "$APP_DIR"
 mkdir -p "$APP_DIR/config/rclone"
