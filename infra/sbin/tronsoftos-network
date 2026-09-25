@@ -92,6 +92,29 @@ set_env_value() {
   fi
 }
 
+disable_iface_dhcp_sources() {
+  local iface="$1"
+  local file tmp backup
+
+  for file in /etc/network/interfaces /etc/network/interfaces.d/*; do
+    [ -f "$file" ] || continue
+    tmp="$(mktemp)"
+    awk -v iface="$iface" '
+      $1 == "iface" && $2 == iface && $3 == "inet" && $4 == "dhcp" {
+        print "iface " iface " inet manual"
+        next
+      }
+      { print }
+    ' "$file" > "$tmp"
+    if ! cmp -s "$file" "$tmp"; then
+      backup="$file.tronsoftos-bak-$(date +%Y%m%d%H%M%S)"
+      cp -a "$file" "$backup"
+      install -m 0644 "$tmp" "$file"
+    fi
+    rm -f "$tmp"
+  done
+}
+
 apply_pairing() {
   local app_dir="$1"
   local source_file="$2"
@@ -393,6 +416,7 @@ apply_static() {
 
   if systemctl list-unit-files systemd-networkd.service >/dev/null 2>&1; then
     local network_file="/etc/systemd/network/10-tronsoftos-$iface.network"
+    disable_iface_dhcp_sources "$iface"
     {
       echo "[Match]"
       echo "Name=$iface"

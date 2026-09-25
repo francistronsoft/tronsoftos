@@ -374,6 +374,11 @@ configure_static_ip() {
       echo "[Match]"
       echo "Name=$iface"
       echo
+      if [ -z "$gateway" ]; then
+        echo "[Link]"
+        echo "RequiredForOnline=no"
+        echo
+      fi
       echo "[Network]"
       echo "DHCP=no"
       echo "Address=$address_cidr"
