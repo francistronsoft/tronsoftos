@@ -20,10 +20,9 @@ O mesmo ajuste e executado quando o Tunnel e configurado depois do
 TronComanda. A operacao e idempotente e nao reinicia Firebird, PostgreSQL,
 Redis ou os containers de aplicacao.
 
-Configure no painel a URL publica completa do QR, por exemplo
-`https://cliente.tronsoft.app.br/qr/`. A alteracao e persistida em
-`TRONCOMANDA_PUBLIC_URL` e recria somente `troncomanda_api`, que gera os links
-publicos. O botao `Acessar` passa a usar a mesma URL.
+Os Public Hostnames e caminhos externos continuam sendo configurados no painel
+da Cloudflare. No TronSoftOS basta informar o token do Tunnel; nao e necessario
+repetir a URL publica da aplicacao.
 
 Dados persistentes:
 

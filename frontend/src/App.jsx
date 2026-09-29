@@ -2968,7 +2968,6 @@ function TroncomandaSettings() {
   const settings = settingsQuery.data || {};
   const [form, setForm] = useState(null);
   const values = form || {
-    publicUrl: settings.publicUrl || '',
     tableRequired: settings.tableRequired || false,
     cardapioLiteEnabled: settings.cardapioLiteEnabled || false,
     retaguardaWebEnabled: settings.retaguardaWebEnabled || false,
@@ -2985,7 +2984,6 @@ function TroncomandaSettings() {
     }),
     onSuccess: data => {
       setForm({
-        publicUrl: data.publicUrl || '',
         tableRequired: data.tableRequired,
         cardapioLiteEnabled: data.cardapioLiteEnabled,
         retaguardaWebEnabled: data.retaguardaWebEnabled,
@@ -3026,13 +3024,6 @@ function TroncomandaSettings() {
             mutation.mutate(values);
           }}
         >
-          <Field
-            label="URL publica do TronComanda"
-            value={values.publicUrl}
-            onChange={value => setValue('publicUrl', value)}
-            placeholder="https://cliente.tronsoft.app.br/qr/"
-            disabled={busy}
-          />
           <ToggleSwitch
             label="Mesa obrigatoria"
             icon={Table2}

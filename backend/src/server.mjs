@@ -2290,24 +2290,6 @@ function troncomandaPublicUrl(baseUrl) {
   return /\/qr$/i.test(normalized) ? `${normalized}/` : `${normalized}/qr/`;
 }
 
-function normalizeTroncomandaPublicUrl(value) {
-  const raw = String(value || '').trim();
-  if (!raw) return '';
-  let parsed;
-  try {
-    parsed = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
-  } catch {
-    throw new Error('URL publica do TronComanda invalida');
-  }
-  if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password) {
-    throw new Error('URL publica do TronComanda deve usar HTTP ou HTTPS e nao pode conter credenciais');
-  }
-  parsed.search = '';
-  parsed.hash = '';
-  parsed.pathname = troncomandaPublicUrl(parsed.pathname || '/');
-  return parsed.toString();
-}
-
 function appAccessUrl(app) {
   if (app.name === 'tronfire') {
     return process.env.TRONFIRE_PROXY_PATH || '/tronfire/';
@@ -4192,7 +4174,6 @@ async function troncomandaSettings() {
     'troncomanda_qr'
   ]);
   return {
-    publicUrl: env.TRONCOMANDA_PUBLIC_URL ? normalizeTroncomandaPublicUrl(env.TRONCOMANDA_PUBLIC_URL) : '',
     tableRequired: String(qrEnv.TABLE_REQUERID ?? env.TRONCOMANDA_TABLE_REQUIRED ?? '0') === '1',
     cardapioLiteEnabled: profiles.has('cardapio'),
     retaguardaWebEnabled: profiles.has('retaguarda'),
@@ -4219,7 +4200,6 @@ async function runTroncomandaCompose(args, options = {}) {
 async function writeTroncomandaSettings(body = {}) {
   const current = await troncomandaSettings();
   const next = {
-    publicUrl: body.publicUrl !== undefined ? normalizeTroncomandaPublicUrl(body.publicUrl) : current.publicUrl,
     tableRequired: body.tableRequired !== undefined ? !!body.tableRequired : current.tableRequired,
     cardapioLiteEnabled: body.cardapioLiteEnabled !== undefined ? !!body.cardapioLiteEnabled : current.cardapioLiteEnabled,
     retaguardaWebEnabled: body.retaguardaWebEnabled !== undefined ? !!body.retaguardaWebEnabled : current.retaguardaWebEnabled,
@@ -4235,8 +4215,7 @@ async function writeTroncomandaSettings(body = {}) {
   const qrEnvPath = troncomandaQrEnvPath(env);
   await writeEnvValuesPrivileged(envPath, {
     COMPOSE_PROFILES: profiles.join(','),
-    TRONCOMANDA_TABLE_REQUIRED: next.tableRequired ? '1' : '0',
-    TRONCOMANDA_PUBLIC_URL: next.publicUrl
+    TRONCOMANDA_TABLE_REQUIRED: next.tableRequired ? '1' : '0'
   });
   await writeEnvValuesPrivileged(qrEnvPath, { TABLE_REQUERID: next.tableRequired ? '1' : '0' });
 
@@ -4251,9 +4230,6 @@ async function writeTroncomandaSettings(body = {}) {
     ...(next.gerenteWebEnabled ? [] : TRONCOMANDA_OPTIONAL_SERVICES.gerente)
   ];
   const outputs = [];
-  if (next.publicUrl !== current.publicUrl) {
-    outputs.push({ action: 'api-public-url-refresh', services: ['troncomanda_api'], ...(await runTroncomandaCompose(['up', '-d', '--no-deps', '--force-recreate', 'api'])) });
-  }
   if (enabledServices.length) {
     outputs.push({ action: 'up', services: enabledServices, ...(await runTroncomandaCompose(['up', '-d', ...enabledServices])) });
   }
@@ -4310,8 +4286,7 @@ async function troncomandaAccessTest({ reconcile = true } = {}) {
   const networks = reconcile ? await reconcileCloudflareManagedNetworks() : null;
   const checks = [
     await troncomandaNetworkCheck(),
-    await httpAccessCheck('local-health', 'Health interno', 'http://127.0.0.1:8000/health'),
-    await httpAccessCheck('public-qr', 'QR externo', settings.publicUrl)
+    await httpAccessCheck('local-health', 'Health interno', 'http://127.0.0.1:8000/health')
   ];
   if (settings.retaguardaWebEnabled) {
     checks.push(await httpAccessCheck('retaguarda-local', 'Retaguarda interna', 'http://127.0.0.1:8010/'));
@@ -4319,12 +4294,10 @@ async function troncomandaAccessTest({ reconcile = true } = {}) {
   const result = {
     ok: checks.every(check => check.ok),
     checkedAt: new Date().toISOString(),
-    publicUrl: settings.publicUrl,
     checks,
     networks
   };
   appendEvent(result.ok ? 'TRONCOMANDA_ACCESS_TEST_OK' : 'TRONCOMANDA_ACCESS_TEST_FAILED', {
-    publicUrl: settings.publicUrl,
     checks: checks.map(check => ({ id: check.id, ok: check.ok, detail: check.detail }))
   });
   return result;

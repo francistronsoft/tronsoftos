@@ -156,7 +156,7 @@ Requisitos:
 
 ## P1 - acesso externo do TronComanda pelo Cloudflare
 
-Status: implementado na versao `0.1.129`; pendente validacao em uma instalacao
+Status: implementado na versao `0.1.130`; pendente validacao em uma instalacao
 real e definicao do comportamento do Tunnel durante promocao HA.
 
 Problema observado no Provocateur:
@@ -166,9 +166,7 @@ Problema observado no Provocateur:
   `http://tsretaguarda-web:8010`;
 - o container `tronsoftos_cloudflared` havia sido criado antes da rede
   `troncomanda_net` e nao estava conectado a ela;
-- o acesso externo retornava erro de origem indisponivel;
-- o botao `Acessar` ainda podia apontar para o endereco local porque
-  `TRONCOMANDA_PUBLIC_URL` nao estava configurada.
+- o acesso externo retornava erro de origem indisponivel.
 
 Requisitos:
 
@@ -178,16 +176,15 @@ Requisitos:
    todas as redes Docker gerenciadas que ja existirem.
 3. A ausencia temporaria do container ou da rede deve adiar a conexao sem fazer
    a instalacao falhar.
-4. Permitir informar e persistir a URL publica do TronComanda.
-5. Usar a URL publica no botao `Acessar` e na geracao dos QR codes.
-6. Recriar somente o servico que precisa reler `TRONCOMANDA_PUBLIC_URL`, sem
-   reiniciar Firebird, PostgreSQL ou Redis.
-7. Validar, ao final da instalacao:
+4. Manter os Public Hostnames e caminhos externos sob controle do painel da
+   Cloudflare, sem exigir que a URL publica seja repetida no TronSoftOS.
+5. Preservar compatibilidade com `TRONCOMANDA_PUBLIC_URL` quando ela ja estiver
+   definida manualmente no arquivo de ambiente.
+6. Validar, ao final da instalacao:
    - resolucao de `web` a partir do container Cloudflare;
    - `HTTP 200` no `/health` interno;
-   - `HTTP 200` no `/qr/` externo;
    - acesso externo da Retaguarda, quando instalada.
-8. Em HA, documentar e testar como o conector Cloudflare acompanha o no ativo,
+7. Em HA, documentar e testar como o conector Cloudflare acompanha o no ativo,
    sem encaminhar requisicoes para um standby ainda nao promovido.
 
 ## Testes de aceite
@@ -205,8 +202,8 @@ Requisitos:
 - Instalar o TronComanda depois do Cloudflare e confirmar a conexao automatica
   com `troncomanda_net`.
 - Instalar o Cloudflare depois do TronComanda e confirmar a mesma conexao.
-- Confirmar que o botao `Acessar`, os QR codes e os hostnames externos usam a
-  URL publica configurada.
+- Confirmar que os hostnames e caminhos definidos no painel da Cloudflare
+  acessam o TronComanda sem exigir URL publica no TronSoftOS.
 - Disparar simultaneamente coletas do backend e do worker e confirmar que
   somente um processo `isql` de monitoramento chega ao host.
 - Confirmar que a segunda coleta usa cache ou retorna como adiada dentro do
