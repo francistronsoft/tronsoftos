@@ -11,6 +11,20 @@ Servicos:
 - `tsretaguarda-api`: API da Retaguarda, porta padrao `9001`.
 - `tsretaguarda-web`: frontend da Retaguarda, porta padrao `8010`.
 
+Quando o stack e instalado ou atualizado pelo painel do TronSoftOS, o container
+`tronsoftos_cloudflared` e conectado automaticamente a rede `troncomanda_net`.
+Isso permite que regras remotas do Cloudflare Tunnel usem os nomes Compose,
+como `http://web` e `http://tsretaguarda-web:8010`.
+
+O mesmo ajuste e executado quando o Tunnel e configurado depois do
+TronComanda. A operacao e idempotente e nao reinicia Firebird, PostgreSQL,
+Redis ou os containers de aplicacao.
+
+Configure no painel a URL publica completa do QR, por exemplo
+`https://cliente.tronsoft.app.br/qr/`. A alteracao e persistida em
+`TRONCOMANDA_PUBLIC_URL` e recria somente `troncomanda_api`, que gera os links
+publicos. O botao `Acessar` passa a usar a mesma URL.
+
 Dados persistentes:
 
 - `/opt/tronfire-storage/troncomanda/qr-static`

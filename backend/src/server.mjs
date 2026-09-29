@@ -2290,6 +2290,24 @@ function troncomandaPublicUrl(baseUrl) {
   return /\/qr$/i.test(normalized) ? `${normalized}/` : `${normalized}/qr/`;
 }
 
+function normalizeTroncomandaPublicUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  let parsed;
+  try {
+    parsed = new URL(/^https?:\/\//i.test(raw) ? raw : `https://${raw}`);
+  } catch {
+    throw new Error('URL publica do TronComanda invalida');
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password) {
+    throw new Error('URL publica do TronComanda deve usar HTTP ou HTTPS e nao pode conter credenciais');
+  }
+  parsed.search = '';
+  parsed.hash = '';
+  parsed.pathname = troncomandaPublicUrl(parsed.pathname || '/');
+  return parsed.toString();
+}
+
 function appAccessUrl(app) {
   if (app.name === 'tronfire') {
     return process.env.TRONFIRE_PROXY_PATH || '/tronfire/';
@@ -3358,6 +3376,26 @@ async function applyCloudflareTunnelConnector() {
   return { ok: true, stdout: stdout.trim(), stderr: stderr.trim() };
 }
 
+async function reconcileCloudflareManagedNetworks() {
+  const script = path.join(appRoot, 'scripts/connect-cloudflared-network.sh');
+  if (!fs.existsSync(script)) return { ok: false, skipped: true, message: 'script de reconciliacao de rede ainda nao instalado' };
+  const networks = [
+    { app: 'troncomanda', name: 'troncomanda_net' }
+  ];
+  const results = [];
+  for (const network of networks) {
+    const { stdout, stderr } = await run('bash', [script, network.name], {
+      timeout: 30_000,
+      maxBuffer: 1024 * 1024
+    });
+    results.push({ ...network, stdout: stdout.trim(), stderr: stderr.trim() });
+  }
+  appendEvent('CLOUDFLARE_NETWORKS_RECONCILED', {
+    networks: results.map(item => ({ app: item.app, name: item.name, detail: item.stdout || item.stderr }))
+  });
+  return { ok: true, networks: results };
+}
+
 async function stopCloudflareTunnelConnector() {
   const script = '/usr/local/sbin/tronsoftos-cloudflare-tunnel';
   if (!fs.existsSync(script)) return { ok: false, skipped: true, message: 'script do connector ainda nao instalado' };
@@ -3391,11 +3429,13 @@ async function cloudflareTest() {
   const normalized = normalizeCloudflareSettings(settings);
   if (!normalized.tunnelToken) throw new Error('token do Cloudflare Tunnel nao configurado');
   const connector = await applyCloudflareTunnelConnector();
+  const networks = await reconcileCloudflareManagedNetworks();
   appendEvent('CLOUDFLARE_TUNNEL_TEST_OK', { enabled: normalized.enabled });
   return {
     ok: true,
     message: connector.ok ? 'Token configurado e connector aplicado.' : 'Token do Cloudflare Tunnel configurado.',
-    connector
+    connector,
+    networks
   };
 }
 
@@ -3421,6 +3461,8 @@ async function saveCloudflareSettings(body) {
   let connector = null;
   try {
     connector = await applyCloudflareTunnelConnector();
+    const networks = await reconcileCloudflareManagedNetworks();
+    connector = { ...connector, networks };
   } catch (err) {
     appendEvent('CLOUDFLARE_TUNNEL_APPLY_FAILED', { error: err.message });
     throw err;
@@ -4087,12 +4129,21 @@ function appActionSteps(app, action, options = {}) {
   for (const composeFile of composeFiles) {
     baseArgs.push('-f', path.resolve(appRoot, composeFile));
   }
-  if (action === 'up') return [{ command: 'docker', args: [...baseArgs, 'up', '-d'], env }];
+  const cloudflareNetworkStep = app.name === 'troncomanda'
+    ? [{ command: 'bash', args: [path.join(appRoot, 'scripts/connect-cloudflared-network.sh'), 'troncomanda_net'] }]
+    : [];
+  if (action === 'up') {
+    return [
+      { command: 'docker', args: [...baseArgs, 'up', '-d'], env },
+      ...cloudflareNetworkStep
+    ];
+  }
   if (action === 'restart') return [{ command: 'docker', args: [...baseArgs, 'restart'] }];
   if (action === 'pull') {
     return [
       { command: 'docker', args: [...baseArgs, 'pull'], env },
-      { command: 'docker', args: [...baseArgs, 'up', '-d'], env }
+      { command: 'docker', args: [...baseArgs, 'up', '-d'], env },
+      ...cloudflareNetworkStep
     ];
   }
   return [{ command: 'docker', args: [...baseArgs, action] }];
@@ -4141,6 +4192,7 @@ async function troncomandaSettings() {
     'troncomanda_qr'
   ]);
   return {
+    publicUrl: env.TRONCOMANDA_PUBLIC_URL ? normalizeTroncomandaPublicUrl(env.TRONCOMANDA_PUBLIC_URL) : '',
     tableRequired: String(qrEnv.TABLE_REQUERID ?? env.TRONCOMANDA_TABLE_REQUIRED ?? '0') === '1',
     cardapioLiteEnabled: profiles.has('cardapio'),
     retaguardaWebEnabled: profiles.has('retaguarda'),
@@ -4167,6 +4219,7 @@ async function runTroncomandaCompose(args, options = {}) {
 async function writeTroncomandaSettings(body = {}) {
   const current = await troncomandaSettings();
   const next = {
+    publicUrl: body.publicUrl !== undefined ? normalizeTroncomandaPublicUrl(body.publicUrl) : current.publicUrl,
     tableRequired: body.tableRequired !== undefined ? !!body.tableRequired : current.tableRequired,
     cardapioLiteEnabled: body.cardapioLiteEnabled !== undefined ? !!body.cardapioLiteEnabled : current.cardapioLiteEnabled,
     retaguardaWebEnabled: body.retaguardaWebEnabled !== undefined ? !!body.retaguardaWebEnabled : current.retaguardaWebEnabled,
@@ -4182,7 +4235,8 @@ async function writeTroncomandaSettings(body = {}) {
   const qrEnvPath = troncomandaQrEnvPath(env);
   await writeEnvValuesPrivileged(envPath, {
     COMPOSE_PROFILES: profiles.join(','),
-    TRONCOMANDA_TABLE_REQUIRED: next.tableRequired ? '1' : '0'
+    TRONCOMANDA_TABLE_REQUIRED: next.tableRequired ? '1' : '0',
+    TRONCOMANDA_PUBLIC_URL: next.publicUrl
   });
   await writeEnvValuesPrivileged(qrEnvPath, { TABLE_REQUERID: next.tableRequired ? '1' : '0' });
 
@@ -4197,6 +4251,9 @@ async function writeTroncomandaSettings(body = {}) {
     ...(next.gerenteWebEnabled ? [] : TRONCOMANDA_OPTIONAL_SERVICES.gerente)
   ];
   const outputs = [];
+  if (next.publicUrl !== current.publicUrl) {
+    outputs.push({ action: 'api-public-url-refresh', services: ['troncomanda_api'], ...(await runTroncomandaCompose(['up', '-d', '--no-deps', '--force-recreate', 'api'])) });
+  }
   if (enabledServices.length) {
     outputs.push({ action: 'up', services: enabledServices, ...(await runTroncomandaCompose(['up', '-d', ...enabledServices])) });
   }
@@ -4205,8 +4262,72 @@ async function writeTroncomandaSettings(body = {}) {
   }
   outputs.push({ action: 'qr-refresh', services: ['troncomanda_qr'], ...(await runTroncomandaCompose(['up', '-d', '--force-recreate', 'qr'])) });
 
-  appendEvent('TRONCOMANDA_SETTINGS_UPDATED', { next, profiles, outputs: outputs.map(item => ({ action: item.action, services: item.services })) });
-  return { ...(await troncomandaSettings()), outputs };
+  const networks = await reconcileCloudflareManagedNetworks();
+
+  appendEvent('TRONCOMANDA_SETTINGS_UPDATED', { next, profiles, outputs: outputs.map(item => ({ action: item.action, services: item.services })), networks });
+  return { ...(await troncomandaSettings()), outputs, networks };
+}
+
+async function httpAccessCheck(id, label, url) {
+  if (!url) return { id, label, ok: false, skipped: true, detail: 'URL nao configurada' };
+  try {
+    const response = await fetch(url, {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(12_000)
+    });
+    const detail = `HTTP ${response.status} ${response.url || url}`;
+    await response.body?.cancel().catch(() => {});
+    return { id, label, ok: response.ok, status: response.status, url, detail };
+  } catch (err) {
+    return { id, label, ok: false, url, detail: err.message };
+  }
+}
+
+async function troncomandaNetworkCheck() {
+  try {
+    const { stdout } = await run('docker', [
+      'network', 'inspect',
+      '--format', '{{range .Containers}}{{println .Name}}{{end}}',
+      'troncomanda_net'
+    ], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+    const members = stdout.split(/\r?\n/).map(item => item.trim()).filter(Boolean);
+    const cloudflareAttached = members.includes('tronsoftos_cloudflared');
+    const webAttached = members.includes('troncomanda_web');
+    return {
+      id: 'docker-network',
+      label: 'Rede Cloudflare/TronComanda',
+      ok: cloudflareAttached && webAttached,
+      detail: `cloudflared=${cloudflareAttached ? 'conectado' : 'ausente'}, web=${webAttached ? 'conectado' : 'ausente'}`,
+      members
+    };
+  } catch (err) {
+    return { id: 'docker-network', label: 'Rede Cloudflare/TronComanda', ok: false, detail: err.message, members: [] };
+  }
+}
+
+async function troncomandaAccessTest({ reconcile = true } = {}) {
+  const settings = await troncomandaSettings();
+  const networks = reconcile ? await reconcileCloudflareManagedNetworks() : null;
+  const checks = [
+    await troncomandaNetworkCheck(),
+    await httpAccessCheck('local-health', 'Health interno', 'http://127.0.0.1:8000/health'),
+    await httpAccessCheck('public-qr', 'QR externo', settings.publicUrl)
+  ];
+  if (settings.retaguardaWebEnabled) {
+    checks.push(await httpAccessCheck('retaguarda-local', 'Retaguarda interna', 'http://127.0.0.1:8010/'));
+  }
+  const result = {
+    ok: checks.every(check => check.ok),
+    checkedAt: new Date().toISOString(),
+    publicUrl: settings.publicUrl,
+    checks,
+    networks
+  };
+  appendEvent(result.ok ? 'TRONCOMANDA_ACCESS_TEST_OK' : 'TRONCOMANDA_ACCESS_TEST_FAILED', {
+    publicUrl: settings.publicUrl,
+    checks: checks.map(check => ({ id: check.id, ok: check.ok, detail: check.detail }))
+  });
+  return result;
 }
 
 function dockerEnv() {
@@ -4423,6 +4544,11 @@ function startAppAction(app, action, options = {}) {
     try {
       for (const step of steps) {
         await runActionStep(job, step);
+      }
+      if (app.name === 'troncomanda' && ['up', 'pull'].includes(action)) {
+        const access = await troncomandaAccessTest({ reconcile: false });
+        const summary = access.checks.map(check => `${check.label}: ${check.ok ? 'ok' : check.detail}`).join('; ');
+        appendActionLog(job, access.ok ? 'stdout' : 'stderr', `Validacao de acesso: ${summary}\n`);
       }
       job.exitCode = 0;
       job.status = 'success';
@@ -6189,6 +6315,7 @@ async function handleApi(req, reply, url) {
   if (req.method === 'GET' && url.pathname === '/api/apps') return json(reply, 200, { apps: await appsStatus() });
   if (req.method === 'GET' && url.pathname === '/api/troncomanda/settings') return json(reply, 200, await troncomandaSettings());
   if (req.method === 'PATCH' && url.pathname === '/api/troncomanda/settings') return json(reply, 200, await writeTroncomandaSettings(await readBody(req)));
+  if (req.method === 'POST' && url.pathname === '/api/troncomanda/access/test') return json(reply, 200, await troncomandaAccessTest());
   if (req.method === 'POST' && url.pathname === '/api/apps/registry-login') return json(reply, 200, await dockerRegistryLogin(await readBody(req)));
   const actionJobMatch = url.pathname.match(/^\/api\/actions\/([^/]+)$/);
   if (req.method === 'GET' && actionJobMatch) {

@@ -2968,6 +2968,7 @@ function TroncomandaSettings() {
   const settings = settingsQuery.data || {};
   const [form, setForm] = useState(null);
   const values = form || {
+    publicUrl: settings.publicUrl || '',
     tableRequired: settings.tableRequired || false,
     cardapioLiteEnabled: settings.cardapioLiteEnabled || false,
     retaguardaWebEnabled: settings.retaguardaWebEnabled || false,
@@ -2984,6 +2985,7 @@ function TroncomandaSettings() {
     }),
     onSuccess: data => {
       setForm({
+        publicUrl: data.publicUrl || '',
         tableRequired: data.tableRequired,
         cardapioLiteEnabled: data.cardapioLiteEnabled,
         retaguardaWebEnabled: data.retaguardaWebEnabled,
@@ -2995,8 +2997,16 @@ function TroncomandaSettings() {
       queryClient.invalidateQueries({ queryKey: ['events'] });
     }
   });
+  const accessTestMutation = useMutation({
+    mutationFn: () => postApi('/api/troncomanda/access/test'),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['apps'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['events'] });
+    }
+  });
   const setValue = (key, value) => setForm(previous => ({ ...(previous || values), [key]: value }));
-  const busy = settingsQuery.isFetching || mutation.isPending;
+  const busy = settingsQuery.isFetching || mutation.isPending || accessTestMutation.isPending;
   const containerStatus = name => settings.containers?.find(item => item.name === name)?.status || '-';
   const containerVersion = name => {
     const container = settings.containers?.find(item => item.name === name);
@@ -3016,6 +3026,13 @@ function TroncomandaSettings() {
             mutation.mutate(values);
           }}
         >
+          <Field
+            label="URL publica do TronComanda"
+            value={values.publicUrl}
+            onChange={value => setValue('publicUrl', value)}
+            placeholder="https://cliente.tronsoft.app.br/qr/"
+            disabled={busy}
+          />
           <ToggleSwitch
             label="Mesa obrigatoria"
             icon={Table2}
@@ -3053,9 +3070,24 @@ function TroncomandaSettings() {
               <Save className="h-4 w-4" />
               Aplicar configuracao
             </button>
+            <button type="button" disabled={busy} onClick={() => accessTestMutation.mutate()} className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium hover:bg-slate-50 disabled:opacity-50">
+              <ExternalLink className="h-4 w-4" />
+              Validar acesso
+            </button>
             {mutation.isSuccess ? <StatusPill value="online" /> : null}
             {mutation.isError ? <span className="text-sm text-red-700">{mutation.error.message}</span> : null}
+            {accessTestMutation.isError ? <span className="text-sm text-red-700">{accessTestMutation.error.message}</span> : null}
           </div>
+          {accessTestMutation.data?.checks?.length ? (
+            <div className="space-y-2 border-t border-slate-100 pt-3">
+              {accessTestMutation.data.checks.map(check => (
+                <div key={check.id} className="flex items-start justify-between gap-4 text-sm">
+                  <span className="text-slate-600">{check.label}</span>
+                  <span className={check.ok ? 'text-green-700' : 'text-red-700'}>{check.ok ? 'OK' : check.detail}</span>
+                </div>
+              ))}
+            </div>
+          ) : null}
         </form>
 
         <div className="space-y-3 text-sm">
