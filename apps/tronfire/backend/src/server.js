@@ -1046,7 +1046,7 @@ async function recentFirebirdSessions(databaseId) {
         { lastSeenAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } }
       ]
     },
-    orderBy: [{ disconnectedAt: 'asc' }, { lastSeenAt: 'desc' }],
+    orderBy: [{ disconnectedAt: { sort: 'asc', nulls: 'first' } }, { lastSeenAt: 'desc' }],
     take: 50
   });
   return sessions.map(serializeFirebirdSession).filter(Boolean);
