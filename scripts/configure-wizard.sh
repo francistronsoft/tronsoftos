@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/network-dns.sh"
 DEFAULT_APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 APP_DIR="${TRONSOFTOS_APP_DIR:-$DEFAULT_APP_DIR}"
 ENV_DIR="/etc/tronsoftos"
@@ -352,10 +353,15 @@ configure_static_ip() {
       nmcli connection modify "$connection" ipv4.gateway ""
     fi
     if [ -n "$dns" ]; then
-      nmcli connection modify "$connection" ipv4.dns "$dns"
+      nmcli connection modify "$connection" ipv4.ignore-auto-dns yes ipv4.dns "$(dns_family "$dns" 4)" ipv6.ignore-auto-dns yes ipv6.dns "$(dns_family "$dns" 6)"
     else
-      nmcli connection modify "$connection" ipv4.ignore-auto-dns yes ipv4.dns ""
+      nmcli connection modify "$connection" ipv4.ignore-auto-dns yes ipv4.dns "" ipv6.ignore-auto-dns yes ipv6.dns ""
     fi
+    local persisted_dns
+    persisted_dns="$(nmcli -e no -g ipv4.dns,ipv6.dns connection show "$connection" | sed 's/--//g')"
+    persisted_dns="$(normalize_dns "$persisted_dns")" || return 1
+    same_dns "$dns" "$persisted_dns" || { echo "Falha ao confirmar os DNS persistidos no NetworkManager." >&2; return 1; }
+    echo "DNS persistido no NetworkManager: ${persisted_dns:-nenhum}"
 
     echo "IP fixo gravado no NetworkManager: conexao '$connection'."
     if [ "$apply_now" = "true" ]; then
@@ -364,6 +370,7 @@ configure_static_ip() {
     else
       echo "A configuracao sera aplicada ao reconectar a interface ou reiniciar o servidor."
     fi
+    echo "DNS ativo na interface: $(nmcli -e no -g IP4.DNS,IP6.DNS device show "$iface" 2>/dev/null | paste -sd' ' -)"
     return 0
   fi
 
@@ -389,6 +396,10 @@ configure_static_ip() {
         [ -n "$dns_server" ] && echo "DNS=$dns_server"
       done
     } > "$network_file"
+    local persisted_dns
+    persisted_dns="$(awk -F= '$1 == "DNS" {print $2}' "$network_file" | paste -sd' ' -)"
+    same_dns "$dns" "$persisted_dns" || { echo "Falha ao confirmar os DNS persistidos no systemd-networkd." >&2; return 1; }
+    echo "DNS persistido no systemd-networkd: ${persisted_dns:-nenhum}"
 
     systemctl enable systemd-networkd.service >/dev/null 2>&1 || true
     echo "IP fixo gravado em $network_file."
@@ -433,12 +444,14 @@ if yes_no "Este cliente tera alta disponibilidade com 2 servidores? (s/n)" "n"; 
   DEPLOYMENT_MODE="ha"
 fi
 
-NODE_NAME="$(ask "Nome deste servidor/no" "servidor-01")"
 NODE_ROLE="primary"
 if [ "$DEPLOYMENT_MODE" = "ha" ]; then
   NODE_ROLE="$(choose_node_role)"
 fi
-CLUSTER_ID="$(ask "ID do cluster/cliente" "$(echo "$NODE_NAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9_.-' '-')")"
+DEFAULT_NODE_NAME="servidor-01"
+[ "$NODE_ROLE" != "standby" ] || DEFAULT_NODE_NAME="servidor-02"
+NODE_NAME="$(ask "Nome deste servidor/no" "$DEFAULT_NODE_NAME")"
+CLUSTER_ID="$(ask "ID do cluster/cliente" "$(printf '%s' "$NODE_NAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9_.-' '-')")"
 NODE_ID="$(new_uuid)"
 INSTALL_ID="$(new_uuid)"
 
@@ -470,7 +483,11 @@ if [ "$DEPLOYMENT_MODE" = "ha" ] || yes_no "Deseja gravar IP fixo do host agora?
   STATIC_IP_INTERFACE="$(ask "Interface do IP fixo" "${STATIC_IP_INTERFACE:-eth0}")"
   STATIC_IP_ADDRESS_CIDR="$(ask "IP fixo/mascara CIDR deste host" "${STATIC_IP_ADDRESS_CIDR:-$SERVER_IP/24}")"
   STATIC_IP_GATEWAY="$(ask "Gateway" "$STATIC_IP_GATEWAY")"
-  STATIC_IP_DNS="$(ask "DNS (separe por espaco)" "$STATIC_IP_DNS")"
+  while true; do
+    DNS_INPUT="$(ask "DNS (separe por espaco ou virgula)" "$STATIC_IP_DNS")"
+    if STATIC_IP_DNS="$(normalize_dns "$DNS_INPUT")" && [ -n "$STATIC_IP_DNS" ]; then break; fi
+    echo "DNS invalido. Informe enderecos IP validos." >&2
+  done
   SERVER_IP="$(ipv4_without_cidr "$STATIC_IP_ADDRESS_CIDR")"
   if yes_no "Aplicar IP fixo agora? Pode derrubar a sessao SSH se o IP mudar. (s/n)" "n"; then
     STATIC_IP_APPLY_NOW="true"
@@ -893,11 +910,11 @@ echo "- $CLUSTER_SECRETS"
 echo "- $NODE_IDENTITY"
 if [ "$STATIC_IP_ENABLED" = "true" ]; then
   echo "- IP fixo: $STATIC_IP_ADDRESS_CIDR em $STATIC_IP_INTERFACE"
-  if [ "$STATIC_IP_APPLY_NOW" = "true" ]; then
-    configure_static_ip "$STATIC_IP_INTERFACE" "$STATIC_IP_ADDRESS_CIDR" "$STATIC_IP_GATEWAY" "$STATIC_IP_DNS" "true" || true
-  else
-    echo "  Aplicacao do IP fixo ficara disponivel pelo painel TronSoftOS."
-  fi
+  configure_static_ip "$STATIC_IP_INTERFACE" "$STATIC_IP_ADDRESS_CIDR" "$STATIC_IP_GATEWAY" "$STATIC_IP_DNS" "$STATIC_IP_APPLY_NOW" || { echo "Falha ao gravar a rede do host." >&2; exit 78; }
+  echo "  DNS solicitado: $STATIC_IP_DNS"
+  echo "  DNS salvo em HOST_STATIC_IP_DNS: $(env_value "$TRONSOFTOS_ENV" HOST_STATIC_IP_DNS)"
+  echo "  DNS ativo (resolv.conf): $(detect_dns_servers)"
+  [ "$STATIC_IP_APPLY_NOW" = "true" ] || echo "  DNS ativo pode permanecer anterior ate reconectar a interface ou reiniciar."
 fi
 if [ "$SYNC_IP_ENABLED" = "true" ]; then
   echo "- IP de sincronismo HA: $SYNC_IP_ADDRESS_CIDR em $SYNC_IP_INTERFACE"

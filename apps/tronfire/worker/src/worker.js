@@ -1879,9 +1879,10 @@ async function checkTools() {
       }
       firebirdToolsCheckedAt = Date.now();
       await resolveActiveAlertsByType('FIREBIRD_TOOL_MISSING');
+      await resolveActiveAlertsByType('FIREBIRD_TOOL_CHECK_FAILED');
     } catch (err) {
       if (err.deferred) return;
-      await createAlertOnce('FIREBIRD_TOOL_MISSING', 'CRITICAL', 'Um ou mais utilitarios Firebird estao ausentes');
+      await createAlertOnce('FIREBIRD_TOOL_CHECK_FAILED', 'WARNING', 'Nao foi possivel verificar os utilitarios Firebird; confira autenticacao e comunicacao com o host');
     }
   })().finally(() => {
     firebirdToolCheckPromise = null;

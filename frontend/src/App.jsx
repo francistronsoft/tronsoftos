@@ -1291,11 +1291,11 @@ function ClusterView({ dashboard }) {
           ) : null}
           {pairingImportMutation.isSuccess ? (
             <div className="mt-4 rounded-md border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-700">
-              <div className="font-medium">Pareamento importado com sucesso.</div>
+              <div className="font-medium">{pairingImportMutation.data?.runtime?.verified ? 'Pareamento validado com sucesso.' : 'Pareamento importado.'}</div>
               <div className="mt-1">
                 Chave SSH do primary: {pairingImportMutation.data?.sshKeyImported ? 'importada no authorized_keys' : 'nao encontrada no arquivo importado'}.
               </div>
-              <div className="mt-1">Reinicie TronSoftOS e TronFire para carregar os segredos no standby.</div>
+              <div className="mt-1">{pairingImportMutation.data?.runtime?.verified ? 'Backend e worker recarregados. Firebird, PostgreSQL e Redis preservados.' : 'Validacao dos servicos ainda pendente.'}</div>
               {pairingImportMutation.data?.paths?.authorizedKeys ? (
                 <div className="mt-1 truncate font-mono text-xs">{pairingImportMutation.data.paths.authorizedKeys}</div>
               ) : null}
@@ -2697,7 +2697,7 @@ function NetworkSettings() {
     interfaceName: currentInterface,
     addressCidr: currentAddress,
     gateway: network?.gateway || '',
-    dns: currentDns,
+    dns: network?.configured?.dns || currentDns,
     applyNow: false
   };
   const mutation = useMutation({
@@ -2716,7 +2716,10 @@ function NetworkSettings() {
           <div className="flex justify-between border-b border-slate-100 pb-2"><span className="text-slate-500">Interface atual</span><span className="font-medium">{currentInterface}</span></div>
           <div className="flex justify-between border-b border-slate-100 pb-2"><span className="text-slate-500">IP atual</span><span className="font-medium">{currentAddress || '-'}</span></div>
           <div className="flex justify-between border-b border-slate-100 pb-2"><span className="text-slate-500">Gateway</span><span className="font-medium">{network?.gateway || '-'}</span></div>
-          <div className="flex justify-between border-b border-slate-100 pb-2"><span className="text-slate-500">DNS</span><span className="font-medium">{currentDns}</span></div>
+          <div className="flex justify-between gap-3 border-b border-slate-100 pb-2"><span className="text-slate-500">DNS solicitado</span><span className="min-w-0 break-words text-right font-medium">{mutation.data?.dnsState?.requested || network?.dnsState?.requested || '-'}</span></div>
+          <div className="flex justify-between gap-3 border-b border-slate-100 pb-2"><span className="text-slate-500">DNS persistido</span><span className="min-w-0 break-words text-right font-medium">{network?.dnsState?.persisted || '-'}</span></div>
+          <div className="flex justify-between gap-3 border-b border-slate-100 pb-2"><span className="text-slate-500">DNS ativo</span><span className="min-w-0 break-words text-right font-medium">{network?.dnsState?.active || '-'}</span></div>
+          {network?.dnsState?.pending ? <div className="text-amber-700">DNS salvo difere do ativo. A interface pode precisar de reconexao ou reinicio.</div> : null}
           {networkQuery.isError ? <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-red-700">Nao foi possivel ler a rede do host.</div> : null}
         </div>
         <form

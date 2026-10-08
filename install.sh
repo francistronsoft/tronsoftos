@@ -435,6 +435,7 @@ fi
 
 echo "Instalando systemd..."
 install -m 0755 "$APP_DIR/infra/sbin/tronsoftos-network" /usr/local/sbin/tronsoftos-network
+install -m 0644 "$APP_DIR/scripts/network-dns.sh" /usr/local/lib/tronsoftos-network-dns.sh
 install -m 0755 "$APP_DIR/infra/sbin/tronsoftos-cloudflare-tunnel" /usr/local/sbin/tronsoftos-cloudflare-tunnel
 install -m 0440 "$APP_DIR/infra/sudoers/tronsoftos" /etc/sudoers.d/tronsoftos
 sed -i "s|/opt/tronsoftos|$APP_DIR|g" /etc/sudoers.d/tronsoftos

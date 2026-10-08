@@ -106,3 +106,25 @@ test('backup process detection stays independent of the monitor gate', async () 
   assert.equal((await context.backupToolProcesses()).length, 1);
   assert.equal(operationClass, undefined);
 });
+
+for (const mode of ['missing', 'failure', 'deferred', 'success']) {
+  test(`tool check distinguishes real absence from verifier failure (${mode})`, async () => {
+    const alerts = [], resolved = [];
+    const context = vm.createContext({
+      firebirdToolsCheckedAt: 0, FIREBIRD_TOOL_CHECK_TTL_MS: 60000, firebirdToolCheckPromise: null,
+      FIREBIRD_BIN: '/test', Date,
+      dockerExec: async () => {
+        if (mode === 'failure' || mode === 'deferred') { const err = new Error('Unauthorized'); err.deferred = mode === 'deferred'; throw err; }
+        return { stdout: mode === 'missing' ? 'gbak\n' : '' };
+      },
+      createAlertOnce: async (type, severity) => alerts.push({ type, severity }),
+      resolveActiveAlertsByType: async type => resolved.push(type)
+    });
+    vm.runInContext(extract(workerSource, 'async function checkTools(', "cron.schedule('*/5 * * * *'"), context);
+    await context.checkTools();
+    if (mode === 'missing') assert.equal(alerts[0].type, 'FIREBIRD_TOOL_MISSING');
+    if (mode === 'failure') assert.deepEqual(alerts, [{ type: 'FIREBIRD_TOOL_CHECK_FAILED', severity: 'WARNING' }]);
+    if (mode === 'deferred') assert.equal(alerts.length, 0);
+    if (mode === 'success') assert.deepEqual(resolved, ['FIREBIRD_TOOL_MISSING', 'FIREBIRD_TOOL_CHECK_FAILED']);
+  });
+}

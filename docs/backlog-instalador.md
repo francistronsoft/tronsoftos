@@ -5,6 +5,10 @@ Os itens abaixo ainda nao autorizam mudancas automaticas em ambientes instalados
 
 ## P0 - concluir o pareamento HA
 
+Status: implementado em `0.1.133`, com testes isolados de importacao e
+verificacao autenticada dos containers no Kabecos. O ciclo completo entre
+dois nos HA reais ainda requer uma janela propria.
+
 Problema observado no Provocateur:
 
 - a importacao atualiza os tokens nos arquivos do host;
@@ -26,8 +30,8 @@ Requisitos:
 
 ## P0 - exclusao global das consultas de monitoramento Firebird
 
-Status: implementado na versao `0.1.132`. Testes isolados no Kabecos;
-ativacao nos servicos de producao e observacao operacional ainda pendentes.
+Status: implementado na versao `0.1.132`, ativado e validado no Kabecos em
+08/10/2026. Observacao operacional de longo prazo ainda pendente.
 Detalhes em `monitoramento-firebird-global.md`.
 
 Problema observado no Ilha Vix:
@@ -119,6 +123,8 @@ Requisitos:
 
 ## P1 - ordem inicial do assistente
 
+Status: implementado em `0.1.133`; testes dos modos simple, primary e standby.
+
 Para instalacao nova, a ordem deve ser:
 
 1. Perguntar primeiro se o ambiente possui alta disponibilidade.
@@ -135,6 +141,10 @@ O modo sem HA deve continuar simples e nao deve exibir configuracoes de VIP,
 sync ou promocao.
 
 ## P1 - persistencia de DNS primario e secundario
+
+Status: implementado em `0.1.133`; testes isolados de NetworkManager e
+systemd-networkd, com e sem aplicacao imediata, incluindo DNS IPv4/IPv6.
+Nenhuma interface real foi reconfigurada durante os testes no Kabecos.
 
 Problema observado na instalacao do standby:
 

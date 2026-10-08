@@ -11,6 +11,8 @@ import { fileURLToPath } from 'node:url';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createFirebirdMonitorGate, firebirdScriptClass } from './firebird-monitor-gate.mjs';
+import { activatePairingRuntime } from './pairing-runtime.mjs';
+import { normalizeDns, sameDns } from './network-dns.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -3609,6 +3611,13 @@ async function hostFirebirdScript(req) {
   });
 }
 
+async function readHostNetworkSettings() {
+  try {
+    const out = await privilegedRun('/usr/local/sbin/tronsoftos-network', ['network-config-status'], { timeout: 5000 });
+    return parseJsonLines(out.stdout).at(-1) || {};
+  } catch { return parseEnvFile('/etc/tronsoftos/tronsoftos.env'); }
+}
+
 async function hostNetworkStatus() {
   let interfaces = [];
   try {
@@ -3643,17 +3652,43 @@ async function hostNetworkStatus() {
     dns = [];
   }
 
+  const saved = await readHostNetworkSettings();
+  const configuredInterface = saved.HOST_STATIC_IP_INTERFACE || process.env.HOST_STATIC_IP_INTERFACE || defaultRoute?.dev || '';
+  let persistedDns = '';
+  try {
+    const connections = await run('nmcli', ['-e', 'no', '-t', '-f', 'NAME,DEVICE', 'connection', 'show'], { timeout: 5000 });
+    const connection = connections.stdout.split(/\r?\n/).find(line => line.endsWith(`:${configuredInterface}`))?.slice(0, -(configuredInterface.length + 1));
+    if (connection) {
+      persistedDns = normalizeDns((await run('nmcli', ['-e', 'no', '-g', 'ipv4.dns,ipv6.dns', 'connection', 'show', connection], { timeout: 5000 })).stdout.replace(/--/g, ''));
+      const active = (await run('nmcli', ['-e', 'no', '-g', 'IP4.DNS,IP6.DNS', 'device', 'show', configuredInterface], { timeout: 5000 })).stdout.replace(/--/g, '');
+      dns = normalizeDns(active).split(' ').filter(Boolean);
+    }
+  } catch {
+    try {
+      const content = fs.readFileSync(`/etc/systemd/network/10-tronsoftos-${configuredInterface}.network`, 'utf8');
+      persistedDns = normalizeDns(content.split(/\r?\n/).filter(line => line.startsWith('DNS=')).map(line => line.slice(4)));
+    } catch { persistedDns = ''; }
+  }
+  if (persistedDns) {
+    try {
+      const active = await run('resolvectl', ['dns', configuredInterface], { timeout: 5000 });
+      const entries = active.stdout.replace(/^[^:]*:\s*/, '').trim();
+      if (entries) dns = normalizeDns(entries).split(' ');
+    } catch { /* resolv.conf remains the fallback without systemd-resolved. */ }
+  }
+  const requestedDns = saved.HOST_STATIC_IP_DNS ?? process.env.HOST_STATIC_IP_DNS ?? '';
   return {
     interfaces,
     defaultInterface: defaultRoute?.dev || interfaces[0]?.name || null,
     gateway: defaultRoute?.gateway || null,
     dns,
+    dnsState: { requested: requestedDns, persisted: persistedDns, active: dns.join(' '), pending: Boolean(persistedDns) && !sameDns(persistedDns, dns.join(' ')) },
     configured: {
-      enabled: process.env.HOST_STATIC_IP_ENABLED === 'true',
-      interface: process.env.HOST_STATIC_IP_INTERFACE || null,
-      addressCidr: process.env.HOST_STATIC_IP_ADDRESS_CIDR || null,
-      gateway: process.env.HOST_STATIC_IP_GATEWAY || null,
-      dns: process.env.HOST_STATIC_IP_DNS || null
+      enabled: (saved.HOST_STATIC_IP_ENABLED ?? process.env.HOST_STATIC_IP_ENABLED) === 'true',
+      interface: saved.HOST_STATIC_IP_INTERFACE ?? process.env.HOST_STATIC_IP_INTERFACE ?? null,
+      addressCidr: saved.HOST_STATIC_IP_ADDRESS_CIDR ?? process.env.HOST_STATIC_IP_ADDRESS_CIDR ?? null,
+      gateway: saved.HOST_STATIC_IP_GATEWAY ?? process.env.HOST_STATIC_IP_GATEWAY ?? null,
+      dns: requestedDns || null
     }
   };
 }
@@ -3729,7 +3764,7 @@ function assertNetworkPayload(body) {
     interfaceName: String(body.interfaceName || '').trim(),
     addressCidr: String(body.addressCidr || '').trim(),
     gateway: String(body.gateway || '').trim(),
-    dns: Array.isArray(body.dns) ? body.dns.join(' ') : String(body.dns || '').trim(),
+    dns: normalizeDns(body.dns),
     applyNow: body.applyNow === true
   };
   if (!/^[A-Za-z0-9_.:-]+$/.test(payload.interfaceName)) throw new Error('interface invalida');
@@ -3769,9 +3804,14 @@ async function hostNetworkStatic(body) {
     appRoot
   ], { timeout: 120_000, maxBuffer: 1024 * 1024 * 2 });
   const result = parseJsonLines(out.stdout).at(-1) || { ok: true };
+  const network = await hostNetworkStatus();
+  if (!sameDns(network.configured.dns, payload.dns) || !sameDns(network.dnsState.persisted, payload.dns)) {
+    throw new Error('Nao foi possivel confirmar a lista DNS persistida. Confira a configuracao de rede antes de aplicar novamente.');
+  }
   appendEvent('HOST_NETWORK_STATIC_CONFIGURED', { ...payload, result });
   return {
     ...result,
+    dnsState: network.dnsState,
     reloadRequired: true,
     reloadHint: 'Reinicie TronSoftOS e containers TronFire para carregar os envs atualizados.',
     stderr: out.stderr
@@ -3807,28 +3847,57 @@ async function hostNetworkVip(body) {
   };
 }
 
+let pairingImportInProgress = false;
 async function importPairingFile(body) {
+  if (pairingImportInProgress) throw new Error('Uma importacao de pareamento ja esta em andamento.');
+  pairingImportInProgress = true;
+  try { return await completePairingImport(body); }
+  finally { pairingImportInProgress = false; }
+}
+
+async function completePairingImport(body) {
+  const identity = nodeIdentity();
+  if (identity.deploymentMode !== 'ha' || !['standby', 'recovery'].includes(identity.nodeRole) || clusterGuard().canServeProduction) {
+    throw new Error('Importe o pareamento somente em standby ou recovery que nao esteja atendendo producao.');
+  }
   const rawContent = typeof body.content === 'string' ? body.content : '';
   if (!rawContent.trim()) throw new Error('arquivo de pareamento vazio');
   if (Buffer.byteLength(rawContent, 'utf8') > 64 * 1024) throw new Error('arquivo de pareamento muito grande');
 
   ensureStateDir();
   const pairing = normalizePairingContent(rawContent);
+  const tronfireSettings = parseEnvFile(path.join(appRoot, 'apps/tronfire/.env'));
+  if ((tronfireSettings.FIREBIRD_EXEC_MODE || 'host') !== 'host') throw new Error('Pareamento automatico requer Firebird no host.');
+  if (tronfireSettings.POSTGRES_PASSWORD && tronfireSettings.POSTGRES_PASSWORD !== pairing.values.POSTGRES_PASSWORD) {
+    throw new Error('Senha PostgreSQL diferente entre os nos. Pareamento nao aplicado; alinhe as credenciais sem reiniciar o banco.');
+  }
   const importPath = path.join(stateDir, `pairing-import-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.env`);
   fs.writeFileSync(importPath, pairing.content, { mode: 0o600 });
 
-  const out = await privilegedRun('/usr/local/sbin/tronsoftos-network', [
-    'apply-pairing',
-    appRoot,
-    importPath
-  ], { timeout: 60_000, maxBuffer: 1024 * 1024 });
+  let out;
+  try {
+    out = await privilegedRun('/usr/local/sbin/tronsoftos-network', ['apply-pairing', appRoot, importPath], { timeout: 60_000, maxBuffer: 1024 * 1024 });
+  } catch {
+    fs.rmSync(importPath, { force: true });
+    throw new Error('Falha ao aplicar os arquivos de pareamento. Confira os eventos e repita a importacao.');
+  }
   const result = parseJsonLines(out.stdout).at(-1) || { ok: true };
 
   process.env.TRONSOFTOS_INTERNAL_TOKEN = pairing.values.TRONSOFTOS_INTERNAL_TOKEN;
   for (const key of ['HA_VIP', 'HA_VIP_CIDR', 'HA_ROUTER_ID', 'HA_AUTH_PASS', 'HA_PRIMARY_HEALTH_URL']) {
     if (pairing.values[key]) process.env[key] = pairing.values[key];
   }
+  let runtime;
+  try {
+    runtime = await activatePairingRuntime({ appRoot, token: pairing.values.TRONSOFTOS_INTERNAL_TOKEN, execMode: 'host', run, env: dockerEnv() });
+  } catch (err) {
+    appendEvent('CLUSTER_PAIRING_VALIDATION_FAILED', { message: err.message });
+    throw err;
+  } finally {
+    fs.rmSync(importPath, { force: true });
+  }
   appendEvent('CLUSTER_PAIRING_IMPORTED', {
+    runtime,
     keys: Object.keys(pairing.values),
     clusterSecrets: result.clusterSecrets || clusterSecretsPath,
     tronfireEnv: result.tronfireEnv || path.join(appRoot, 'apps/tronfire/.env'),
@@ -3851,9 +3920,9 @@ async function importPairingFile(body) {
       troncomandaEnvUpdated: result.troncomandaEnvUpdated === true,
       authorizedKeys: result.authorizedKeys || path.join(appRoot, '.ssh/authorized_keys')
     },
-    reloadRequired: true,
-    reloadHint: 'Reinicie TronSoftOS e TronFire para carregar os segredos importados.',
-    stderr: out.stderr
+    reloadRequired: false,
+    reloadHint: 'Backend e worker recarregados; autenticacao no host validada. Firebird, PostgreSQL e Redis preservados.',
+    runtime
   };
 }
 
@@ -6392,7 +6461,15 @@ async function handleApi(req, reply, url) {
   if (req.method === 'POST' && url.pathname === '/api/maintenance/host/reboot') return json(reply, 202, { ok: true, job: startHostPower('reboot', await readBody(req)) });
   if (req.method === 'POST' && url.pathname === '/api/maintenance/host/poweroff') return json(reply, 202, { ok: true, job: startHostPower('poweroff', await readBody(req)) });
   if (req.method === 'GET' && url.pathname === '/api/cluster/pairing-file') return exportPairingFile(reply);
-  if (req.method === 'POST' && url.pathname === '/api/cluster/pairing-file/import') return json(reply, 200, await importPairingFile(await readBody(req)));
+  if (req.method === 'POST' && url.pathname === '/api/cluster/pairing-file/import') {
+    const session = sessionFromRequest(req);
+    let result;
+    try { result = await importPairingFile(await readBody(req)); }
+    finally {
+      if (session) reply.setHeader('set-cookie', cookieHeader(req, signSession(session), Math.max(0, Math.floor((session.expiresAt - Date.now()) / 1000))));
+    }
+    return json(reply, 200, result);
+  }
   if (req.method === 'GET' && url.pathname === '/api/host/firebird') return json(reply, 200, await hostFirebirdStatus());
   if (req.method === 'POST' && url.pathname === '/api/host/firebird/aliases') return json(reply, 200, await hostFirebirdAliases(req));
   if (req.method === 'POST' && url.pathname === '/api/host/firebird/script') {

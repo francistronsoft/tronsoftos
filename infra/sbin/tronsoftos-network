@@ -387,7 +387,10 @@ apply_static() {
   valid_iface "$iface" || fail "Interface invalida"
   valid_cidr "$address_cidr" || fail "IP/CIDR invalido"
   valid_ipv4 "$gateway" || fail "Gateway invalido"
+  . /usr/local/lib/tronsoftos-network-dns.sh
+  dns="$(normalize_dns "$dns")" || fail "DNS invalido; informe enderecos IP validos"
   [ -n "$dns" ] || fail "DNS nao informado"
+  [[ "$apply_now" =~ ^(true|false)$ ]] || fail "Aplicacao imediata invalida"
   [ -n "$app_dir" ] && sync_ip_envs "$app_dir" "$iface" "$address_cidr" "$gateway" "$dns"
 
   if command -v nmcli >/dev/null 2>&1; then
@@ -401,7 +404,10 @@ apply_static() {
     nmcli connection modify "$connection" \
       ipv4.addresses "$address_cidr" \
       ipv4.gateway "$gateway" \
-      ipv4.dns "$dns" \
+      ipv4.dns "$(dns_family "$dns" 4)" \
+      ipv4.ignore-auto-dns yes \
+      ipv6.dns "$(dns_family "$dns" 6)" \
+      ipv6.ignore-auto-dns yes \
       ipv4.method manual \
       connection.autoconnect yes
 
@@ -426,7 +432,6 @@ apply_static() {
       echo "Address=$address_cidr"
       echo "Gateway=$gateway"
       for dns_server in $dns; do
-        valid_ipv4 "$dns_server" || fail "DNS invalido: $dns_server"
         echo "DNS=$dns_server"
       done
     } > "$network_file"
@@ -732,7 +737,22 @@ firebird_script() {
   printf '{"ok":true,"script":"%s"}\n' "$(json_escape "$script_path")"
 }
 
+network_config_status() {
+  local file=/etc/tronsoftos/tronsoftos.env key value separator=""
+  printf '{'
+  for key in HOST_STATIC_IP_ENABLED HOST_STATIC_IP_INTERFACE HOST_STATIC_IP_ADDRESS_CIDR HOST_STATIC_IP_GATEWAY HOST_STATIC_IP_DNS; do
+    value="$(grep "^$key=" "$file" 2>/dev/null | tail -n1 | cut -d= -f2- || true)"
+    value="${value#\"}"; value="${value%\"}"
+    printf '%s"%s":"%s"' "$separator" "$key" "$(json_escape "$value")"
+    separator=,
+  done
+  printf '}\n'
+}
+
 case "$action" in
+  network-config-status)
+    network_config_status
+    ;;
   apply-static)
     shift
     apply_static "$@"
