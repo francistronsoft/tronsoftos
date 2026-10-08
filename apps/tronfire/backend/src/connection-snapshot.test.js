@@ -1,8 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { connectionSummaryFromSnapshot } from './connection-snapshot.js';
+import { connectionSummaryFromSnapshot, connectionSnapshotMaxAgeMs } from './connection-snapshot.js';
 
 const database = { id: 'db-1', name: 'FARROUPILHA', alias: 'erp_tronsoft' };
+
+test('matches snapshot freshness to the configured worker sampling interval', () => {
+  assert.equal(connectionSnapshotMaxAgeMs(undefined), 330000);
+  assert.equal(connectionSnapshotMaxAgeMs('1'), 90000);
+  assert.equal(connectionSnapshotMaxAgeMs('invalid'), 330000);
+  assert.equal(connectionSnapshotMaxAgeMs('90'), 3630000);
+});
 
 test('uses a recent worker connection snapshot', () => {
   const summary = connectionSummaryFromSnapshot(

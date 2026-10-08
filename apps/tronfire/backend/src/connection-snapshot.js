@@ -1,3 +1,9 @@
+export function connectionSnapshotMaxAgeMs(value) {
+  const parsed = Number(value);
+  const minutes = Number.isFinite(parsed) ? Math.max(1, Math.min(60, Math.round(parsed))) : 5;
+  return minutes * 60000 + 30000;
+}
+
 export function connectionSummaryFromSnapshot(database, snapshot, options = {}) {
   if (!database || !snapshot?.collectedAt) return null;
   const nowMs = options.nowMs ?? Date.now();

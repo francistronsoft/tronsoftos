@@ -47,6 +47,8 @@ const FIREBIRD_QUERY_TIMEOUT_SECONDS = normalizePositiveMinutes(process.env.TRON
 const FIREBIRD_HEALTH_COOLDOWN_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_HEALTH_COOLDOWN_MINUTES, 10, 1, 120);
 const ORPHANED_BACKUP_MIN_AGE_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_BACKUP_ORPHANED_MIN_AGE_MINUTES, 5, 1, 60);
 const FIREBIRD_SESSION_RETENTION_DAYS = 30;
+const FIREBIRD_SESSION_INTERVAL_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_SESSION_INTERVAL_MINUTES, 5, 1, 60);
+let lastSessionCollectionAt = 0;
 const FIREBIRD_UNRESPONSIVE_FAILURE_THRESHOLD = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_UNRESPONSIVE_FAILURES, 5, 1, 10);
 const FIREBIRD_RESTORE_GRACE_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_RESTORE_GRACE_MINUTES, 5, 1, 60);
 const CONFIGURED_RUNNING_BACKUP_TTL_MINUTES = Number(process.env.TRONFIRE_BACKUP_RUNNING_TTL_MINUTES || 60);
@@ -127,9 +129,9 @@ async function localExec(args, timeout = 60_000) {
   return { stdout, stderr };
 }
 
-async function dockerExec(args, timeout = 60_000) {
+async function dockerExec(args, timeout = 60_000, operationClass = 'manual') {
   if (FIREBIRD_EXEC_MODE === 'host') {
-    return runHostFirebirdShell(args, timeout);
+    return runHostFirebirdShell(args, timeout, operationClass);
   }
   if (FIREBIRD_EXEC_MODE === 'direct') {
     const [command, ...commandArgs] = args;
@@ -206,14 +208,14 @@ function postJsonLong(urlString, body, headers = {}, timeoutMs = 60_000) {
   });
 }
 
-async function runHostFirebirdShell(args, timeoutMs = 60_000) {
+async function runHostFirebirdShell(args, timeoutMs = 60_000, operationClass = 'manual') {
   const token = internalTokenValue();
   if (!token) throw new Error('TRONSOFTOS_INTERNAL_TOKEN nao configurado');
   const response = await postJsonLong(
     `${TRONSOFTOS_API_URL}/api/host/firebird/script`,
     {
       script: `# TronFire host Firebird script\n${shellCommandFromArgs(args)}\n`,
-      timeoutMs
+      timeoutMs, operationClass, origin: 'worker'
     },
     {
       'content-type': 'application/json',
@@ -222,14 +224,21 @@ async function runHostFirebirdShell(args, timeoutMs = 60_000) {
     timeoutMs + 120_000
   );
   const payload = response.payload || {};
+  if (Number(payload.monitorSlowFailures) >= 2) {
+    await createAlertOnce('FIREBIRD_MONITOR_SLOW', 'WARNING', 'Duas sondagens Firebird consecutivas excederam o limite de duracao. Verifique o ambiente sem disparar novas consultas.');
+  } else if (payload.monitorSlowFailures === 0 && payload.ok !== false) {
+    await resolveActiveAlertsByType('FIREBIRD_MONITOR_SLOW');
+  }
   if (!response.ok) {
     const error = new Error(payload.error || `TronSoftOS HTTP ${response.status}`);
     error.payload = payload;
+    error.deferred = payload.deferred === true;
     throw error;
   }
   if (payload.ok === false) {
     const error = new Error(payload.error || 'Script Firebird falhou no host');
     error.payload = payload;
+    error.deferred = payload.deferred === true;
     error.stdout = payload.stdout || '';
     error.stderr = payload.stderr || '';
     throw error;
@@ -367,12 +376,14 @@ async function queryFirebirdSessions(db) {
     `-password ${shQuote(FIREBIRD_PASSWORD)}`,
     shQuote(firebirdDbConnect(db.filePath))
   ].join(' ');
-  const { stdout } = await dockerExec(['sh', '-lc', cmd], (FIREBIRD_QUERY_TIMEOUT_SECONDS + 15) * 1000);
+  const { stdout } = await dockerExec(['sh', '-lc', cmd], (FIREBIRD_QUERY_TIMEOUT_SECONDS + 15) * 1000, 'monitor');
   return parseFirebirdSessions(stdout);
 }
 
 async function collectFirebirdSessionHistory() {
   if (!isServingProductionNode() || sessionCollectionRunning) return;
+  if (Date.now() - lastSessionCollectionAt < FIREBIRD_SESSION_INTERVAL_MINUTES * 60000) return;
+  lastSessionCollectionAt = Date.now();
   sessionCollectionRunning = true;
   let db = null;
   try {
@@ -453,6 +464,7 @@ async function collectFirebirdSessionHistory() {
     firebirdSessionFailureCounts.delete(db.id);
     await resolveActiveAlertsByType(`FIREBIRD_UNRESPONSIVE_${db.alias}`);
   } catch (err) {
+    if (err.deferred) return;
     console.error('[worker] firebird session history error', err.message);
     if (db?.id && db?.alias) {
       const failures = (firebirdSessionFailureCounts.get(db.id) || 0) + 1;
@@ -798,7 +810,7 @@ async function withDatabaseRoutineLock(db, routine, fn) {
     await markFirebirdSuccess(db);
     return result;
   } catch (err) {
-    await markFirebirdFailure(db, err, routine);
+    if (!err.deferred) await markFirebirdFailure(db, err, routine);
     throw err;
   } finally {
     clearDatabaseRoutineLock(db, routine);
@@ -1429,7 +1441,7 @@ async function validateBackupRestore(db, backupPath, logPath, stamp) {
     'echo "[validacao] backup aprovado" >> "$log"'
   ].join('; ');
   try {
-    await dockerExec(['sh', '-lc', cmd], BACKUP_VALIDATION_TIMEOUT_MS);
+    await dockerExec(['sh', '-lc', cmd], BACKUP_VALIDATION_TIMEOUT_MS, 'validation');
   } catch (err) {
     const message = commandTimeoutMessage(err, 'validacao do backup Firebird', BACKUP_VALIDATION_TIMEOUT_MINUTES);
     try {
@@ -1516,7 +1528,7 @@ async function runBackup(db, reason = 'AUTO') {
       `&& gzip -f ${shQuote(rawBackupPath)}`
     ].join(' ');
     try {
-      await dockerExec(['sh', '-lc', cmd], BACKUP_TIMEOUT_MS + 60_000);
+      await dockerExec(['sh', '-lc', cmd], BACKUP_TIMEOUT_MS + 60_000, 'backup');
     } catch (err) {
       throw new Error(commandTimeoutMessage(err, 'geracao do backup Firebird', BACKUP_TIMEOUT_MINUTES));
     }
@@ -1706,7 +1718,7 @@ async function runFirebirdSweep(db) {
   ].join('\n');
 
   try {
-    const result = await withDatabaseRoutineLock(db, 'weekly-sweep', () => dockerExec(['sh', '-lc', cmd], FIREBIRD_SWEEP_TIMEOUT_MS + 60_000));
+    const result = await withDatabaseRoutineLock(db, 'weekly-sweep', () => dockerExec(['sh', '-lc', cmd], FIREBIRD_SWEEP_TIMEOUT_MS + 60_000, 'sweep'));
     if (!result) return { status: 'postponed', reason: 'rotina Firebird ja em andamento' };
     await resolveActiveAlertsByType(`FIREBIRD_SWEEP_FAILED_${db.alias}`);
     console.log(`[worker] sweep OK: ${db.alias}`);
@@ -1840,12 +1852,13 @@ async function checkDatabases() {
         `printf 'select 1 from rdb$database;\\nquit;\\n' | run_with_timeout ${shQuote(`${FIREBIRD_BIN}/isql`)} -user SYSDBA -password ${shQuote(FIREBIRD_PASSWORD)} "$db" > "$log" 2>&1`,
         `run_with_timeout ${shQuote(`${FIREBIRD_BIN}/gstat`)} -h "$db_file" >> "$log" 2>&1`
       ].join('\n');
-      const checkResult = await withDatabaseRoutineLock(db, 'database-check', () => dockerExec(['sh','-lc', cmd], (FIREBIRD_QUERY_TIMEOUT_SECONDS * 2 + 20) * 1000));
+      const checkResult = await withDatabaseRoutineLock(db, 'database-check', () => dockerExec(['sh','-lc', cmd], (FIREBIRD_QUERY_TIMEOUT_SECONDS * 2 + 20) * 1000, 'monitor'));
       if (!checkResult) continue;
       await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ONLINE', lastCheckAt: new Date() } });
       await prisma.alert.updateMany({ where: { type: `DATABASE_INTEGRITY_ERROR_${db.alias}`, resolved: false }, data: { resolved: true } });
       await prisma.alert.updateMany({ where: { type: `DATABASE_HEALTH_ERROR_${db.alias}`, resolved: false }, data: { resolved: true } });
     } catch (err) {
+      if (err.deferred) continue;
       await prisma.managedDatabase.update({ where: { id: db.id }, data: { status: 'ERROR', lastCheckAt: new Date() } });
       await createAlertOnce(`DATABASE_HEALTH_ERROR_${db.alias}`, 'CRITICAL', `Banco offline ou sem resposta no check automatico: ${db.name}`);
     }
@@ -1858,7 +1871,7 @@ async function checkTools() {
   firebirdToolCheckPromise = (async () => {
     const cmd = `for bin in gbak gfix gstat isql; do test -x "${FIREBIRD_BIN}/$bin" || printf '%s\\n' "$bin"; done`;
     try {
-      const { stdout } = await dockerExec(['sh', '-lc', cmd]);
+      const { stdout } = await dockerExec(['sh', '-lc', cmd], 10000, 'monitor');
       const missing = String(stdout || '').split(/\r?\n/).map(value => value.trim()).filter(Boolean);
       if (missing.length) {
         await createAlertOnce('FIREBIRD_TOOL_MISSING', 'CRITICAL', `Utilitarios Firebird ausentes: ${missing.join(', ')}`);
@@ -1866,7 +1879,8 @@ async function checkTools() {
       }
       firebirdToolsCheckedAt = Date.now();
       await resolveActiveAlertsByType('FIREBIRD_TOOL_MISSING');
-    } catch {
+    } catch (err) {
+      if (err.deferred) return;
       await createAlertOnce('FIREBIRD_TOOL_MISSING', 'CRITICAL', 'Um ou mais utilitarios Firebird estao ausentes');
     }
   })().finally(() => {

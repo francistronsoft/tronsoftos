@@ -10,6 +10,7 @@ import dns from 'node:dns/promises';
 import { fileURLToPath } from 'node:url';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import { createFirebirdMonitorGate, firebirdScriptClass } from './firebird-monitor-gate.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -3553,36 +3554,59 @@ async function hostFirebirdAliases(req) {
   }
 }
 
+let firebirdMonitorSlowAlert = null;
+const firebirdMonitorGate = createFirebirdMonitorGate({ emit: (type, details) => {
+  appendEvent(type, details);
+  if (type === 'FIREBIRD_MONITOR_COMPLETED') {
+    firebirdMonitorSlowAlert = details.slowFailures >= 2 ? {
+      code: 'FIREBIRD_MONITOR_SLOW', severity: 'warning', source: 'TronSoftOS',
+      message: 'Duas sondagens Firebird consecutivas excederam o limite de duracao', details
+    } : null;
+  }
+} });
+
 async function hostFirebirdScript(req) {
   assertInternalToken(req);
   const body = await readBody(req);
   const script = String(body.script || '');
-  const timeoutMs = Math.min(Math.max(Number(body.timeoutMs || 14_400_000), 60_000), 14_400_000);
+  const operationClass = firebirdScriptClass(body.operationClass || 'manual');
+  const requestedTimeout = Number(body.timeoutMs || 14_400_000);
+  if (!Number.isFinite(requestedTimeout)) throw new Error('Timeout Firebird invalido');
+  const timeoutMs = operationClass === 'monitor'
+    ? Math.min(Math.max(requestedTimeout, 5000), 90000)
+    : Math.min(Math.max(requestedTimeout, 60000), 14_400_000);
+  const origin = String(body.origin || 'legacy').replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 64);
   if (!script.startsWith('# TronFire host Firebird script\n')) throw new Error('Script Firebird invalido');
   if (script.length > 1024 * 512) throw new Error('Script Firebird muito grande');
-  ensureStateDir();
-  const tmpPath = `/tmp/tronsoftos-firebird-${Date.now()}-${Math.random().toString(16).slice(2)}.sh`;
-  fs.writeFileSync(tmpPath, script, { mode: 0o700 });
-  try {
-    let out;
+  return firebirdMonitorGate({ script, origin, operationClass }, async () => {
+    ensureStateDir();
+    const tmpPath = `/tmp/tronsoftos-firebird-${Date.now()}-${Math.random().toString(16).slice(2)}.sh`;
+    fs.writeFileSync(tmpPath, script, { mode: 0o700 });
     try {
-      out = await privilegedRun('/usr/local/sbin/tronsoftos-network', ['firebird-script', tmpPath], {
-        timeout: timeoutMs,
-        maxBuffer: 1024 * 1024 * 10,
-        env: { ...process.env, TERM: 'dumb' }
-      });
-    } catch (err) {
-      const payload = commandErrorPayload(err);
-      appendEvent('FIREBIRD_HOST_SCRIPT_FAILED', { script: path.basename(tmpPath), error: payload.error, exitCode: payload.exitCode, signal: payload.signal });
-      return payload;
+      let out;
+      try {
+        out = await privilegedRun('/usr/local/sbin/tronsoftos-network', ['firebird-script', tmpPath, operationClass, String(Math.ceil(timeoutMs / 1000))], {
+          timeout: operationClass === 'monitor' ? timeoutMs + 7000 : timeoutMs,
+          maxBuffer: 1024 * 1024 * 10,
+          env: { ...process.env, TERM: 'dumb' }
+        });
+      } catch (err) {
+        const payload = commandErrorPayload(err);
+        if (operationClass === 'monitor' && Number(payload.exitCode) === 75) {
+          appendEvent('FIREBIRD_MONITOR_DEFERRED', { origin, operationClass, waitMs: 2000 });
+          return { ok: false, deferred: true, retryAfterMs: 5000, error: 'Monitoramento Firebird ocupado em outro processo' };
+        }
+        appendEvent('FIREBIRD_HOST_SCRIPT_FAILED', { script: path.basename(tmpPath), origin, operationClass, error: operationClass === 'monitor' ? 'Sonda Firebird falhou' : payload.error, exitCode: payload.exitCode, signal: payload.signal });
+        return payload;
+      }
+      const result = parseJsonLinesBestEffort(out.stdout).at(-1) || { ok: true };
+      const stderr = stripTerminalNoise(out.stderr);
+      appendEvent('FIREBIRD_HOST_SCRIPT_EXECUTED', { script: path.basename(tmpPath), origin, operationClass, ...(operationClass !== 'monitor' && stderr ? { stderr } : {}) });
+      return { ...result, stdout: out.stdout, stderr };
+    } finally {
+      fs.rmSync(tmpPath, { force: true });
     }
-    const result = parseJsonLinesBestEffort(out.stdout).at(-1) || { ok: true };
-    const stderr = stripTerminalNoise(out.stderr);
-    appendEvent('FIREBIRD_HOST_SCRIPT_EXECUTED', { script: path.basename(tmpPath), ...(stderr ? { stderr } : {}) });
-    return { ...result, stdout: out.stdout, stderr };
-  } finally {
-    fs.rmSync(tmpPath, { force: true });
-  }
+  });
 }
 
 async function hostNetworkStatus() {
@@ -3959,6 +3983,9 @@ async function dashboard(options = {}) {
   else if (backups.quota?.percentUsed >= 90) alerts.push({ severity: 'warning', message: `Google Drive com ${backups.quota.percentUsed}% de uso` });
   if (backups.quota && backups.quota.ok === false) alerts.push({ severity: 'warning', message: `Falha ao consultar espaco do Google Drive: ${backups.quota.error}` });
   alerts.push(...await tronfireAlerts());
+  if (firebirdMonitorSlowAlert && !alerts.some(alert => alert.code === 'FIREBIRD_MONITOR_SLOW')) {
+    alerts.push(firebirdMonitorSlowAlert);
+  }
   await notifyCriticalAlerts(alerts);
   return {
     generatedAt: new Date().toISOString(),

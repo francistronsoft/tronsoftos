@@ -26,6 +26,10 @@ Requisitos:
 
 ## P0 - exclusao global das consultas de monitoramento Firebird
 
+Status: implementado na versao `0.1.132`. Testes isolados no Kabecos;
+ativacao nos servicos de producao e observacao operacional ainda pendentes.
+Detalhes em `monitoramento-firebird-global.md`.
+
 Problema observado no Ilha Vix:
 
 - o single-flight atual evita sobreposicao somente dentro de cada processo;

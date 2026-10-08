@@ -14,7 +14,7 @@ import { prisma } from './prisma.js';
 import { createSession, makeToken, requireAuth, requireAdmin, requireOperator, verifyPassword, hashPassword, sha256 } from './security.js';
 import { audit } from './audit.js';
 import { AsyncProbeCache } from './async-probe-cache.js';
-import { connectionSummaryFromSnapshot } from './connection-snapshot.js';
+import { connectionSummaryFromSnapshot, connectionSnapshotMaxAgeMs } from './connection-snapshot.js';
 import { databaseCompanyIdentity, databaseDiagnostics, runPreflight } from './preflight.js';
 import { docker, dockerExec } from './shell.js';
 import {
@@ -285,18 +285,26 @@ async function tronsoftosRequest(pathname, options = {}) {
   });
 }
 
-async function runHostFirebirdScript(script, timeoutMs = 1000 * 60 * 60 * 4) {
-  return tronsoftosRequest('/api/host/firebird/script', {
+async function runHostFirebirdScript(script, timeoutMs = 1000 * 60 * 60 * 4, operationClass = 'manual') {
+  const result = await tronsoftosRequest('/api/host/firebird/script', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ script, timeoutMs }),
+    body: JSON.stringify({ script, timeoutMs, operationClass, origin: 'backend' }),
     timeoutMs: timeoutMs + 60_000
   });
+  if (operationClass === 'monitor' && result.ok === false) {
+    const error = new Error(result.error || 'Sonda Firebird falhou');
+    error.deferred = result.deferred === true;
+    error.statusCode = 503;
+    error.payload = result;
+    throw error;
+  }
+  return result;
 }
 
-async function runFirebirdShellScript(cmd, timeoutMs = 1000 * 60 * 60 * 4) {
+async function runFirebirdShellScript(cmd, timeoutMs = 1000 * 60 * 60 * 4, operationClass = 'manual') {
   if (firebirdExecMode === 'host' || firebirdExecMode === 'direct') {
-    return runHostFirebirdScript(`# TronFire host Firebird script\n${cmd}\n`, timeoutMs);
+    return runHostFirebirdScript(`# TronFire host Firebird script\n${cmd}\n`, timeoutMs, operationClass);
   }
   return dockerExec(['sh', '-lc', cmd], { timeout: timeoutMs });
 }
@@ -582,7 +590,7 @@ async function collectFirebirdAttachmentsForDatabase(db) {
     `-password ${shQuote(password)}`,
     shQuote(connect)
   ].join(' ');
-  const out = await runFirebirdShellScript(cmd, (firebirdQueryTimeoutSeconds + 15) * 1000);
+  const out = await runFirebirdShellScript(cmd, (firebirdQueryTimeoutSeconds + 15) * 1000, 'monitor');
   const attachments = parseFirebirdAttachments(out.stdout);
   return {
     databaseId: db.id,
@@ -785,7 +793,7 @@ async function collectIndexHealthForDatabase(db) {
     shQuote(connect)
   ].join(' ');
   const cmd = `${isqlCommand} && run_with_timeout ${shQuote(`${firebirdBin}/gstat`)} -h ${shQuote(databasePath)}`;
-  const out = await runFirebirdShellScript(cmd, (firebirdQueryTimeoutSeconds * 2 + 15) * 1000);
+  const out = await runFirebirdShellScript(cmd, (firebirdQueryTimeoutSeconds * 2 + 15) * 1000, 'monitor');
   const summary = parseIndexHealth(out.stdout);
   const transactionHealth = parseGstatHeader(out.stdout);
   const classification = classifyIndexHealth(summary);
@@ -1058,7 +1066,9 @@ async function recentFirebirdConnectionSummary(db) {
     where: { databaseId: db.id },
     orderBy: { collectedAt: 'desc' }
   });
-  return connectionSummaryFromSnapshot(db, snapshot);
+  return connectionSummaryFromSnapshot(db, snapshot, {
+    maxAgeMs: connectionSnapshotMaxAgeMs(process.env.TRONFIRE_FIREBIRD_SESSION_INTERVAL_MINUTES)
+  });
 }
 
 async function firebirdConnectionHistory(db, query = {}) {

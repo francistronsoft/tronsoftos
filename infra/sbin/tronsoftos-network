@@ -679,12 +679,24 @@ drive_samba_disable() {
 
 firebird_script() {
   local script_path="${1:-}"
+  local operation_class="${2:-manual}"
+  local timeout_seconds="${3:-90}"
   local child_pid=""
   local child_group=false
   local status=0
   [[ "$script_path" =~ ^/tmp/tronsoftos-firebird-[A-Za-z0-9._-]+\.sh$ ]] || fail "Script Firebird invalido"
   [ -f "$script_path" ] || fail "Script Firebird nao encontrado"
   grep -q '^# TronFire host Firebird script$' "$script_path" || fail "Script Firebird sem assinatura esperada"
+  [[ "$operation_class" =~ ^(monitor|backup|validation|sweep|manual)$ ]] || fail "Classe Firebird invalida"
+  if [ "$operation_class" = monitor ]; then
+    [[ "$timeout_seconds" =~ ^[0-9]+$ ]] && [ "$timeout_seconds" -ge 1 ] && [ "$timeout_seconds" -le 90 ] || fail "Timeout monitor invalido"
+    command -v flock >/dev/null && command -v timeout >/dev/null && command -v setsid >/dev/null || fail "Monitoramento requer flock, timeout e setsid"
+    # The descriptor is inherited by the whole probe, including its timeout supervisor.
+    mkdir -p /run/tronsoftos-firebird-monitor
+    chmod 0700 /run/tronsoftos-firebird-monitor
+    exec 9>/run/tronsoftos-firebird-monitor/probe.lock
+    flock -E 75 -w 2 9 || exit "$?"
+  fi
   chmod 0700 "$script_path"
   cleanup_firebird_script() {
     [ -n "$child_pid" ] || return 0
@@ -703,7 +715,11 @@ firebird_script() {
   }
   trap cleanup_firebird_script INT TERM EXIT
   if command -v setsid >/dev/null 2>&1; then
-    TERM=dumb FIREBIRD=/usr/local/firebird LD_LIBRARY_PATH="/usr/local/firebird/lib:${LD_LIBRARY_PATH:-}" setsid bash "$script_path" &
+    if [ "$operation_class" = monitor ]; then
+      TERM=dumb FIREBIRD=/usr/local/firebird LD_LIBRARY_PATH="/usr/local/firebird/lib:${LD_LIBRARY_PATH:-}" setsid timeout --signal=TERM --kill-after=2s "${timeout_seconds}s" bash "$script_path" &
+    else
+      TERM=dumb FIREBIRD=/usr/local/firebird LD_LIBRARY_PATH="/usr/local/firebird/lib:${LD_LIBRARY_PATH:-}" setsid bash "$script_path" &
+    fi
     child_group=true
   else
     TERM=dumb FIREBIRD=/usr/local/firebird LD_LIBRARY_PATH="/usr/local/firebird/lib:${LD_LIBRARY_PATH:-}" bash "$script_path" &
