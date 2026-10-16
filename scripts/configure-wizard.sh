@@ -751,6 +751,8 @@ TSRETAGUARDA_API_PORT=9001
 TSRETAGUARDA_WEB_PORT=8010
 TSGERENTE_API_PORT=9002
 TSGERENTE_WEB_PORT=8011
+KDS_WEB_PORT=8012
+KDS_WEB_IMAGE_TAG=:main
 TRONCOMANDA_LAN_HOST=${HA_VIP:-$SERVER_IP}
 TRONCOMANDA_PUBLIC_URL=http://$SERVER_IP:8000/qr/
 
@@ -843,7 +845,8 @@ if [ "$FIREBIRD_MODE" = "host" ]; then
         "tsretaguarda-api",
         "tsretaguarda-web",
         "tsgerente-api",
-        "tsgerente-web"
+        "tsgerente-web",
+        "kds-web"
       ],
       "haAware": false
     }
@@ -889,7 +892,8 @@ else
         "tsretaguarda-api",
         "tsretaguarda-web",
         "tsgerente-api",
-        "tsgerente-web"
+        "tsgerente-web",
+        "kds-web"
       ],
       "haAware": false
     }

@@ -39,7 +39,8 @@
         "tsretaguarda-api",
         "tsretaguarda-web",
         "tsgerente-api",
-        "tsgerente-web"
+        "tsgerente-web",
+        "kds-web"
       ],
       "haAware": false
     }

@@ -2270,7 +2270,10 @@ async function writeDriveSettings(body) {
 }
 
 function managedConfig() {
-  return readJson(configPath, readJson(fallbackConfigPath, { apps: [] }));
+  const config = readJson(configPath, readJson(fallbackConfigPath, { apps: [] }));
+  return { ...config, apps: (config.apps || []).map(app => app.name === 'troncomanda'
+    ? { ...app, containers: [...new Set([...(app.containers || []), 'kds-web'])] }
+    : app) };
 }
 
 function publicApp(app) {
@@ -4191,7 +4194,8 @@ function troncomandaImageTagEnv(branch = 'main') {
     RETAGUARDA_API_IMAGE_TAG: tag,
     RETAGUARDA_WEB_IMAGE_TAG: tag,
     TSGERENTE_API_IMAGE_TAG: tag,
-    TSGERENTE_WEB_IMAGE_TAG: tag
+    TSGERENTE_WEB_IMAGE_TAG: tag,
+    KDS_WEB_IMAGE_TAG: tag
   };
 }
 
@@ -4234,7 +4238,8 @@ function appActionCommand(app, action) {
 const TRONCOMANDA_OPTIONAL_SERVICES = {
   cardapio: ['cardapio-lite'],
   retaguarda: ['tsretaguarda-api', 'tsretaguarda-web'],
-  gerente: ['tsgerente-api', 'tsgerente-web']
+  gerente: ['tsgerente-api', 'tsgerente-web'],
+  kds: ['kds-web']
 };
 
 function troncomandaEnvPath() {
@@ -4267,6 +4272,7 @@ async function troncomandaSettings() {
     'tsretaguarda-web',
     'tsgerente-api',
     'tsgerente-web',
+    'kds-web',
     'troncomanda_qr'
   ]);
   return {
@@ -4274,6 +4280,7 @@ async function troncomandaSettings() {
     cardapioLiteEnabled: profiles.has('cardapio'),
     retaguardaWebEnabled: profiles.has('retaguarda'),
     gerenteWebEnabled: profiles.has('gerente'),
+    kdsWebEnabled: profiles.has('kds'),
     composeProfiles: Array.from(profiles),
     envPath: troncomandaEnvPath(),
     qrEnvPath,
@@ -4299,12 +4306,14 @@ async function writeTroncomandaSettings(body = {}) {
     tableRequired: body.tableRequired !== undefined ? !!body.tableRequired : current.tableRequired,
     cardapioLiteEnabled: body.cardapioLiteEnabled !== undefined ? !!body.cardapioLiteEnabled : current.cardapioLiteEnabled,
     retaguardaWebEnabled: body.retaguardaWebEnabled !== undefined ? !!body.retaguardaWebEnabled : current.retaguardaWebEnabled,
-    gerenteWebEnabled: body.gerenteWebEnabled !== undefined ? !!body.gerenteWebEnabled : current.gerenteWebEnabled
+    gerenteWebEnabled: body.gerenteWebEnabled !== undefined ? !!body.gerenteWebEnabled : current.gerenteWebEnabled,
+    kdsWebEnabled: body.kdsWebEnabled !== undefined ? !!body.kdsWebEnabled : current.kdsWebEnabled
   };
   const profiles = [];
   if (next.cardapioLiteEnabled) profiles.push('cardapio');
   if (next.retaguardaWebEnabled) profiles.push('retaguarda');
   if (next.gerenteWebEnabled) profiles.push('gerente');
+  if (next.kdsWebEnabled) profiles.push('kds');
 
   const envPath = troncomandaEnvPath();
   const env = parseEnvFile(envPath);
@@ -4318,12 +4327,14 @@ async function writeTroncomandaSettings(body = {}) {
   const enabledServices = [
     ...(next.cardapioLiteEnabled ? TRONCOMANDA_OPTIONAL_SERVICES.cardapio : []),
     ...(next.retaguardaWebEnabled ? TRONCOMANDA_OPTIONAL_SERVICES.retaguarda : []),
-    ...(next.gerenteWebEnabled ? TRONCOMANDA_OPTIONAL_SERVICES.gerente : [])
+    ...(next.gerenteWebEnabled ? TRONCOMANDA_OPTIONAL_SERVICES.gerente : []),
+    ...(next.kdsWebEnabled ? TRONCOMANDA_OPTIONAL_SERVICES.kds : [])
   ];
   const disabledServices = [
     ...(next.cardapioLiteEnabled ? [] : TRONCOMANDA_OPTIONAL_SERVICES.cardapio),
     ...(next.retaguardaWebEnabled ? [] : TRONCOMANDA_OPTIONAL_SERVICES.retaguarda),
-    ...(next.gerenteWebEnabled ? [] : TRONCOMANDA_OPTIONAL_SERVICES.gerente)
+    ...(next.gerenteWebEnabled ? [] : TRONCOMANDA_OPTIONAL_SERVICES.gerente),
+    ...(next.kdsWebEnabled ? [] : TRONCOMANDA_OPTIONAL_SERVICES.kds)
   ];
   const outputs = [];
   if (enabledServices.length) {

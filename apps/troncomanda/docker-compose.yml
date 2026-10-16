@@ -122,6 +122,22 @@ services:
     depends_on:
       - tsgerente-api
 
+  kds-web:
+    profiles:
+      - kds
+    image: ghcr.io/tronsoft-solucoes/kds-web${KDS_WEB_IMAGE_TAG:-:main}
+    container_name: kds-web
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      - "0.0.0.0:${KDS_WEB_PORT:-8012}:8012"
+    environment:
+      TZ: ${TZ:-America/Sao_Paulo}
+
 networks:
   default:
     name: troncomanda_net

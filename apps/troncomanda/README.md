@@ -10,6 +10,18 @@ Servicos:
 - `troncomanda_cardapio_lite`: cardapio lite interno.
 - `tsretaguarda-api`: API da Retaguarda, porta padrao `9001`.
 - `tsretaguarda-web`: frontend da Retaguarda, porta padrao `8010`.
+- `kds-web`: KDS Web, porta padrao `8012`, perfil opcional `kds`.
+
+O KDS pode ser habilitado em TronComanda > Ajustes dos containers > KDS Web.
+Nas instalacoes existentes ele permanece desligado ate essa ativacao. A porta
+do host pode ser personalizada com `KDS_WEB_PORT`; a imagem acompanha a branch
+`main`/`dev` escolhida nas acoes de instalacao/atualizacao do TronComanda.
+O arquivo env/kds-web.env do Compose de origem informa somente a tag da imagem;
+na adaptacao essa tag fica em KDS_WEB_IMAGE_TAG no .env do stack.
+
+Para acesso externo, a origem no painel Cloudflare pode usar
+`http://kds-web:8012`, na rede `troncomanda_net` ja gerenciada pelo TronSoftOS.
+Nenhuma regra remota de hostname ou caminho e alterada automaticamente.
 
 Quando o stack e instalado ou atualizado pelo painel do TronSoftOS, o container
 `tronsoftos_cloudflared` e conectado automaticamente a rede `troncomanda_net`.

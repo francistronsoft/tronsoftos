@@ -2974,7 +2974,8 @@ function TroncomandaSettings() {
     tableRequired: settings.tableRequired || false,
     cardapioLiteEnabled: settings.cardapioLiteEnabled || false,
     retaguardaWebEnabled: settings.retaguardaWebEnabled || false,
-    gerenteWebEnabled: settings.gerenteWebEnabled || false
+    gerenteWebEnabled: settings.gerenteWebEnabled || false,
+    kdsWebEnabled: settings.kdsWebEnabled || false
   };
   const mutation = useMutation({
     mutationFn: payload => fetch('/api/troncomanda/settings', {
@@ -2990,7 +2991,8 @@ function TroncomandaSettings() {
         tableRequired: data.tableRequired,
         cardapioLiteEnabled: data.cardapioLiteEnabled,
         retaguardaWebEnabled: data.retaguardaWebEnabled,
-        gerenteWebEnabled: data.gerenteWebEnabled
+        gerenteWebEnabled: data.gerenteWebEnabled,
+        kdsWebEnabled: data.kdsWebEnabled
       });
       queryClient.invalidateQueries({ queryKey: ['troncomanda-settings'] });
       queryClient.invalidateQueries({ queryKey: ['apps'] });
@@ -3058,6 +3060,13 @@ function TroncomandaSettings() {
             onChange={value => setValue('gerenteWebEnabled', value)}
             disabled={busy}
           />
+          <ToggleSwitch
+            label="KDS Web"
+            icon={Utensils}
+            checked={values.kdsWebEnabled}
+            onChange={value => setValue('kdsWebEnabled', value)}
+            disabled={busy}
+          />
 
           <div className="flex flex-wrap items-center gap-3 pt-2">
             <button disabled={busy} className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
@@ -3091,6 +3100,7 @@ function TroncomandaSettings() {
             ['Retaguarda Web', containerStatus('tsretaguarda-web')],
             ['Gerente API', containerStatus('tsgerente-api')],
             ['Gerente Web', containerStatus('tsgerente-web')],
+            ['KDS Web', containerStatus('kds-web')],
             ['QR', containerStatus('troncomanda_qr')]
           ].map(([label, value]) => {
             const containerName = {
@@ -3099,6 +3109,7 @@ function TroncomandaSettings() {
               'Retaguarda Web': 'tsretaguarda-web',
               'Gerente API': 'tsgerente-api',
               'Gerente Web': 'tsgerente-web',
+              'KDS Web': 'kds-web',
               QR: 'troncomanda_qr'
             }[label];
             return (
