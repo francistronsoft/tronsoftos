@@ -14,6 +14,7 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 APP_DIR="${TRONSOFTOS_APP_DIR:-$SCRIPT_DIR}"
+. "$SCRIPT_DIR/scripts/offline-support.sh"
 USER_NAME="${TRONSOFTOS_USER:-tronsoftos}"
 GROUP_NAME="${TRONSOFTOS_GROUP:-tronsoftos}"
 TECHNICIAN_USER="${TRONSOFTOS_TECHNICIAN_USER:-tronsoft}"
@@ -24,7 +25,7 @@ prepare_frontend() {
     return 0
   fi
 
-  if [ "${TRONSOFTOS_SKIP_FRONTEND_BUILD:-false}" = "true" ]; then
+  if [ "${TRONSOFTOS_OFFLINE:-false}" = true ] || [ "${TRONSOFTOS_SKIP_FRONTEND_BUILD:-false}" = "true" ]; then
     if [ -f "$APP_DIR/frontend/dist/index.html" ]; then
       echo "Build do frontend pulado; usando frontend/dist existente."
       return 0
@@ -79,6 +80,10 @@ install_docker() {
     echo "Docker Compose ja instalado."
     return
   fi
+  if [ "${TRONSOFTOS_OFFLINE:-false}" = true ]; then
+    echo "Docker/Compose devem estar instalados pelo pacote offline." >&2
+    return 2
+  fi
 
   echo "Removendo pacotes Docker conflitantes, se existirem..."
   apt_get remove -y docker.io docker-doc docker-compose podman-docker containerd runc docker-buildx docker-buildx-plugin 2>/dev/null || true
@@ -110,6 +115,7 @@ install_docker() {
 }
 
 apt_get() {
+  if [ "${TRONSOFTOS_OFFLINE:-false}" = true ]; then offline_apt_get "$@"; return; fi
   local attempt
   local max_attempts="${APT_LOCK_RETRY_ATTEMPTS:-36}"
   local delay_seconds="${APT_LOCK_RETRY_DELAY:-10}"
@@ -317,7 +323,9 @@ fi
 
 echo "Instalando pacotes base..."
 apt_get update
-apt_get install -y ca-certificates curl git gnupg openssl rsync openssh-client openssh-server keepalived rclone nodejs npm sudo
+base_packages=(ca-certificates curl git gnupg openssl rsync openssh-client openssh-server keepalived rclone sudo)
+if [ "${TRONSOFTOS_OFFLINE:-false}" != true ]; then base_packages+=(nodejs npm); fi
+apt_get install -y "${base_packages[@]}"
 apt_get install -y samba samba-common-bin || echo "Aviso: samba nao foi instalado; compartilhamento via rede ficara indisponivel ate instalar o pacote samba." >&2
 install_docker
 configure_time_sync
@@ -495,8 +503,13 @@ systemctl enable --now tronsoftos-rclone-backup.timer
 
 echo "Subindo TronFire e aplicando migrations..."
 cd "$APP_DIR/apps/tronfire"
+compose_up_flags=(--build)
+if [ "${TRONSOFTOS_OFFLINE:-false}" = true ]; then
+  [ "$tronfire_firebird_exec_mode" = host ] || { echo "ISO offline requer Firebird no host." >&2; exit 2; }
+  compose_up_flags=(--no-build --pull never)
+fi
 if [ "$tronfire_firebird_exec_mode" = "host" ]; then
-  run_with_retry "Subindo TronFire" docker compose -f docker-compose.yml -f docker-compose.host-firebird.yml up -d --build
+  run_with_retry "Subindo TronFire" docker compose -f docker-compose.yml -f docker-compose.host-firebird.yml up -d "${compose_up_flags[@]}"
   docker compose -f docker-compose.yml -f docker-compose.host-firebird.yml exec -T backend npx prisma migrate deploy
   docker compose -f docker-compose.yml -f docker-compose.host-firebird.yml exec -T backend node prisma/seed.js
 else

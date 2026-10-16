@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEFAULT_APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 APP_DIR="${TRONSOFTOS_APP_DIR:-$DEFAULT_APP_DIR}"
+. "$SCRIPT_DIR/offline-support.sh"
 PACKAGE="${FIREBIRD_PACKAGE:-$APP_DIR/apps/tronfire/docker/firebird25/FirebirdCS-2.5.9.27139-0.amd64.tar.gz}"
 TEMPLATE="${FIREBIRD_TEMPLATE:-$APP_DIR/apps/tronfire/docker/firebird25/template.fdb}"
 STORAGE_ROOT="${STORAGE_ROOT:-/opt/tronfire-storage}"
@@ -27,6 +28,7 @@ if ! gzip -t "$PACKAGE" >/dev/null 2>&1; then
 fi
 
 apt_get() {
+  if [ "${TRONSOFTOS_OFFLINE:-false}" = true ]; then offline_apt_get "$@"; return; fi
   local attempt
   local max_attempts="${APT_LOCK_RETRY_ATTEMPTS:-36}"
   local delay_seconds="${APT_LOCK_RETRY_DELAY:-10}"

@@ -47,6 +47,10 @@ load_installer_secret_file() {
 }
 
 download_installer_secrets() {
+  if [ "${TRONSOFTOS_OFFLINE:-false}" = true ]; then
+    echo "Instalacao offline: credenciais de registro serao configuradas posteriormente."
+    return 0
+  fi
   local url="${TRONSOFTOS_INSTALLER_SECRETS_URL:-${INSTALLER_SECRETS_URL:-${TRONCOMANDA_CREDENTIALS_URL:-}}}"
   [ -n "$url" ] || return 0
 
@@ -213,7 +217,7 @@ new_uuid() {
 }
 
 detect_default_iface() {
-  ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}'
+  { ip route get 1.1.1.1 2>/dev/null || true; } | awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}'
 }
 
 detect_secondary_iface() {
@@ -669,7 +673,7 @@ if [ -z "$GHCR_TOKEN" ] && [ -n "$GHCR_TOKEN_ENC" ] && [ -n "$GHCR_TOKEN_KEY" ];
     GHCR_TOKEN=""
   fi
 fi
-if [ -n "$GHCR_USER" ] && [ -n "$GHCR_TOKEN" ]; then
+if [ "${TRONSOFTOS_OFFLINE:-false}" != true ] && [ -n "$GHCR_USER" ] && [ -n "$GHCR_TOKEN" ]; then
   mkdir -p "$APP_DIR/state/docker-config"
   chmod 700 "$APP_DIR/state/docker-config"
   GHCR_LOGIN_OUTPUT="$(printf '%s\n' "$GHCR_TOKEN" | DOCKER_CONFIG="$APP_DIR/state/docker-config" docker login "$GHCR_REGISTRY" -u "$GHCR_USER" --password-stdin 2>&1)" || GHCR_LOGIN_RC=$?

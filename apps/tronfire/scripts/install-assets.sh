@@ -28,6 +28,10 @@ download() {
     echo "[assets] $label ja existe: $dest"
     return
   fi
+  if [ "${TRONSOFTOS_OFFLINE:-false}" = true ]; then
+    echo "[assets] Arquivo obrigatorio ausente no pacote offline: $label" >&2
+    return 1
+  fi
   if [ -z "$url" ]; then
     echo "[assets] URL nao informada para $label" >&2
     return 1
