@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import crypto from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import { createRequire } from 'node:module';
 import { validateBackupFilename, releasePreparedRestore, claimPreparedRestore, restorePreparationMessage } from './restore-upload-policy.js';
 
 function database() {
@@ -75,7 +76,7 @@ function routes(overrides = {}) {
   let removed = 0;
   const context = {
     app: { post(path, options, handler) { handlers[path] = handler; } },
-    requireOperator() {}, prisma, crypto, pipeline,
+    async requireOperator() {}, prisma, crypto, pipeline,
     validateBackupFilename, releasePreparedRestore, restorePreparationMessage,
     audit: async () => {}, assertPrimaryWritable() {}, makeToken: () => 'new-token',
     fs: { createWriteStream: () => new Writable({ write(chunk, encoding, done) { done(); } }),
@@ -191,4 +192,34 @@ test('XHR rejects a non-JSON response instead of leaving the upload pending', as
   xhr.status = 502;
   xhr.onload();
   await assert.rejects(request.promise, /Resposta invalida/);
+});
+
+test('real multipart HTTP rejects .001 and frees its reservation while accepting GBK', { timeout: 5000 }, async t => {
+  const require = createRequire(import.meta.url);
+  let Fastify, multipart;
+  try { Fastify = require('fastify'); multipart = require('@fastify/multipart'); }
+  catch (error) {
+    if (error.code !== 'MODULE_NOT_FOUND') throw error;
+    t.skip('Requires backend dependencies; run inside the backend image');
+    return;
+  }
+  const app = Fastify();
+  t.after(() => app.close());
+  await app.register(multipart);
+  const { row } = routes({ app });
+  const upload = filename => app.inject({
+    method: 'POST', url: '/api/uploads/gbk',
+    headers: { 'content-type': 'multipart/form-data; boundary=backup-test', 'x-restore-operation-token': 'token1' },
+    payload: Buffer.from(`--backup-test\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: application/octet-stream\r\n\r\nbackup\r\n--backup-test--\r\n`)
+  });
+  const rejectedPrepare = await app.inject({ method: 'POST', url: '/api/restores/prepare', payload: { filename: 'backup.001', databaseId: 'db1' } });
+  assert.equal(rejectedPrepare.statusCode, 400);
+  const rejected = await upload('backup.001');
+  assert.equal(rejected.statusCode, 400);
+  assert.equal(row.operationStatus, 'IDLE');
+  Object.assign(row, { operationStatus: 'RUNNING', operationKind: 'RESTORE', operationToken: 'token1', operationMessage: restorePreparationMessage });
+  const accepted = await upload('backup.gbk');
+  assert.equal(accepted.statusCode, 200);
+  assert.equal(accepted.json().ok, true);
+  assert.equal(row.operationStatus, 'RUNNING');
 });
