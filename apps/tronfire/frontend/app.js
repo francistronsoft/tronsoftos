@@ -33,18 +33,21 @@ async function apiForm(path, form) {
   return res.json();
 }
 
-function apiFormProgress(path, form, onProgress) {
+function apiFormProgress(path, form, onProgress, operationToken) {
   const xhr = new XMLHttpRequest();
   const promise = new Promise((resolve, reject) => {
     xhr.open('POST', apiUrl(path));
     xhr.withCredentials = true;
+    if (operationToken) xhr.setRequestHeader('x-restore-operation-token', operationToken);
     xhr.upload.onprogress = event => {
       if (event.lengthComputable && onProgress) {
         onProgress(Math.round((event.loaded / event.total) * 100), event.loaded, event.total);
       }
     };
     xhr.onload = () => {
-      const payload = JSON.parse(xhr.responseText || '{}');
+      let payload;
+      try { payload = JSON.parse(xhr.responseText || '{}'); }
+      catch (_) { reject(new Error('Resposta invalida durante o upload')); return; }
       if (xhr.status >= 200 && xhr.status < 300) resolve(payload);
       else {
         const err = new Error(payload.error || 'Erro no upload');
@@ -1296,8 +1299,12 @@ async function uploads() {
       <div id="serverRestoreOut" class="mt-3"></div>
     </div></div>`;
   btnGbk.onclick = async () => {
+    let preparedOperationToken = null;
     try {
       if (!gbkFile.files[0]) throw new Error('Selecione um arquivo .GBK ou .FBK');
+      if (!/\.(gbk|fbk)(\.gz)?$/i.test(gbkFile.files[0].name)) {
+        throw new Error('Arquivo nao suportado. Envie .GBK, .FBK, .GBK.GZ ou .FBK.GZ. Arquivos .001 nao sao aceitos; use um backup completo em formato suportado.');
+      }
       const selected = restoreDb.options[restoreDb.selectedIndex];
       const ok = await appDialog({
         title: 'Confirmar restauracao manual',
@@ -1311,10 +1318,9 @@ async function uploads() {
         return;
       }
       btnGbk.disabled = true;
-      let preparedOperationToken = null;
       try {
         gbkOut.innerHTML = '<div class="alert alert-info mb-0"><strong>Preparando migração...</strong><br>Reservando o banco para impedir backup/sync enquanto o arquivo é enviado e restaurado.</div>';
-        const prepared = await api('/api/restores/prepare', { method: 'POST', body: JSON.stringify({ databaseId: restoreDb.value }) });
+        const prepared = await api('/api/restores/prepare', { method: 'POST', body: JSON.stringify({ databaseId: restoreDb.value, filename: gbkFile.files[0].name }) });
         preparedOperationToken = prepared.operation?.operationToken;
       } catch (err) {
         if (err.code === 'DATABASE_BACKUP_IN_PROGRESS' || err.code === 'DATABASE_OPERATION_IN_PROGRESS') {
@@ -1336,7 +1342,7 @@ async function uploads() {
         uploadProgress.style.width = `${percent}%`;
         uploadProgress.textContent = `${percent}%`;
         gbkOut.textContent = `Enviando arquivo... ${percent}%`;
-      });
+      }, preparedOperationToken);
       btnCancelUpload.onclick = () => uploadRequest.abort();
       let uploaded;
       try {
@@ -1386,6 +1392,8 @@ async function uploads() {
       gbkOut.textContent = err.message;
       btnGbk.disabled = false;
       btnCancelUpload.classList.add('hidden');
+    } finally {
+      await releaseRestorePrepare(preparedOperationToken);
     }
   };
   btnServerRestore.onclick = async () => {

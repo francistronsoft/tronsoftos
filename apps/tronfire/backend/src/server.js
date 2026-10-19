@@ -14,6 +14,7 @@ import { prisma } from './prisma.js';
 import { createSession, makeToken, requireAuth, requireAdmin, requireOperator, verifyPassword, hashPassword, sha256 } from './security.js';
 import { audit } from './audit.js';
 import { AsyncProbeCache } from './async-probe-cache.js';
+import { validateBackupFilename, releasePreparedRestore, claimPreparedRestore, restorePreparationMessage } from './restore-upload-policy.js';
 import { connectionSummaryFromSnapshot, connectionSnapshotMaxAgeMs } from './connection-snapshot.js';
 import { databaseCompanyIdentity, databaseDiagnostics, runPreflight } from './preflight.js';
 import { docker, dockerExec } from './shell.js';
@@ -1339,6 +1340,22 @@ async function acquireDatabaseOperationLock(req, db, operation, reply, options =
   if (databaseOperationActive(await clearExpiredDatabaseOperation(fresh))) {
     const current = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: db.id } });
     if (options.existingToken && current.operationToken === options.existingToken && current.operationKind === operation) {
+      if (operation === 'RESTORE') {
+        const claimed = await claimPreparedRestore(prisma, current, {
+          operationMessage: options.message,
+          operationExpiresAt: new Date(Date.now() + databaseOperationTtlMs)
+        });
+        if (!claimed) {
+          reply.code(409).send({ code: 'DATABASE_OPERATION_IN_PROGRESS', error: 'A reserva mudou ou a restauracao ja foi iniciada.', operation: databaseOperationPayload(current) });
+          return null;
+        }
+        const refreshed = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: current.id } });
+        return operationLockHandle(current, refreshed, {
+          token: refreshed.operationToken, operation, databaseId: refreshed.id,
+          databaseName: refreshed.name, startedAt: refreshed.operationStartedAt?.toISOString?.() || null,
+          expiresAt: refreshed.operationExpiresAt?.toISOString?.() || null
+        }, null);
+      }
       const refreshed = await prisma.managedDatabase.update({
         where: { id: current.id },
         data: {
@@ -2587,27 +2604,37 @@ app.get('/api/uploads', { preHandler: requireOperator }, async () => {
 });
 
 app.post('/api/uploads/gbk', { preHandler: requireOperator }, async (req) => {
-  const file = await req.file();
-  if (!file) throw new Error('Arquivo não enviado');
-  if (!/\.(gbk|fbk|gbk\.gz|fbk\.gz)$/i.test(file.filename)) throw new Error('Envie apenas .GBK, .FBK, .GBK.GZ ou .FBK.GZ');
-  const safeName = file.filename.replace(/[^a-zA-Z0-9_.-]/g, '_');
-  const dest = `/firebird/uploads/${Date.now()}_${safeName}`;
-  const hash = crypto.createHash('sha256');
-  file.file.on('data', chunk => hash.update(chunk));
-  await pipeline(file.file, fs.createWriteStream(dest));
-  const digest = hash.digest('hex');
-  await audit(req, 'GBK_UPLOADED', { details: { filename: file.filename, dest, sha256: digest } });
-  return { ok: true, path: dest, sha256: digest };
+  let dest;
+  try {
+    const file = await req.file();
+    if (!file) throw Object.assign(new Error('Arquivo nao enviado'), { statusCode: 400 });
+    validateBackupFilename(file.filename);
+    const safeName = file.filename.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    dest = `/firebird/uploads/${Date.now()}_${safeName}`;
+    const hash = crypto.createHash('sha256');
+    file.file.on('data', chunk => hash.update(chunk));
+    await pipeline(file.file, fs.createWriteStream(dest));
+    if (file.file.truncated) throw Object.assign(new Error('Arquivo excede o limite de upload'), { statusCode: 413 });
+    const digest = hash.digest('hex');
+    await audit(req, 'GBK_UPLOADED', { details: { filename: file.filename, dest, sha256: digest } });
+    return { ok: true, path: dest, sha256: digest };
+  } catch (err) {
+    if (dest) await fs.promises.unlink(dest).catch(() => {});
+    const released = await releasePreparedRestore(prisma, req.headers['x-restore-operation-token']);
+    if (released) await audit(req, 'RESTORE_PREPARE_RELEASED', { entityType: 'database', entityId: released.id, details: { reason: 'upload_failed' } });
+    throw err;
+  }
 });
 
 app.post('/api/restores/prepare', { preHandler: requireOperator }, async (req, reply) => {
   assertPrimaryWritable();
   const body = req.body || {};
+  if (body.filename !== undefined) validateBackupFilename(body.filename);
   const targetDb = await prisma.managedDatabase.findUniqueOrThrow({ where: { id: body.databaseId } });
   const token = makeToken();
   const lockHandle = await acquireDatabaseOperationLock(req, targetDb, 'RESTORE', reply, {
     token,
-    message: 'Restore/migracao manual aguardando upload/execucao'
+    message: restorePreparationMessage
   });
   if (reply.sent) return;
   await audit(req, 'RESTORE_PREPARED', { entityType: 'database', entityId: targetDb.id, details: { token } });
@@ -2618,19 +2645,8 @@ app.post('/api/restores/release', { preHandler: requireOperator }, async (req) =
   const body = req.body || {};
   const token = String(body.operationToken || '');
   if (!token) return { ok: true, released: false };
-  const db = await prisma.managedDatabase.findFirst({ where: { operationToken: token, operationKind: 'RESTORE' } });
+  const db = await releasePreparedRestore(prisma, token);
   if (!db) return { ok: true, released: false };
-  await prisma.managedDatabase.update({
-    where: { id: db.id },
-    data: {
-      operationStatus: 'IDLE',
-      operationKind: null,
-      operationToken: null,
-      operationStartedAt: null,
-      operationExpiresAt: null,
-      operationMessage: null
-    }
-  });
   await audit(req, 'RESTORE_PREPARE_RELEASED', { entityType: 'database', entityId: db.id, details: { token } });
   return { ok: true, released: true };
 });
