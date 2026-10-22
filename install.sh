@@ -15,6 +15,7 @@ fi
 
 APP_DIR="${TRONSOFTOS_APP_DIR:-$SCRIPT_DIR}"
 . "$SCRIPT_DIR/scripts/offline-support.sh"
+. "$SCRIPT_DIR/scripts/node-runtime.sh"
 USER_NAME="${TRONSOFTOS_USER:-tronsoftos}"
 GROUP_NAME="${TRONSOFTOS_GROUP:-tronsoftos}"
 TECHNICIAN_USER="${TRONSOFTOS_TECHNICIAN_USER:-tronsoft}"
@@ -324,8 +325,10 @@ fi
 echo "Instalando pacotes base..."
 apt_get update
 base_packages=(ca-certificates curl git gnupg openssl rsync openssh-client openssh-server keepalived rclone sudo)
-if [ "${TRONSOFTOS_OFFLINE:-false}" != true ]; then base_packages+=(nodejs npm); fi
+base_packages+=(xz-utils)
 apt_get install -y "${base_packages[@]}"
+ensure_node_runtime
+hash -r
 apt_get install -y samba samba-common-bin || echo "Aviso: samba nao foi instalado; compartilhamento via rede ficara indisponivel ate instalar o pacote samba." >&2
 install_docker
 configure_time_sync
