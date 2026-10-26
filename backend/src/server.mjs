@@ -13,6 +13,7 @@ import { promisify } from 'node:util';
 import { createFirebirdMonitorGate, firebirdScriptClass } from './firebird-monitor-gate.mjs';
 import { activatePairingRuntime } from './pairing-runtime.mjs';
 import { normalizeDns, sameDns } from './network-dns.mjs';
+import { isKdsPath, proxyKds } from './kds-proxy.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -2285,6 +2286,7 @@ function publicApp(app) {
     composeFiles: app.composeFiles || (app.composeFile ? [app.composeFile] : []),
     healthUrl: app.healthUrl,
     publicUrl: appAccessUrl(app),
+    branch: app.name === 'troncomanda' ? troncomandaBranch() : undefined,
     containers: app.containers || [],
     haAware: !!app.haAware
   };
@@ -4188,7 +4190,9 @@ async function appAction(app, action) {
 function troncomandaImageTagEnv(branch = 'main') {
   const tag = branch === 'dev' ? ':dev' : ':main';
   return {
-    API_IMAGE_TAG: tag,
+    API_IMAGE_TAG: branch === 'qa' ? ':qa' : tag,
+    TRONCOMANDA_BRANCH: branch,
+    TRONCOMANDA_GERENTE_API_URL: branch === 'qa' ? 'http://api:9000' : 'http://tsgerente-api:9002',
     QR_IMAGE_TAG: tag,
     CARDAPIO_IMAGE_TAG: tag,
     RETAGUARDA_API_IMAGE_TAG: tag,
@@ -4202,8 +4206,12 @@ function troncomandaImageTagEnv(branch = 'main') {
 function appActionSteps(app, action, options = {}) {
   if (!['up', 'stop', 'restart', 'pull'].includes(action)) throw new Error('invalid action');
   if (app.type !== 'compose') throw new Error('only compose apps are supported');
-  const branch = String(options.branch || 'main').trim();
-  if (app.name === 'troncomanda' && !['main', 'dev'].includes(branch)) throw new Error(`branch TronComanda invalida: ${branch}`);
+  const branch = String(options.branch || (app.name === 'troncomanda' ? troncomandaBranch() : 'main')).trim();
+  if (app.name === 'troncomanda' && !['main', 'dev', 'qa'].includes(branch)) throw new Error(`branch TronComanda invalida: ${branch}`);
+  if (app.name === 'troncomanda' && ['up', 'pull'].includes(action)
+    && normalizedProfiles(parseEnvFile(troncomandaEnvPath()).COMPOSE_PROFILES).has('kds') && branch !== 'qa') {
+    throw Object.assign(new Error('KDS Web requer a branch QA do TronComanda. Desative o KDS antes de selecionar outra branch.'), { statusCode: 409 });
+  }
   const env = app.name === 'troncomanda' && ['up', 'pull'].includes(action) ? troncomandaImageTagEnv(branch) : null;
   const composeFiles = app.composeFiles || (app.composeFile ? [app.composeFile] : []);
   if (!composeFiles.length) throw new Error('compose file not configured');
@@ -4246,6 +4254,11 @@ function troncomandaEnvPath() {
   return path.join(appRoot, 'apps/troncomanda/.env');
 }
 
+function troncomandaBranch() {
+  const env = parseEnvFile(troncomandaEnvPath());
+  return env.API_IMAGE_TAG === ':qa' ? 'qa' : env.API_IMAGE_TAG === ':dev' ? 'dev' : 'main';
+}
+
 function troncomandaStorageRoot(env = parseEnvFile(troncomandaEnvPath())) {
   return env.TRONCOMANDA_STORAGE_ROOT || '/opt/tronfire-storage/troncomanda';
 }
@@ -4276,6 +4289,7 @@ async function troncomandaSettings() {
     'troncomanda_qr'
   ]);
   return {
+    branch: troncomandaBranch(),
     tableRequired: String(qrEnv.TABLE_REQUERID ?? env.TRONCOMANDA_TABLE_REQUIRED ?? '0') === '1',
     cardapioLiteEnabled: profiles.has('cardapio'),
     retaguardaWebEnabled: profiles.has('retaguarda'),
@@ -4293,11 +4307,31 @@ function troncomandaComposeBaseArgs() {
 }
 
 async function runTroncomandaCompose(args, options = {}) {
-  return run('docker', [...troncomandaComposeBaseArgs(), ...args], {
-    timeout: options.timeout || 1000 * 60 * 10,
-    maxBuffer: options.maxBuffer || 1024 * 1024 * 10,
-    env: dockerEnv()
-  });
+  try {
+    return await run('docker', [...troncomandaComposeBaseArgs(), ...args], {
+      timeout: options.timeout || 1000 * 60 * 10,
+      maxBuffer: options.maxBuffer || 1024 * 1024 * 10,
+      env: dockerEnv()
+    });
+  } catch (error) {
+    const detail = String(error.stderr || error.message || '').slice(-4000).replace(/:\/\/[^\s/@]+:[^\s/@]+@/g, '://***@');
+    appendEvent('TRONCOMANDA_COMPOSE_FAILED', { args, exitCode: error.code, detail });
+    throw Object.assign(new Error('Falha ao instalar os containers do TronComanda. Confira o registro GHCR, a conexao e os eventos; depois tente novamente.'), { statusCode: 502 });
+  }
+}
+
+async function verifyTroncomandaKdsApi() {
+  const env = parseEnvFile(troncomandaEnvPath());
+  const port = Number(env.TRONCOMANDA_API_PORT || 9000);
+  for (let attempt = 0; attempt < 12; attempt++) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/openapi.json`, { signal: AbortSignal.timeout(5000) });
+      const payload = await response.json();
+      if (response.ok && payload.paths?.['/auth/user/token/'] && payload.paths?.['/kds/stations/']) return;
+    } catch { /* The newly created API may still be starting. */ }
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  throw Object.assign(new Error('API do TronComanda ainda indisponivel ou sem as rotas KDS. Verifique a imagem QA e tente novamente.'), { statusCode: 503 });
 }
 
 async function writeTroncomandaSettings(body = {}) {
@@ -4315,10 +4349,17 @@ async function writeTroncomandaSettings(body = {}) {
   if (next.gerenteWebEnabled) profiles.push('gerente');
   if (next.kdsWebEnabled) profiles.push('kds');
 
+  if (next.kdsWebEnabled) {
+    try { await ensureTroncomandaRegistryLogin(); }
+    catch { throw Object.assign(new Error('Nao foi possivel autenticar no GHCR. Configure o acesso ao registro antes de instalar o KDS.'), { statusCode: 503 }); }
+  }
+
   const envPath = troncomandaEnvPath();
   const env = parseEnvFile(envPath);
   const qrEnvPath = troncomandaQrEnvPath(env);
   await writeEnvValuesPrivileged(envPath, {
+    ...(next.kdsWebEnabled && current.branch !== 'qa' ? troncomandaImageTagEnv('qa') : {}),
+    ...(next.kdsWebEnabled ? { TRONCOMANDA_GERENTE_API_URL: 'http://api:9000' } : {}),
     COMPOSE_PROFILES: profiles.join(','),
     TRONCOMANDA_TABLE_REQUIRED: next.tableRequired ? '1' : '0'
   });
@@ -4338,7 +4379,12 @@ async function writeTroncomandaSettings(body = {}) {
   ];
   const outputs = [];
   if (enabledServices.length) {
-    outputs.push({ action: 'up', services: enabledServices, ...(await runTroncomandaCompose(['up', '-d', ...enabledServices])) });
+    if (next.kdsWebEnabled) {
+      outputs.push({ action: 'api-up', ...(await runTroncomandaCompose(['up', '-d', '--no-deps', 'api'])) });
+      await verifyTroncomandaKdsApi();
+    }
+    const installServices = next.kdsWebEnabled ? ['web', 'qr', ...enabledServices] : enabledServices;
+    outputs.push({ action: 'up', services: installServices, ...(await runTroncomandaCompose(['up', '-d', ...installServices])) });
   }
   if (disabledServices.length) {
     outputs.push({ action: 'stop', services: disabledServices, ...(await runTroncomandaCompose(['stop', ...disabledServices])) });
@@ -4523,7 +4569,7 @@ async function ensureTroncomandaRegistryLogin(job) {
   if (!credentials) {
     throw new Error('Credenciais GHCR nao encontradas para baixar imagens privadas do TronComanda');
   }
-  appendActionLog(job, 'stdout', `Autenticando no ${credentials.registry} para baixar imagens privadas...\n`);
+  if (job) appendActionLog(job, 'stdout', `Autenticando no ${credentials.registry} para baixar imagens privadas...\n`);
   await dockerRegistryLoginWithCredentials(credentials);
 }
 
@@ -4592,7 +4638,7 @@ function runActionStep(job, step) {
 function startAppAction(app, action, options = {}) {
   const steps = appActionSteps(app, action, options);
   const id = `${Date.now().toString(36)}-${Math.random().toString(16).slice(2)}`;
-  const branch = app.name === 'troncomanda' && ['up', 'pull'].includes(action) ? String(options.branch || 'main').trim() : null;
+  const branch = app.name === 'troncomanda' && ['up', 'pull'].includes(action) ? String(options.branch || troncomandaBranch()).trim() : null;
   const job = {
     id,
     app: app.name,
@@ -4612,6 +4658,7 @@ function startAppAction(app, action, options = {}) {
     try {
       if (app.name === 'troncomanda' && ['up', 'pull'].includes(action)) {
         await ensureTroncomandaRegistryLogin(job);
+        await writeEnvValuesPrivileged(troncomandaEnvPath(), troncomandaImageTagEnv(branch));
       }
     } catch (err) {
       job.status = 'failed';
@@ -4624,6 +4671,10 @@ function startAppAction(app, action, options = {}) {
     try {
       for (const step of steps) {
         await runActionStep(job, step);
+      }
+      if (app.name === 'troncomanda' && ['up', 'pull'].includes(action)
+        && normalizedProfiles(parseEnvFile(troncomandaEnvPath()).COMPOSE_PROFILES).has('kds')) {
+        await verifyTroncomandaKdsApi();
       }
       if (app.name === 'troncomanda' && ['up', 'pull'].includes(action)) {
         const access = await troncomandaAccessTest({ reconcile: false });
@@ -6506,6 +6557,10 @@ async function handleApi(req, reply, url) {
 async function handleHttpRequest(req, reply, options = {}) {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    if (isKdsPath(url.pathname)) {
+      const kdsPort = Number(parseEnvFile(troncomandaEnvPath()).KDS_WEB_PORT || 8012);
+      return proxyKds(req, reply, kdsPort);
+    }
     if (friendlyPath && url.pathname === friendlyPath) {
       reply.writeHead(302, { location: `${friendlyPath}/` });
       return reply.end();

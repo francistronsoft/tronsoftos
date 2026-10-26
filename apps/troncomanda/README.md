@@ -14,8 +14,19 @@ Servicos:
 
 O KDS pode ser habilitado em TronComanda > Ajustes dos containers > KDS Web.
 Nas instalacoes existentes ele permanece desligado ate essa ativacao. A porta
-do host pode ser personalizada com `KDS_WEB_PORT`; a imagem acompanha a branch
-`main`/`dev` escolhida nas acoes de instalacao/atualizacao do TronComanda.
+do host pode ser personalizada com `KDS_WEB_PORT`.
+Ao habilitar o KDS, o painel configura a branch `qa`: API `ts-restaurant:qa`
+compartilhada por TronComanda, KDS e Gerente, com frontends `main`. Apenas a API
+possui imagem QA publicada. A escolha e gravada no `.env` e reaparece no seletor.
+Enquanto o KDS estiver habilitado, instalacao/atualizacao para `main` ou `dev`
+e bloqueada para impedir o retorno a uma API sem as rotas KDS. Sem KDS,
+os contratos anteriores de `main` e `dev`, incluindo a API legada do Gerente,
+permanecem preservados.
+
+O caminho `http://IP/kds/` e encaminhado pelo host sem capturar os endpoints
+de autenticacao e gerenciamento do TronSoftOS. O caminho `/kds/` tambem esta
+disponivel na porta `8000`. A validacao de instalacao exige as rotas
+`/auth/user/token/` e `/kds/stations/` no OpenAPI da API compartilhada.
 O arquivo env/kds-web.env do Compose de origem informa somente a tag da imagem;
 na adaptacao essa tag fica em KDS_WEB_IMAGE_TAG no .env do stack.
 
