@@ -212,6 +212,40 @@ backup_and_reset_local_source_changes() {
   git -c "safe.directory=$APP_DIR" reset --hard HEAD
 }
 
+backup_conflicting_untracked_source() {
+  local incoming="$1" relative resolved root_real backup_dir
+  local -a conflicts=()
+  root_real="$(realpath -e "$APP_DIR")"
+  while IFS= read -r -d '' relative; do
+    if ! git -c "safe.directory=$APP_DIR" cat-file -e "$incoming:$relative" 2>/dev/null; then
+      continue
+    fi
+    case "$relative" in
+      backend/src/*|frontend/src/*|scripts/*|infra/*) ;;
+      *) echo "Arquivo local fora do codigo gerenciado conflita com a atualizacao: $relative. Preserve-o manualmente antes de continuar." >&2; return 74 ;;
+    esac
+    case "$relative" in
+      */.env|*/.env.*|*/installer-secrets.env) echo "Arquivo de configuracao protegido: $relative" >&2; return 74 ;;
+    esac
+    resolved="$(realpath -m "$APP_DIR/$relative")"
+    case "$resolved" in
+      "$root_real/"*) ;;
+      *) echo "Arquivo local resolve fora do diretorio da aplicacao: $relative" >&2; return 74 ;;
+    esac
+    conflicts+=("$relative")
+  done < <(git -c "safe.directory=$APP_DIR" ls-files --others --exclude-standard -z)
+  [ "${#conflicts[@]}" -gt 0 ] || return 0
+  backup_dir="$STORAGE_ROOT/update-backups/untracked-source-$(date +%Y%m%d%H%M%S)-$$"
+  mkdir -p "$backup_dir"
+  chmod 700 "$backup_dir"
+  for relative in "${conflicts[@]}"; do
+    mkdir -p "$backup_dir/$(dirname "$relative")"
+    mv -- "$APP_DIR/$relative" "$backup_dir/$relative"
+    printf '%s\n' "$relative" >> "$backup_dir/moved-source-files.txt"
+  done
+  log "arquivos locais de codigo incorporados ao repositorio foram preservados em $backup_dir"
+}
+
 case "$BRANCH" in
   main|dev)
     ;;
@@ -241,6 +275,7 @@ fi
 log "buscando branch ${BRANCH}"
 backup_and_reset_local_source_changes
 git -c "safe.directory=$APP_DIR" fetch "$REMOTE" "${BRANCH}:refs/remotes/${REMOTE}/${BRANCH}"
+backup_conflicting_untracked_source "${REMOTE}/${BRANCH}"
 if git -c "safe.directory=$APP_DIR" show-ref --verify --quiet "refs/heads/${BRANCH}"; then
   git -c "safe.directory=$APP_DIR" switch "$BRANCH"
 else
