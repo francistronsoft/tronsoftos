@@ -423,6 +423,9 @@ echo "Preparando TronFire..."
 if [ ! -f "$APP_DIR/apps/tronfire/.env" ]; then
   cp "$APP_DIR/apps/tronfire/.env.example" "$APP_DIR/apps/tronfire/.env"
 fi
+python3 "$APP_DIR/scripts/migrate-sweep-schedule.py" \
+  --env "$APP_DIR/apps/tronfire/.env" \
+  --backup-dir /opt/tronfire-storage/config-backups/sweep-schedule
 set_env_value "$APP_DIR/apps/tronfire/.env" "APP_ROOT" "$APP_DIR/apps/tronfire"
 set_env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_STATE_DIR" "$APP_DIR/state"
 set_env_value "$APP_DIR/apps/tronfire/.env" "TRONSOFTOS_CLUSTER_LOCK" "$APP_DIR/state/cluster-lock.json"
