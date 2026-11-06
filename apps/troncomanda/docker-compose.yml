@@ -2,7 +2,7 @@ name: troncomanda
 
 services:
   web:
-    image: nginx:1.27-alpine
+    image: nginx:1.30.6-alpine
     container_name: troncomanda_web
     restart: unless-stopped
     ports:
