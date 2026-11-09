@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Migrate only the former default; never execute a sweep or evaluate .env code."""
+"""Migrate former defaults; never execute a sweep or evaluate .env code."""
 import argparse
 import datetime
 import os
@@ -10,8 +10,8 @@ import stat
 import tempfile
 import uuid
 
-OLD = '0 6 * * 2,6'
-NEW = '0 6 * * 2,4,6'
+OLD = {'0 6 * * 2,6', '0 6 * * 2,4,6'}
+NEW = '0 6,15 * * *'
 KEY = 'TRONFIRE_FIREBIRD_SWEEP_CRON'
 ENABLED = 'TRONFIRE_FIREBIRD_SWEEP_ENABLED'
 PRESERVE = 'TRONFIRE_FIREBIRD_SWEEP_PRESERVE_SCHEDULE'
@@ -43,7 +43,7 @@ def migrate(env_path, backup_dir):
     if KEY not in assignments:
         return 'unset: new compose/worker default applies'
     index, current = assignments[KEY]
-    if ' '.join(current.split()) != OLD:
+    if ' '.join(current.split()) not in OLD:
         return 'custom or already migrated: preserved'
     ending = '\r\n' if lines[index].endswith('\r\n') else '\n' if lines[index].endswith('\n') else ''
     comment = re.search(r'\s+(#.*?)(?:\r?\n)?$', lines[index])
@@ -71,7 +71,7 @@ def migrate(env_path, backup_dir):
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
-    return 'migrated: Tuesday/Thursday/Saturday 06:00; backup ' + str(backup)
+    return 'migrated: daily 06:00/15:00; backup ' + str(backup)
 
 
 if __name__ == '__main__':

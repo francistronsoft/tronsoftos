@@ -256,6 +256,11 @@ TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW=03:00-06:00
 TRONFIRE_BACKUP_RESTORE_VALIDATION_WEEKDAY=monday
 ```
 
+O sweep automático usa por padrão `TRONFIRE_FIREBIRD_SWEEP_CRON="0 6,15 * * *"`:
+todos os dias às 06h e às 15h no fuso configurado. Se backup, validação ou HA
+estiverem em andamento, a execução é adiada pelas proteções existentes, sem
+reiniciar o Firebird nem encerrar sessões. Veja [migração do agendamento](../../docs/sweep-schedule-0142.md).
+
 Use `always` somente quando cada backup precisar ser restaurado e validado imediatamente. Se a validacao falhar, o TronFire abre alerta critico, coloca esse backup em quarentena e evita novas validacoes na mesma janela semanal. A saude do banco de producao continua sendo definida pelas sondagens diretas, sem pausar os backups simples por uma falha isolada do restore temporario. O envio para Google Drive/rclone e centralizado no TronSoftOS para manter uma unica configuracao por servidor.
 
 ### URL publica com Cloudflare Tunnel

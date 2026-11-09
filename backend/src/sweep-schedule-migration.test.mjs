@@ -24,7 +24,7 @@ test('old default migrates atomically with exact backup, permissions and idempot
   const f = fixture(t, original), metadata = fs.statSync(f.file);
   const result = f.execute();
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(fs.readFileSync(f.file, 'utf8'), original.replace('2,6', '2,4,6'));
+  assert.equal(fs.readFileSync(f.file, 'utf8'), original.replace('0 6 * * 2,6', '0 6,15 * * *'));
   const names = fs.readdirSync(f.backup);
   assert.equal(names.length, 1);
   assert.equal(fs.readFileSync(path.join(f.backup, names[0]), 'utf8'), original);
@@ -41,15 +41,26 @@ test('unquoted CRLF configuration migrates without damaging other fields or line
   const original = `FIREBIRD_PASSWORD='fixture only'\r\n${key}=0 6 * * 2,6\r\nCUSTOM=preserve`;
   const f = fixture(t, original);
   assert.equal(f.execute().status, 0);
-  assert.equal(fs.readFileSync(f.file, 'utf8'), original.replace(`${key}=0 6 * * 2,6`, `${key}="0 6 * * 2,4,6"`));
+  assert.equal(fs.readFileSync(f.file, 'utf8'), original.replace(`${key}=0 6 * * 2,6`, `${key}="0 6,15 * * *"`));
+});
+
+test('0.1.141 default migrates directly to both daily times, including Monday', { skip: !supported }, t => {
+  const original = `TZ=America/Manaus\n${key}="0 6 * * 2,4,6"\nTRONFIRE_BACKUP_RESTORE_VALIDATION_WEEKDAY=monday\nTRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW=03:00-06:00\n`;
+  const f = fixture(t, original);
+  assert.equal(f.execute().status, 0);
+  assert.equal(fs.readFileSync(f.file, 'utf8'), original.replace('0 6 * * 2,4,6', '0 6,15 * * *'));
+  assert.equal(f.execute().status, 0);
+  assert.equal(fs.readdirSync(f.backup).length, 1);
 });
 
 test('custom, disabled, preserved, unset and already migrated schedules remain byte-identical', { skip: !supported }, t => {
   for (const content of [
     `${key}="0 4 * * *"\n`,
-    `${key}="0 6 * * 2,4,6"\n`,
+    `${key}="0 6,15 * * *"\n`,
     `TRONFIRE_FIREBIRD_SWEEP_ENABLED=false\n${key}="0 6 * * 2,6"\n`,
     `TRONFIRE_FIREBIRD_SWEEP_PRESERVE_SCHEDULE=true\n${key}="0 6 * * 2,6"\n`,
+    `TRONFIRE_FIREBIRD_SWEEP_ENABLED=false\n${key}="0 6 * * 2,4,6"\n`,
+    `TRONFIRE_FIREBIRD_SWEEP_PRESERVE_SCHEDULE=true\n${key}="0 6 * * 2,4,6"\n`,
     'TZ=America/Sao_Paulo\n'
   ]) {
     const f = fixture(t, content);

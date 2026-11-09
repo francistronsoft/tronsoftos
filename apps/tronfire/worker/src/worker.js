@@ -38,7 +38,7 @@ const BACKUP_VALIDATION_MAX_AGE_HOURS = normalizePositiveMinutes(process.env.TRO
 const BACKUP_RESTORE_VALIDATION_WINDOW = String(process.env.TRONFIRE_BACKUP_RESTORE_VALIDATION_WINDOW || '03:00-06:00').trim();
 const BACKUP_RESTORE_VALIDATION_WEEKDAY = String(process.env.TRONFIRE_BACKUP_RESTORE_VALIDATION_WEEKDAY || 'monday').trim();
 const FIREBIRD_SWEEP_ENABLED = !['0', 'false', 'off', 'disabled', 'never'].includes(String(process.env.TRONFIRE_FIREBIRD_SWEEP_ENABLED || 'true').toLowerCase());
-const FIREBIRD_SWEEP_CRON = String(process.env.TRONFIRE_FIREBIRD_SWEEP_CRON || '0 6 * * 2,4,6').trim();
+const FIREBIRD_SWEEP_CRON = String(process.env.TRONFIRE_FIREBIRD_SWEEP_CRON || '0 6,15 * * *').trim();
 const FIREBIRD_SWEEP_TIMEZONE = String(process.env.TRONFIRE_FIREBIRD_SWEEP_TIMEZONE || process.env.TZ || 'America/Sao_Paulo').trim();
 const FIREBIRD_SWEEP_TIMEOUT_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_SWEEP_TIMEOUT_MINUTES, 180, 30, 720);
 const FIREBIRD_SWEEP_RETRY_MINUTES = normalizePositiveMinutes(process.env.TRONFIRE_FIREBIRD_SWEEP_RETRY_MINUTES, 10, 1, 120);
@@ -1734,15 +1734,15 @@ function scheduleSweepRetry(reason) {
   if (!FIREBIRD_SWEEP_ENABLED || !isPrimaryNode()) return;
   if (scheduledSweepRetryTimer || scheduledSweepRetryCount >= FIREBIRD_SWEEP_MAX_RETRIES) {
     if (scheduledSweepRetryCount >= FIREBIRD_SWEEP_MAX_RETRIES) {
-      console.warn(`[worker] sweep semanal sem nova tentativa: limite atingido apos ${reason}`);
+      console.warn(`[worker] sweep programado sem nova tentativa: limite atingido apos ${reason}`);
     }
     return;
   }
   scheduledSweepRetryCount += 1;
-  console.log(`[worker] sweep semanal sera retentado em ${FIREBIRD_SWEEP_RETRY_MINUTES} min (${reason}, tentativa ${scheduledSweepRetryCount}/${FIREBIRD_SWEEP_MAX_RETRIES})`);
+  console.log(`[worker] sweep programado sera retentado em ${FIREBIRD_SWEEP_RETRY_MINUTES} min (${reason}, tentativa ${scheduledSweepRetryCount}/${FIREBIRD_SWEEP_MAX_RETRIES})`);
   scheduledSweepRetryTimer = setTimeout(() => {
     scheduledSweepRetryTimer = null;
-    runScheduledSweeps('retry').catch((err) => console.error('[worker] sweep semanal retry erro', err.message));
+    runScheduledSweeps('retry').catch((err) => console.error('[worker] sweep programado retry erro', err.message));
   }, FIREBIRD_SWEEP_RETRY_MS);
 }
 
@@ -1750,16 +1750,16 @@ async function runScheduledSweeps(source = 'cron') {
   if (!FIREBIRD_SWEEP_ENABLED) return false;
   if (!isPrimaryNode()) return false;
   if (scheduledSweepRunning) {
-    console.log(`[worker] sweep semanal ignorado: rotina ja em execucao (${source})`);
+    console.log(`[worker] sweep programado ignorado: rotina ja em execucao (${source})`);
     return false;
   }
   if (backupRunning) {
-    console.log('[worker] sweep semanal adiado: backup em execucao');
+    console.log('[worker] sweep programado adiado: backup em execucao');
     scheduleSweepRetry('backup em execucao');
     return false;
   }
   if (haSyncActive()) {
-    console.log('[worker] sweep semanal adiado: HA sync em execucao');
+    console.log('[worker] sweep programado adiado: HA sync em execucao');
     scheduleSweepRetry('HA sync em execucao');
     return false;
   }
@@ -1772,7 +1772,7 @@ async function runScheduledSweeps(source = 'cron') {
     });
     for (const db of dbs) {
       if (haSyncActive()) {
-        console.log('[worker] sweep semanal interrompido antes de iniciar novo banco: HA sync em execucao');
+        console.log('[worker] sweep programado interrompido antes de iniciar novo banco: HA sync em execucao');
         postponed = true;
         break;
       }
@@ -1911,7 +1911,7 @@ cron.schedule('30 * * * * *', async () => {
 if (FIREBIRD_SWEEP_ENABLED) {
   if (cron.validate(FIREBIRD_SWEEP_CRON)) {
     cron.schedule(FIREBIRD_SWEEP_CRON, async () => {
-      console.log(`[worker] rotina de sweep Firebird semanal (${FIREBIRD_SWEEP_CRON}, ${FIREBIRD_SWEEP_TIMEZONE})`);
+      console.log(`[worker] rotina de sweep Firebird programado (${FIREBIRD_SWEEP_CRON}, ${FIREBIRD_SWEEP_TIMEZONE})`);
       await runScheduledSweepsFromCron();
     }, { timezone: FIREBIRD_SWEEP_TIMEZONE });
   } else {
