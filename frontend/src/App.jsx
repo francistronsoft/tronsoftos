@@ -596,8 +596,8 @@ function AppsView({ dashboard, onAction, actionPending, actionJob }) {
                   disabled={actionPending}
                   className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm outline-none focus:border-sky-400 focus:ring-2 focus:ring-sky-100 disabled:bg-slate-50 disabled:text-slate-500"
                 >
-                  <option value="main">main - estavel</option>
-                  <option value="qa">qa - API unificada / KDS</option>
+                  <option value="main">main - estavel / KDS</option>
+                  <option value="qa">qa - homologacao</option>
                   <option value="dev">dev - testes</option>
                 </select>
               </label>
@@ -2506,8 +2506,6 @@ function FailbackAssistant({ dashboard, onPrepared }) {
           className="grid gap-4"
           onSubmit={event => {
             event.preventDefault();
-            if (values.kdsWebEnabled && settings.branch !== 'qa'
-              && !window.confirm('Ativar KDS e alterar a API do TronComanda para QA?')) return;
             mutation.mutate(values);
           }}
         >

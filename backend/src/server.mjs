@@ -4192,7 +4192,7 @@ function troncomandaImageTagEnv(branch = 'main') {
   return {
     API_IMAGE_TAG: branch === 'qa' ? ':qa' : tag,
     TRONCOMANDA_BRANCH: branch,
-    TRONCOMANDA_GERENTE_API_URL: branch === 'qa' ? 'http://api:9000' : 'http://tsgerente-api:9002',
+    TRONCOMANDA_GERENTE_API_URL: branch === 'dev' ? 'http://tsgerente-api:9002' : 'http://api:9000',
     QR_IMAGE_TAG: tag,
     CARDAPIO_IMAGE_TAG: tag,
     RETAGUARDA_API_IMAGE_TAG: tag,
@@ -4208,10 +4208,6 @@ function appActionSteps(app, action, options = {}) {
   if (app.type !== 'compose') throw new Error('only compose apps are supported');
   const branch = String(options.branch || (app.name === 'troncomanda' ? troncomandaBranch() : 'main')).trim();
   if (app.name === 'troncomanda' && !['main', 'dev', 'qa'].includes(branch)) throw new Error(`branch TronComanda invalida: ${branch}`);
-  if (app.name === 'troncomanda' && ['up', 'pull'].includes(action)
-    && normalizedProfiles(parseEnvFile(troncomandaEnvPath()).COMPOSE_PROFILES).has('kds') && branch !== 'qa') {
-    throw Object.assign(new Error('KDS Web requer a branch QA do TronComanda. Desative o KDS antes de selecionar outra branch.'), { statusCode: 409 });
-  }
   const env = app.name === 'troncomanda' && ['up', 'pull'].includes(action) ? troncomandaImageTagEnv(branch) : null;
   const composeFiles = app.composeFiles || (app.composeFile ? [app.composeFile] : []);
   if (!composeFiles.length) throw new Error('compose file not configured');
@@ -4331,7 +4327,7 @@ async function verifyTroncomandaKdsApi() {
     } catch { /* The newly created API may still be starting. */ }
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
-  throw Object.assign(new Error('API do TronComanda ainda indisponivel ou sem as rotas KDS. Verifique a imagem QA e tente novamente.'), { statusCode: 503 });
+  throw Object.assign(new Error('API do TronComanda ainda indisponivel ou sem as rotas KDS. Verifique o suporte ao KDS na imagem da branch selecionada e tente novamente.'), { statusCode: 503 });
 }
 
 async function writeTroncomandaSettings(body = {}) {
@@ -4358,8 +4354,6 @@ async function writeTroncomandaSettings(body = {}) {
   const env = parseEnvFile(envPath);
   const qrEnvPath = troncomandaQrEnvPath(env);
   await writeEnvValuesPrivileged(envPath, {
-    ...(next.kdsWebEnabled && current.branch !== 'qa' ? troncomandaImageTagEnv('qa') : {}),
-    ...(next.kdsWebEnabled ? { TRONCOMANDA_GERENTE_API_URL: 'http://api:9000' } : {}),
     COMPOSE_PROFILES: profiles.join(','),
     TRONCOMANDA_TABLE_REQUIRED: next.tableRequired ? '1' : '0'
   });

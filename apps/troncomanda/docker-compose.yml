@@ -117,9 +117,10 @@ services:
       - "0.0.0.0:${TSGERENTE_WEB_PORT:-8011}:8011"
     environment:
       TZ: ${TZ:-America/Sao_Paulo}
-      NEXT_PUBLIC_API_BASE_URL: ${TRONCOMANDA_GERENTE_API_URL:-http://tsgerente-api:9002}
-      API_BASE_URL: ${TRONCOMANDA_GERENTE_API_URL:-http://tsgerente-api:9002}
+      NEXT_PUBLIC_API_BASE_URL: ${TRONCOMANDA_GERENTE_API_URL:-http://api:9000}
+      API_BASE_URL: ${TRONCOMANDA_GERENTE_API_URL:-http://api:9000}
     depends_on:
+      - api
       - tsgerente-api
 
   kds-web:

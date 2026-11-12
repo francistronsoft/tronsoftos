@@ -15,13 +15,18 @@ Servicos:
 O KDS pode ser habilitado em TronComanda > Ajustes dos containers > KDS Web.
 Nas instalacoes existentes ele permanece desligado ate essa ativacao. A porta
 do host pode ser personalizada com `KDS_WEB_PORT`.
-Ao habilitar o KDS, o painel configura a branch `qa`: API `ts-restaurant:qa`
-compartilhada por TronComanda, KDS e Gerente, com frontends `main`. Apenas a API
-possui imagem QA publicada. A escolha e gravada no `.env` e reaparece no seletor.
-Enquanto o KDS estiver habilitado, instalacao/atualizacao para `main` ou `dev`
-e bloqueada para impedir o retorno a uma API sem as rotas KDS. Sem KDS,
-os contratos anteriores de `main` e `dev`, incluindo a API legada do Gerente,
-permanecem preservados.
+O KDS funciona com a API `main` atual. Habilitar ou salvar o KDS preserva a
+branch, tags de imagem e URLs configuradas; nao troca automaticamente para QA.
+Instalacao/atualizacao valida as rotas de autenticacao e KDS na API em execucao,
+em vez de exigir uma branch fixa. Uma API sem essas rotas gera erro explicito,
+sem desabilitar o perfil KDS ou declarar sucesso.
+
+A escolha explicita de `main` ou `qa` no painel configura o Gerente para a API
+unificada `http://api:9000`; Retaguarda continua com sua API separada. QA usa
+API `:qa` e frontends `:main`. A branch `dev` preserva as tags e a API legada do
+Gerente anteriores. URLs personalizadas permanecem ao salvar ajustes; a escolha
+explicita de uma branch reaplica o padrao correspondente. A atualizacao do
+TronSoftOS nao recria esses aplicativos nem altera sua branch automaticamente.
 
 O caminho `http://IP/kds/` e encaminhado pelo host sem capturar os endpoints
 de autenticacao e gerenciamento do TronSoftOS. O caminho `/kds/` tambem esta
