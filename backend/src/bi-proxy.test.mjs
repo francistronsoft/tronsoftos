@@ -2,7 +2,20 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
-import { isBiPath, proxyBi } from './bi-proxy.mjs';
+import { isBiPath, proxyBi, biCookieForRequest } from './bi-proxy.mjs';
+
+test('BI session cookie supports LAN HTTP and preserves HTTPS and unrelated cookies', () => {
+  const cookie = 'token=test; HttpOnly; SameSite=Lax; Path=/bi; Max-Age=43200; Secure';
+  const req = { headers: { host: '192.168.1.105' }, socket: { remoteAddress: '::ffff:192.168.1.102' } };
+  assert.equal(biCookieForRequest(cookie, req), cookie.replace('; Secure', ''));
+  assert.equal(biCookieForRequest(cookie, { ...req, headers: { ...req.headers, 'x-forwarded-proto': 'https' } }), cookie);
+  assert.equal(biCookieForRequest(cookie, { ...req, socket: { ...req.socket, encrypted: true } }), cookie);
+  assert.equal(biCookieForRequest(cookie, { ...req, headers: { host: 'bi.example.com' } }), cookie);
+  assert.equal(biCookieForRequest(cookie, { ...req, socket: { remoteAddress: '203.0.113.2' } }), cookie);
+  assert.equal(biCookieForRequest(cookie.replace('token=', 'other='), req), cookie.replace('token=', 'other='));
+  assert.equal(biCookieForRequest(cookie.replace('Path=/bi', 'Path=/'), req), cookie.replace('Path=/bi', 'Path=/'));
+  assert.equal(biCookieForRequest('token=; Path=/bi; Max-Age=0; Secure; HttpOnly', req), 'token=; Path=/bi; Max-Age=0; HttpOnly');
+});
 
 test('BI routing does not capture other applications or similar prefixes', () => {
   for (const path of ['/bi', '/bi/', '/bi/login', '/bi/_next/static/main.js', '/bi/api/auth/login']) assert.equal(isBiPath(path), true);

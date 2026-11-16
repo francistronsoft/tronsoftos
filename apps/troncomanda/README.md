@@ -97,6 +97,11 @@ o container. Troque a senha inicial apos o primeiro acesso. Para desativar essa
 inicializacao, configure `BI_BOOTSTRAP_ENABLED=false`. A chave API deve ser gerada
 separadamente no BI; ela nao e copiada do banco fornecido como referencia.
 
+Para login local por HTTP, use `http://IP/bi` no proxy do host. Esse proxy adapta
+somente o cookie de sessao BI para HTTP em IP privado, mantendo HttpOnly,
+SameSite e Path. HTTPS e origens publicas preservam Secure. O acesso direto pela
+porta 8013 usa os cookies originais da imagem, que exigem HTTPS para login.
+
 Variaveis: `BI_IMAGE_TAG` (main por padrao), `BI_PORT` (8013),
 `BI_DATA_HOST_PATH` (vazio usa volume Docker) e `INGEST_API_KEY` (opcional, conforme
 configuracao do aplicativo). As variaveis do Compose de origem foram incorporadas
