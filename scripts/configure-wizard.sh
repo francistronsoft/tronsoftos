@@ -757,6 +757,11 @@ TSGERENTE_API_PORT=9002
 TSGERENTE_WEB_PORT=8011
 KDS_WEB_PORT=8012
 KDS_WEB_IMAGE_TAG=:main
+BI_PORT=8013
+BI_IMAGE_TAG=:main
+# Opcional: caminho absoluto para dados BI; vazio usa volume persistente Docker.
+BI_DATA_HOST_PATH=
+INGEST_API_KEY=
 TRONCOMANDA_BRANCH=main
 API_IMAGE_TAG=:main
 TRONCOMANDA_GERENTE_API_URL=http://api:9000
@@ -853,7 +858,8 @@ if [ "$FIREBIRD_MODE" = "host" ]; then
         "tsretaguarda-web",
         "tsgerente-api",
         "tsgerente-web",
-        "kds-web"
+        "kds-web",
+        "tron-bi"
       ],
       "haAware": false
     }
@@ -900,7 +906,8 @@ else
         "tsretaguarda-web",
         "tsgerente-api",
         "tsgerente-web",
-        "kds-web"
+        "kds-web",
+        "tron-bi"
       ],
       "haAware": false
     }

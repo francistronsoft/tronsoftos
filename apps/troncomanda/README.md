@@ -72,3 +72,37 @@ sudo cp .env.example .env
 sudo nano .env
 sudo docker compose up -d
 ```
+
+## Tron BI (opcional)
+
+Habilite **Tron BI** em **TronComanda > Ajustes dos containers**. O perfil `bi`
+fica desligado por padrao e nao e ativado automaticamente ao atualizar.
+A imagem e `ghcr.io/tronsoft-solucoes/tron-bi:main`; acesso direto:
+`http://IP:8013/bi/`. A raiz da porta nao e a pagina do aplicativo. `BI_PORT`
+permite trocar a porta publicada, caso ja esteja ocupada.
+
+O SQLite executa dentro do BI e usa `/app/data/tron-bi.db`, sem instalar um
+servico SQLite no Debian ou usar uma porta de banco. Por padrao, o volume Docker
+`troncomanda_bi_data` guarda os dados fora do ciclo de vida do container e preserva
+as permissoes fornecidas pela imagem. `BI_DATA_HOST_PATH` pode apontar para um
+caminho absoluto alternativo, com permissao de escrita para o usuario da imagem.
+Desabilitar o BI para somente o container; nao remove esse volume ou o banco.
+Backups Firebird existentes nao incluem automaticamente o volume SQLite do BI.
+
+Variaveis: `BI_IMAGE_TAG` (main por padrao), `BI_PORT` (8013),
+`BI_DATA_HOST_PATH` (vazio usa volume Docker) e `INGEST_API_KEY` (opcional, conforme
+configuracao do aplicativo). As variaveis do Compose de origem foram incorporadas
+no Compose gerenciado; nao e necessario criar um env/tron-bi.env separado.
+Ao escolher QA, a API permanece QA e o BI usa main, como os demais frontends.
+
+O proxy TronComanda encaminha `/bi` e `/bi/` preservando o basePath da imagem e
+os recursos `/bi/_next/`. Para Cloudflare, usar origem `http://web:80` com caminho
+`/bi`, ou `http://tron-bi:8013` na rede gerenciada. O host do painel encaminha `/bi` na porta80 para a porta BI configurada,
+sem capturar `/api` ou `/_next` das outras aplicacoes. Assim o endereco padrao
+e `http://IP/bi`, com acesso direto8013 e proxy8000 tambem disponiveis.
+Regras de hostname/caminho no painel Cloudflare continuam sob controle do operador.
+
+Ao mudar somente o botao BI, o backend cria/para somente `tron-bi`, sem recriar
+QR, API, Gerente, Retaguarda ou KDS. Clientes antigos que salvam outras opcoes
+preservam um BI ja habilitado. A listagem passa a incluir status/versao do BI em
+instalacoes existentes sem sobrescrever configuracoes personalizadas.

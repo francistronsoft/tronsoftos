@@ -14,6 +14,7 @@ import { createFirebirdMonitorGate, firebirdScriptClass } from './firebird-monit
 import { activatePairingRuntime } from './pairing-runtime.mjs';
 import { normalizeDns, sameDns } from './network-dns.mjs';
 import { isKdsPath, proxyKds } from './kds-proxy.mjs';
+import { isBiPath, proxyBi } from './bi-proxy.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -2273,7 +2274,7 @@ async function writeDriveSettings(body) {
 function managedConfig() {
   const config = readJson(configPath, readJson(fallbackConfigPath, { apps: [] }));
   return { ...config, apps: (config.apps || []).map(app => app.name === 'troncomanda'
-    ? { ...app, containers: [...new Set([...(app.containers || []), 'kds-web'])] }
+    ? { ...app, containers: [...new Set([...(app.containers || []), 'kds-web', 'tron-bi'])] }
     : app) };
 }
 
@@ -4199,7 +4200,8 @@ function troncomandaImageTagEnv(branch = 'main') {
     RETAGUARDA_WEB_IMAGE_TAG: tag,
     TSGERENTE_API_IMAGE_TAG: tag,
     TSGERENTE_WEB_IMAGE_TAG: tag,
-    KDS_WEB_IMAGE_TAG: tag
+    KDS_WEB_IMAGE_TAG: tag,
+    BI_IMAGE_TAG: tag
   };
 }
 
@@ -4243,7 +4245,8 @@ const TRONCOMANDA_OPTIONAL_SERVICES = {
   cardapio: ['cardapio-lite'],
   retaguarda: ['tsretaguarda-api', 'tsretaguarda-web'],
   gerente: ['tsgerente-api', 'tsgerente-web'],
-  kds: ['kds-web']
+  kds: ['kds-web'],
+  bi: ['tron-bi']
 };
 
 function troncomandaEnvPath() {
@@ -4282,6 +4285,7 @@ async function troncomandaSettings() {
     'tsgerente-api',
     'tsgerente-web',
     'kds-web',
+    'tron-bi',
     'troncomanda_qr'
   ]);
   return {
@@ -4291,6 +4295,7 @@ async function troncomandaSettings() {
     retaguardaWebEnabled: profiles.has('retaguarda'),
     gerenteWebEnabled: profiles.has('gerente'),
     kdsWebEnabled: profiles.has('kds'),
+    biEnabled: profiles.has('bi'),
     composeProfiles: Array.from(profiles),
     envPath: troncomandaEnvPath(),
     qrEnvPath,
@@ -4312,7 +4317,7 @@ async function runTroncomandaCompose(args, options = {}) {
   } catch (error) {
     const detail = String(error.stderr || error.message || '').slice(-4000).replace(/:\/\/[^\s/@]+:[^\s/@]+@/g, '://***@');
     appendEvent('TRONCOMANDA_COMPOSE_FAILED', { args, exitCode: error.code, detail });
-    throw Object.assign(new Error('Falha ao instalar os containers do TronComanda. Confira o registro GHCR, a conexao e os eventos; depois tente novamente.'), { statusCode: 502 });
+    throw Object.assign(new Error('Falha ao instalar os containers do TronComanda. Confira o registro GHCR, a conexao, conflitos de portas e os eventos; depois tente novamente.'), { statusCode: 502 });
   }
 }
 
@@ -4337,17 +4342,22 @@ async function writeTroncomandaSettings(body = {}) {
     cardapioLiteEnabled: body.cardapioLiteEnabled !== undefined ? !!body.cardapioLiteEnabled : current.cardapioLiteEnabled,
     retaguardaWebEnabled: body.retaguardaWebEnabled !== undefined ? !!body.retaguardaWebEnabled : current.retaguardaWebEnabled,
     gerenteWebEnabled: body.gerenteWebEnabled !== undefined ? !!body.gerenteWebEnabled : current.gerenteWebEnabled,
-    kdsWebEnabled: body.kdsWebEnabled !== undefined ? !!body.kdsWebEnabled : current.kdsWebEnabled
+    kdsWebEnabled: body.kdsWebEnabled !== undefined ? !!body.kdsWebEnabled : current.kdsWebEnabled,
+    biEnabled: body.biEnabled !== undefined ? !!body.biEnabled : current.biEnabled
   };
+  const biOnlyChange = body.biEnabled !== undefined
+    && ['tableRequired', 'cardapioLiteEnabled', 'retaguardaWebEnabled', 'gerenteWebEnabled', 'kdsWebEnabled']
+      .every(key => next[key] === current[key]);
   const profiles = [];
   if (next.cardapioLiteEnabled) profiles.push('cardapio');
   if (next.retaguardaWebEnabled) profiles.push('retaguarda');
   if (next.gerenteWebEnabled) profiles.push('gerente');
   if (next.kdsWebEnabled) profiles.push('kds');
+  if (next.biEnabled) profiles.push('bi');
 
-  if (next.kdsWebEnabled) {
+  if ((next.kdsWebEnabled && !biOnlyChange) || next.biEnabled) {
     try { await ensureTroncomandaRegistryLogin(); }
-    catch { throw Object.assign(new Error('Nao foi possivel autenticar no GHCR. Configure o acesso ao registro antes de instalar o KDS.'), { statusCode: 503 }); }
+    catch { throw Object.assign(new Error('Nao foi possivel autenticar no GHCR. Configure o acesso ao registro antes de instalar os containers opcionais.'), { statusCode: 503 }); }
   }
 
   const envPath = troncomandaEnvPath();
@@ -4359,31 +4369,37 @@ async function writeTroncomandaSettings(body = {}) {
   });
   await writeEnvValuesPrivileged(qrEnvPath, { TABLE_REQUERID: next.tableRequired ? '1' : '0' });
 
-  const enabledServices = [
+  let enabledServices = [
     ...(next.cardapioLiteEnabled ? TRONCOMANDA_OPTIONAL_SERVICES.cardapio : []),
     ...(next.retaguardaWebEnabled ? TRONCOMANDA_OPTIONAL_SERVICES.retaguarda : []),
     ...(next.gerenteWebEnabled ? TRONCOMANDA_OPTIONAL_SERVICES.gerente : []),
-    ...(next.kdsWebEnabled ? TRONCOMANDA_OPTIONAL_SERVICES.kds : [])
+    ...(next.kdsWebEnabled ? TRONCOMANDA_OPTIONAL_SERVICES.kds : []),
+    ...(next.biEnabled ? TRONCOMANDA_OPTIONAL_SERVICES.bi : [])
   ];
-  const disabledServices = [
+  let disabledServices = [
     ...(next.cardapioLiteEnabled ? [] : TRONCOMANDA_OPTIONAL_SERVICES.cardapio),
     ...(next.retaguardaWebEnabled ? [] : TRONCOMANDA_OPTIONAL_SERVICES.retaguarda),
     ...(next.gerenteWebEnabled ? [] : TRONCOMANDA_OPTIONAL_SERVICES.gerente),
-    ...(next.kdsWebEnabled ? [] : TRONCOMANDA_OPTIONAL_SERVICES.kds)
+    ...(next.kdsWebEnabled ? [] : TRONCOMANDA_OPTIONAL_SERVICES.kds),
+    ...(next.biEnabled ? [] : TRONCOMANDA_OPTIONAL_SERVICES.bi)
   ];
+  if (biOnlyChange) {
+    enabledServices = next.biEnabled ? TRONCOMANDA_OPTIONAL_SERVICES.bi : [];
+    disabledServices = next.biEnabled ? [] : TRONCOMANDA_OPTIONAL_SERVICES.bi;
+  }
   const outputs = [];
   if (enabledServices.length) {
-    if (next.kdsWebEnabled) {
+    if (next.kdsWebEnabled && !biOnlyChange) {
       outputs.push({ action: 'api-up', ...(await runTroncomandaCompose(['up', '-d', '--no-deps', 'api'])) });
       await verifyTroncomandaKdsApi();
     }
-    const installServices = next.kdsWebEnabled ? ['web', 'qr', ...enabledServices] : enabledServices;
-    outputs.push({ action: 'up', services: installServices, ...(await runTroncomandaCompose(['up', '-d', ...installServices])) });
+    const installServices = next.kdsWebEnabled && !biOnlyChange ? ['web', 'qr', ...enabledServices] : enabledServices;
+    outputs.push({ action: 'up', services: installServices, ...(await runTroncomandaCompose(['up', '-d', ...(biOnlyChange ? ['--no-deps'] : []), ...installServices])) });
   }
   if (disabledServices.length) {
     outputs.push({ action: 'stop', services: disabledServices, ...(await runTroncomandaCompose(['stop', ...disabledServices])) });
   }
-  outputs.push({ action: 'qr-refresh', services: ['troncomanda_qr'], ...(await runTroncomandaCompose(['up', '-d', '--force-recreate', 'qr'])) });
+  if (!biOnlyChange) outputs.push({ action: 'qr-refresh', services: ['troncomanda_qr'], ...(await runTroncomandaCompose(['up', '-d', '--force-recreate', 'qr'])) });
 
   const networks = await reconcileCloudflareManagedNetworks();
 
@@ -4437,6 +4453,10 @@ async function troncomandaAccessTest({ reconcile = true } = {}) {
   ];
   if (settings.retaguardaWebEnabled) {
     checks.push(await httpAccessCheck('retaguarda-local', 'Retaguarda interna', 'http://127.0.0.1:8010/'));
+  }
+  if (settings.biEnabled) {
+    const port = Number(parseEnvFile(troncomandaEnvPath()).BI_PORT || 8013);
+    checks.push(await httpAccessCheck('bi-local', 'Tron BI interno', `http://127.0.0.1:${port}/bi/`));
   }
   const result = {
     ok: checks.every(check => check.ok),
@@ -6551,6 +6571,10 @@ async function handleApi(req, reply, url) {
 async function handleHttpRequest(req, reply, options = {}) {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    if (isBiPath(url.pathname)) {
+      const biPort = Number(parseEnvFile(troncomandaEnvPath()).BI_PORT || 8013);
+      return proxyBi(req, reply, biPort);
+    }
     if (isKdsPath(url.pathname)) {
       const kdsPort = Number(parseEnvFile(troncomandaEnvPath()).KDS_WEB_PORT || 8012);
       return proxyKds(req, reply, kdsPort);

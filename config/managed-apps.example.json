@@ -40,7 +40,8 @@
         "tsretaguarda-web",
         "tsgerente-api",
         "tsgerente-web",
-        "kds-web"
+        "kds-web",
+        "tron-bi"
       ],
       "haAware": false
     }

@@ -141,6 +141,33 @@ services:
     environment:
       TZ: ${TZ:-America/Sao_Paulo}
 
+  tron-bi:
+    profiles:
+      - bi
+    image: ghcr.io/tronsoft-solucoes/tron-bi${BI_IMAGE_TAG:-:main}
+    container_name: tron-bi
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    ports:
+      - "0.0.0.0:${BI_PORT:-8013}:8013"
+    environment:
+      TZ: ${TZ:-America/Sao_Paulo}
+      NODE_ENV: production
+      PORT: "8013"
+      HOSTNAME: 0.0.0.0
+      SQLITE_PATH: /app/data/tron-bi.db
+      INGEST_API_KEY: ${INGEST_API_KEY:-}
+    volumes:
+      - ${BI_DATA_HOST_PATH:-bi_data}:/app/data
+
+volumes:
+  bi_data:
+    name: troncomanda_bi_data
+
 networks:
   default:
     name: troncomanda_net

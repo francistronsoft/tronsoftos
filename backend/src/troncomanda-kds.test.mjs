@@ -51,7 +51,8 @@ test('KDS disable stops its service while preserving other enabled profiles', as
   assert.equal(result.kdsWebEnabled, false);
   assert.equal(h.env.COMPOSE_PROFILES, 'cardapio,retaguarda,gerente');
   const stop = h.commands.find(call => call.args.includes('stop'));
-  assert.deepEqual(Array.from(stop.args.slice(-2)), ['stop', 'kds-web']);
+  assert.ok(stop.args.includes('kds-web'));
+  assert.ok(!stop.args.includes('tsretaguarda-web'));
 });
 
 test('missing registry access fails before changing any settings or containers', async () => {
@@ -218,8 +219,87 @@ test('existing managed configurations include KDS without losing custom settings
   const migrated = context.managedConfig();
   assert.equal(migrated.custom, true);
   assert.equal(migrated.apps[0].healthUrl, 'custom');
-  assert.deepEqual(Array.from(migrated.apps[0].containers), ['troncomanda_web', 'kds-web']);
+  assert.deepEqual(Array.from(migrated.apps[0].containers), ['troncomanda_web', 'kds-web', 'tron-bi']);
   assert.deepEqual(config.apps[0].containers, ['troncomanda_web']);
   config.apps[0].containers.push('kds-web');
   assert.equal(context.managedConfig().apps[0].containers.filter(name => name === 'kds-web').length, 1);
+});
+
+test('BI defaults disabled and is listed as an optional container', async () => {
+  const h = harness();
+  const settings = await h.context.troncomandaSettings();
+  assert.equal(settings.biEnabled, false);
+  assert.ok(settings.containers.some(c => c.name === 'tron-bi'));
+});
+
+test('enabling only BI preserves KDS, branch, secrets, images and other services without recreating them', async () => {
+  const h = harness('cardapio,retaguarda,gerente,kds');
+  Object.assign(h.env, { API_IMAGE_TAG: ':qa', BI_IMAGE_TAG: '@sha256:pinned', BI_DATA_HOST_PATH: '/custom/bi', INGEST_API_KEY: 'fixture-private' });
+  h.context.verifyTroncomandaKdsApi = async () => { throw new Error('unrelated API must not be touched'); };
+  const result = await h.context.writeTroncomandaSettings({ biEnabled: true });
+  assert.equal(result.biEnabled, true);
+  assert.equal(h.env.COMPOSE_PROFILES, 'cardapio,retaguarda,gerente,kds,bi');
+  assert.equal(h.env.API_IMAGE_TAG, ':qa');
+  assert.equal(h.env.BI_IMAGE_TAG, '@sha256:pinned');
+  assert.equal(h.env.INGEST_API_KEY, 'fixture-private');
+  assert.equal(h.env.BI_DATA_HOST_PATH, '/custom/bi');
+  assert.equal(h.commands.length, 1);
+  assert.deepEqual(Array.from(h.commands[0].args.slice(-4)), ['up', '-d', '--no-deps', 'tron-bi']);
+});
+
+test('disabling only BI stops its container without removing its data or touching other apps', async () => {
+  const h = harness('cardapio,retaguarda,gerente,kds,bi');
+  const result = await h.context.writeTroncomandaSettings({ biEnabled: false });
+  assert.equal(result.biEnabled, false);
+  assert.equal(h.env.COMPOSE_PROFILES, 'cardapio,retaguarda,gerente,kds');
+  assert.equal(h.commands.length, 1);
+  assert.deepEqual(Array.from(h.commands[0].args.slice(-2)), ['stop', 'tron-bi']);
+});
+
+test('old frontend payload keeps BI enabled and fixed image tags intact', async () => {
+  const h = harness('bi,kds');
+  h.env.BI_IMAGE_TAG = '@sha256:fixed';
+  await h.context.writeTroncomandaSettings({ tableRequired: false });
+  assert.equal(h.env.COMPOSE_PROFILES, 'kds,bi');
+  assert.equal(h.env.BI_IMAGE_TAG, '@sha256:fixed');
+});
+
+test('BI requires registry authentication before changing saved configuration', async () => {
+  const h = harness();
+  h.context.ensureTroncomandaRegistryLogin = async () => { throw new Error('registry unavailable'); };
+  await assert.rejects(h.context.writeTroncomandaSettings({ biEnabled: true }), /GHCR/);
+  assert.equal(h.writes.length, 0);
+  assert.equal(h.commands.length, 0);
+});
+
+test('BI tags follow explicit main/dev selection and QA uses published main frontend', () => {
+  const context = vm.createContext({});
+  vm.runInContext(extract('function troncomandaImageTagEnv(', 'function appActionSteps('), context);
+  for (const [branch, expected] of [['main', ':main'], ['dev', ':dev'], ['qa', ':main']]) assert.equal(context.troncomandaImageTagEnv(branch).BI_IMAGE_TAG, expected);
+});
+
+test('access test checks BI only when enabled, using its configured port', async () => {
+  for (const enabled of [false, true]) {
+    const calls = [];
+    const context = vm.createContext({
+      troncomandaSettings: async () => ({ biEnabled: enabled }),
+      reconcileCloudflareManagedNetworks: async () => ({}),
+      troncomandaNetworkCheck: async () => ({ ok: true }),
+      httpAccessCheck: async (id, label, url) => { calls.push(url); return { id, label, ok: true }; },
+      troncomandaEnvPath: () => 'env', parseEnvFile: () => ({ BI_PORT: '18013' }), appendEvent: () => {}
+    });
+    vm.runInContext(extract('async function troncomandaAccessTest(', 'function dockerEnv('), context);
+    const result = await context.troncomandaAccessTest();
+    assert.equal(result.ok, true);
+    assert.equal(calls.includes('http://127.0.0.1:18013/bi/'), enabled);
+  }
+});
+
+test('stopping BI does not require GHCR even with KDS enabled', async () => {
+  const h = harness('kds,bi');
+  h.context.ensureTroncomandaRegistryLogin = async () => { throw new Error('registry offline'); };
+  const result = await h.context.writeTroncomandaSettings({ biEnabled: false });
+  assert.equal(result.biEnabled, false);
+  assert.equal(h.commands.length, 1);
+  assert.deepEqual(Array.from(h.commands[0].args.slice(-2)), ['stop', 'tron-bi']);
 });
