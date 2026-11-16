@@ -161,8 +161,12 @@ services:
       HOSTNAME: 0.0.0.0
       SQLITE_PATH: /app/data/tron-bi.db
       INGEST_API_KEY: ${INGEST_API_KEY:-}
+      BI_BOOTSTRAP_ENABLED: ${BI_BOOTSTRAP_ENABLED:-true}
+    command: ["sh", "-c", "node /run/tronsoftos/bootstrap-tron-bi-user.cjs && exec node server.js"]
     volumes:
       - ${BI_DATA_HOST_PATH:-bi_data}:/app/data
+      - ./bi-bootstrap-user.json:/run/tronsoftos/bi-bootstrap-user.json:ro
+      - ../../scripts/bootstrap-tron-bi-user.cjs:/run/tronsoftos/bootstrap-tron-bi-user.cjs:ro
 
 volumes:
   bi_data:

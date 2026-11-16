@@ -89,6 +89,14 @@ caminho absoluto alternativo, com permissao de escrita para o usuario da imagem.
 Desabilitar o BI para somente o container; nao remove esse volume ou o banco.
 Backups Firebird existentes nao incluem automaticamente o volume SQLite do BI.
 
+Na primeira inicializacao, se a tabela USUARIO estiver vazia, o TronSystem cria
+`tronsoft` usando somente o hash scrypt da senha padrao autorizada. O repositorio
+nao contem a senha em texto, banco template, sessoes ou chave API compartilhada.
+Contas existentes (inclusive senhas alteradas) sao preservadas, mesmo ao recriar
+o container. Troque a senha inicial apos o primeiro acesso. Para desativar essa
+inicializacao, configure `BI_BOOTSTRAP_ENABLED=false`. A chave API deve ser gerada
+separadamente no BI; ela nao e copiada do banco fornecido como referencia.
+
 Variaveis: `BI_IMAGE_TAG` (main por padrao), `BI_PORT` (8013),
 `BI_DATA_HOST_PATH` (vazio usa volume Docker) e `INGEST_API_KEY` (opcional, conforme
 configuracao do aplicativo). As variaveis do Compose de origem foram incorporadas
