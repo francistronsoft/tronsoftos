@@ -759,6 +759,9 @@ KDS_WEB_PORT=8012
 KDS_WEB_IMAGE_TAG=:main
 BI_PORT=8013
 BI_IMAGE_TAG=:main
+BI_BOOTSTRAP_ENABLED=true
+BOOTSTRAP_USUARIO=
+BOOTSTRAP_SENHA=
 # Opcional: caminho absoluto para dados BI; vazio usa volume persistente Docker.
 BI_DATA_HOST_PATH=
 INGEST_API_KEY=

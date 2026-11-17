@@ -89,13 +89,19 @@ caminho absoluto alternativo, com permissao de escrita para o usuario da imagem.
 Desabilitar o BI para somente o container; nao remove esse volume ou o banco.
 Backups Firebird existentes nao incluem automaticamente o volume SQLite do BI.
 
-Na primeira inicializacao, se a tabela USUARIO estiver vazia, o TronSystem cria
-`tronsoft` usando somente o hash scrypt da senha padrao autorizada. O repositorio
-nao contem a senha em texto, banco template, sessoes ou chave API compartilhada.
-Contas existentes (inclusive senhas alteradas) sao preservadas, mesmo ao recriar
-o container. Troque a senha inicial apos o primeiro acesso. Para desativar essa
-inicializacao, configure `BI_BOOTSTRAP_ENABLED=false`. A chave API deve ser gerada
+Na primeira inicializacao, se a tabela USUARIO estiver vazia, a propria imagem
+BI cria o usuario pelas variaveis `BOOTSTRAP_USUARIO` e `BOOTSTRAP_SENHA`, conforme
+o Compose padrao do desenvolvedor. Valores omitidos/vazios usam `tronsoft` e a
+senha inicial padrao do BI; ambos podem ser personalizados no `.env` local antes
+de habilitar uma instalacao nova. O banco grava o hash calculado pelo aplicativo.
+Nao ha copia de banco template nem insercao direta de usuario pelo TronSystem.
+Contas existentes (inclusive senhas alteradas) sao preservadas ao recriar o
+container. Alterar essas variaveis nao redefine a senha de contas existentes.
+Troque a senha inicial apos o primeiro acesso. `BI_BOOTSTRAP_ENABLED=false`
+continua desativando a inicializacao automatica. A chave API deve ser gerada
 separadamente no BI; ela nao e copiada do banco fornecido como referencia.
+O caminho `/mnt/c/TRONSOFT/bi` do Compose Windows/WSL e representado no Debian
+pelo volume persistente acima; um caminho proprio usa `BI_DATA_HOST_PATH`.
 
 Para login local por HTTP, use `http://IP/bi` no proxy do host. Esse proxy adapta
 somente o cookie de sessao BI para HTTP em IP privado, mantendo HttpOnly,
